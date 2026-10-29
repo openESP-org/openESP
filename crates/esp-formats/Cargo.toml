@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 binrw = "0.15.2"
+rust-ini = { version = "0.21.3", features = ["inline-comment"] }
