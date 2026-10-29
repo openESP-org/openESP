@@ -1,4 +1,13 @@
+use encoding_rs::Encoding;
 use ini::{Ini, ParseError, ParseOption};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("invalid {0} text")]
+    Encoding(&'static str),
+    #[error(transparent)]
+    Syntax(#[from] ParseError),
+}
 
 #[derive(Debug)]
 pub struct Config {
@@ -6,6 +15,14 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn from_bytes(data: &[u8], fallback: &'static Encoding) -> Result<Self, Error> {
+        let (encoding, skip) = Encoding::for_bom(data).unwrap_or((fallback, 0));
+        let text = encoding
+            .decode_without_bom_handling_and_without_replacement(&data[skip..])
+            .ok_or(Error::Encoding(encoding.name()))?;
+        Ok(Self::parse(&text)?)
+    }
+
     pub fn parse(text: &str) -> Result<Self, ParseError> {
         let mut normalized = String::with_capacity(text.len());
         for line in text.trim_start_matches('\u{feff}').lines() {
@@ -51,6 +68,27 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_explicit_code_pages_and_bom_text() {
+        use encoding_rs::{UTF_8, WINDOWS_1252};
+        let cfg = Config::from_bytes(b"[fltsim.0]\ntitle=Caf\xe9", WINDOWS_1252).unwrap();
+        assert_eq!(cfg.values("fltsim.0", "title").next(), Some("Café"));
+        assert!(Config::from_bytes(b"[fltsim.0]\ntitle=Caf\xe9", UTF_8).is_err());
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(
+            "[models]\nnormal=模型"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        let cfg = Config::from_bytes(&utf16, WINDOWS_1252).unwrap();
+        assert_eq!(cfg.values("models", "normal").next(), Some("模型"));
+        utf16.pop();
+        assert!(matches!(
+            Config::from_bytes(&utf16, WINDOWS_1252),
+            Err(Error::Encoding(_))
+        ));
+    }
 
     #[test]
     fn reads_fsx_paths_comments_and_quoted_values() {
