@@ -3,6 +3,7 @@ use std::{fmt, io::Cursor};
 
 pub mod geometry;
 pub mod material;
+pub mod scene;
 
 #[derive(BinRead)]
 #[br(little)]
