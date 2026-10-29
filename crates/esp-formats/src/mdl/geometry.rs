@@ -40,7 +40,7 @@ pub fn transforms(data: &[u8]) -> Result<Vec<[f32; 16]>, Error> {
     records(data, 64)
 }
 
-fn records<T>(data: &[u8], size: usize) -> Result<Vec<T>, Error>
+pub(super) fn records<T>(data: &[u8], size: usize) -> Result<Vec<T>, Error>
 where
     T: for<'a> BinRead<Args<'a> = ()>,
 {

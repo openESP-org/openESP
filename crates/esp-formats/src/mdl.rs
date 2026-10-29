@@ -2,6 +2,7 @@ use binrw::BinRead;
 use std::{fmt, io::Cursor};
 
 pub mod geometry;
+pub mod material;
 
 #[derive(BinRead)]
 #[br(little)]
