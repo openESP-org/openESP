@@ -23,6 +23,7 @@ pub struct ModelData<'a> {
     pub lods: Vec<Lod<'a>>,
     pub platforms: Vec<attachment::Platform<'a>>,
     pub attachpoints: Vec<attachment::AttachPoint<'a>>,
+    pub attached_objects: Vec<attachment::AttachedObject<'a>>,
     pub unknown_platform_sections: Vec<Chunk<'a>>,
     pub unknown_attachpoint_sections: Vec<Chunk<'a>>,
     pub unknown: Vec<Chunk<'a>>,
@@ -98,6 +99,7 @@ impl<'a> ModelData<'a> {
                     | b"ANIB"
                     | b"VISL"
                     | b"SGVL"
+                    | b"ATTO"
             );
             if known && !seen.insert(child.id) {
                 return Err(Error::DuplicateSection(child.id));
@@ -114,6 +116,7 @@ impl<'a> ModelData<'a> {
                 b"ANIB" => result.animations = Some(animation::AnimationBlock::parse(child.data)?),
                 b"VISL" => result.visibility = visibility::conditions(child.data)?,
                 b"SGVL" => result.visibility_links = scene::visibility_links(child.data)?,
+                b"ATTO" => result.attached_objects = attachment::attached_objects(child.data)?,
                 b"VERB" => {
                     for buffer in parse_chunks(child.data)? {
                         match &buffer.id {
