@@ -1,6 +1,17 @@
 use encoding_rs::Encoding;
 use ini::{Ini, ParseError, ParseOption};
 
+pub mod model;
+pub mod texture;
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ValueError {
+    #[error("duplicate [{section}] {key}")]
+    Duplicate { section: String, key: String },
+    #[error("invalid texture fallback index {0}")]
+    FallbackIndex(String),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid {0} text")]
@@ -15,6 +26,23 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn value(&self, section: &str, key: &str) -> Result<Option<&str>, ValueError> {
+        let mut matches = self
+            .sections
+            .iter()
+            .filter(|(name, _)| name.is_some_and(|name| name.eq_ignore_ascii_case(section)))
+            .flat_map(|(_, properties)| properties.iter())
+            .filter_map(|(name, value)| name.eq_ignore_ascii_case(key).then_some(value));
+        let value = matches.next();
+        if matches.next().is_some() {
+            return Err(ValueError::Duplicate {
+                section: section.into(),
+                key: key.into(),
+            });
+        }
+        Ok(value)
+    }
+
     pub fn from_bytes(data: &[u8], fallback: &'static Encoding) -> Result<Self, Error> {
         let (encoding, skip) = Encoding::for_bom(data).unwrap_or((fallback, 0));
         let text = encoding
