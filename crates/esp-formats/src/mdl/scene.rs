@@ -25,8 +25,8 @@ pub fn animation_map(data: &[u8]) -> Result<Vec<AnimationMap>, Error> {
     records(data, 8)
 }
 
-pub fn animation_links(data: &[u8]) -> Result<Vec<i32>, Error> {
-    records(data, 4)
+pub fn animation_links(data: &[u8]) -> Result<Vec<i16>, Error> {
+    records(data, 2)
 }
 
 pub fn bone_references(data: &[u8]) -> Result<Vec<i16>, Error> {
@@ -76,10 +76,21 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(animation_links(&bytes).unwrap(), [2, 15, 99, -1]);
+        assert_eq!(animation_links(&[255, 255, 2, 0]).unwrap(), [-1, 2]);
         assert_eq!(bone_references(&[255, 255, 2, 0]).unwrap(), [-1, 2]);
         assert_eq!(animation_links(&bytes[..3]), Err(Error::InvalidSize));
         assert_eq!(bone_references(&[0]), Err(Error::InvalidSize));
         assert!(nodes(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_one_animation_link_per_node_with_an_odd_node_count() {
+        let mut bytes = vec![255; 710];
+        bytes[708..].copy_from_slice(&123i16.to_le_bytes());
+        let links = animation_links(&bytes).unwrap();
+        assert_eq!(links.len(), 355);
+        assert_eq!(links[0], -1);
+        assert_eq!(links[354], 123);
+        assert_eq!(animation_links(&bytes[..709]), Err(Error::InvalidSize));
     }
 }

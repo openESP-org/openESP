@@ -13,7 +13,7 @@ pub struct ModelData<'a> {
     pub transforms: Vec<[f32; 16]>,
     pub nodes: Vec<scene::Node>,
     pub animation_map: Vec<scene::AnimationMap>,
-    pub animation_links: Vec<i32>,
+    pub animation_links: Vec<i16>,
     pub bone_references: Vec<i16>,
     pub lods: Vec<Lod<'a>>,
     pub platforms: Vec<attachment::Platform<'a>>,
