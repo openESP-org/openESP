@@ -46,6 +46,28 @@ pub struct BoundingBox {
 }
 
 impl Chunk<'_> {
+    pub fn children(&self) -> Result<Option<Vec<Chunk<'_>>>, Error> {
+        let start = match &self.id {
+            b"MDLD" | b"SHAM" | b"VERB" | b"LODT" | b"PLAL" | b"REFL" => 0,
+            b"LODE" => 4,
+            _ => return Ok(None),
+        };
+        let data = self
+            .data
+            .get(start..)
+            .ok_or(Error::Truncated { offset: 0 })?;
+        parse_chunks(data).map(Some)
+    }
+
+    pub fn lod(&self) -> Result<Option<i32>, Error> {
+        if &self.id != b"LODE" {
+            return Ok(None);
+        }
+        i32::read_le(&mut Cursor::new(self.data))
+            .map(Some)
+            .map_err(|_| Error::Truncated { offset: 0 })
+    }
+
     pub fn bounding_box(&self) -> Result<Option<BoundingBox>, Error> {
         if &self.id != b"BBOX" {
             return Ok(None);
@@ -94,27 +116,7 @@ impl<'a> Model<'a> {
         if &form != b"MDLX" {
             return Err(Error::UnsupportedFormat(form));
         }
-        let mut offset = 12;
-        let mut chunks = Vec::new();
-        while offset < end {
-            let remaining = &data[offset..end];
-            let chunk = Header::read(&mut Cursor::new(remaining))
-                .map_err(|_| Error::Truncated { offset })?;
-            let length = usize::try_from(chunk.size).map_err(|_| Error::InvalidSize)?;
-            let start = offset + 8;
-            let chunk_end = start.checked_add(length).ok_or(Error::InvalidSize)?;
-            let next = chunk_end
-                .checked_add(length % 2)
-                .ok_or(Error::InvalidSize)?;
-            if next > end {
-                return Err(Error::Truncated { offset: start });
-            }
-            chunks.push(Chunk {
-                id: chunk.id,
-                data: &data[start..chunk_end],
-            });
-            offset = next;
-        }
+        let chunks = parse_chunks(&body[4..])?;
         Ok(Self {
             chunks,
             trailing_data: &data[end..],
@@ -122,9 +124,73 @@ impl<'a> Model<'a> {
     }
 }
 
+fn parse_chunks(data: &[u8]) -> Result<Vec<Chunk<'_>>, Error> {
+    let end = data.len();
+    let mut offset = 0;
+    let mut chunks = Vec::new();
+    while offset < end {
+        let remaining = &data[offset..end];
+        let chunk =
+            Header::read(&mut Cursor::new(remaining)).map_err(|_| Error::Truncated { offset })?;
+        let length = usize::try_from(chunk.size).map_err(|_| Error::InvalidSize)?;
+        let start = offset + 8;
+        let chunk_end = start.checked_add(length).ok_or(Error::InvalidSize)?;
+        let next = chunk_end
+            .checked_add(length % 2)
+            .ok_or(Error::InvalidSize)?;
+        if next > end {
+            return Err(Error::Truncated { offset: start });
+        }
+        chunks.push(Chunk {
+            id: chunk.id,
+            data: &data[start..chunk_end],
+        });
+        offset = next;
+    }
+    Ok(chunks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_nested_lods_and_preserves_unknown_children() {
+        let chunk = Chunk {
+            id: *b"LODE",
+            data: b"\x64\0\0\0WHAT\0\0\0\0",
+        };
+        assert_eq!(chunk.lod().unwrap(), Some(100));
+        let children = chunk.children().unwrap().unwrap();
+        assert_eq!(children[0].id, *b"WHAT");
+        assert!(children[0].children().unwrap().is_none());
+        assert!(
+            Chunk {
+                id: *b"LODE",
+                data: &[0; 3]
+            }
+            .children()
+            .is_err()
+        );
+        assert!(
+            Chunk {
+                id: *b"VERB",
+                data: b"VERT\xff\xff\xff\xff"
+            }
+            .children()
+            .is_err()
+        );
+        assert!(
+            Chunk {
+                id: *b"MDLD",
+                data: &[]
+            }
+            .children()
+            .unwrap()
+            .unwrap()
+            .is_empty()
+        );
+    }
 
     #[test]
     fn reads_chunks_and_padding() {
