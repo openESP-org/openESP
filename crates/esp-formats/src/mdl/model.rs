@@ -1,4 +1,4 @@
-use super::{BoundingBox, Chunk, Error, Model, data::ModelData};
+use super::{BoundingBox, Chunk, Error, Model, crash::CrashTree, data::ModelData};
 use binrw::BinRead;
 use std::{collections::HashSet, io::Cursor};
 use uuid::Uuid;
@@ -17,6 +17,7 @@ pub struct DecodedModel<'a> {
     pub name: Option<&'a [u8]>,
     pub bounds: Option<BoundingBox>,
     pub radius: Option<f32>,
+    pub crash: Option<CrashTree<'a>>,
     pub exterior: Option<ModelData<'a>>,
     pub shadow: Option<ModelData<'a>>,
     pub unknown: Vec<Chunk<'a>>,
@@ -29,7 +30,7 @@ impl<'a> Model<'a> {
         for chunk in &self.chunks {
             let known = matches!(
                 &chunk.id,
-                b"MDLH" | b"MDLG" | b"MDLN" | b"BBOX" | b"RADI" | b"MDLD" | b"SHAM"
+                b"MDLH" | b"MDLG" | b"MDLN" | b"BBOX" | b"RADI" | b"MDLD" | b"SHAM" | b"CRAS"
             );
             if known && !seen.insert(chunk.id) {
                 return Err(Error::DuplicateSection(chunk.id));
@@ -61,6 +62,7 @@ impl<'a> Model<'a> {
                 }
                 b"BBOX" => model.bounds = chunk.bounding_box()?,
                 b"RADI" => model.radius = chunk.radius()?,
+                b"CRAS" => model.crash = Some(CrashTree::parse(chunk.data)?),
                 b"MDLD" => model.exterior = Some(ModelData::parse(chunk)?),
                 b"SHAM" => model.shadow = Some(ModelData::parse(chunk)?),
                 _ => model.unknown.push(Chunk {

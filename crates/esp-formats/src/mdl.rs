@@ -3,6 +3,7 @@ use std::{fmt, io::Cursor};
 
 pub mod animation;
 pub mod attachment;
+pub mod crash;
 pub mod data;
 pub mod geometry;
 pub mod material;
