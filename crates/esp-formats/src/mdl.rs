@@ -1,6 +1,7 @@
 use binrw::BinRead;
 use std::{fmt, io::Cursor};
 
+pub mod animation;
 pub mod attachment;
 pub mod data;
 pub mod geometry;
