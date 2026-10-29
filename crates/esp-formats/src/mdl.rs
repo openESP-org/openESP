@@ -5,6 +5,7 @@ pub mod attachment;
 pub mod data;
 pub mod geometry;
 pub mod material;
+pub mod model;
 pub mod scene;
 
 #[derive(BinRead)]

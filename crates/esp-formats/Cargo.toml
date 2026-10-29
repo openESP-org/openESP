@@ -8,3 +8,4 @@ binrw = "0.15.2"
 encoding_rs = "0.8.42"
 rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 thiserror = "2.0.21"
+uuid = "1.29.0"
