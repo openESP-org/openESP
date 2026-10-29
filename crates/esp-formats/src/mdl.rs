@@ -1,6 +1,8 @@
 use binrw::BinRead;
 use std::{fmt, io::Cursor};
 
+pub mod geometry;
+
 #[derive(BinRead)]
 #[br(little)]
 struct Header {
