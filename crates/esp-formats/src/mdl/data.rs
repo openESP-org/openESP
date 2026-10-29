@@ -47,6 +47,20 @@ pub struct PartGeometry<'a> {
 }
 
 impl<'a> ModelData<'a> {
+    pub fn node_transform(&self, index: i32) -> Result<&[f32; 16], Error> {
+        let node = reference(&self.nodes, index, "scene node")?;
+        let offset = node.animation_map_offset;
+        if offset < 0 || offset % 8 != 0 {
+            return Err(Error::InvalidReference {
+                field: "animation map byte offset",
+                value: i64::from(offset),
+                available: self.animation_map.len().saturating_mul(8),
+            });
+        }
+        let map = reference(&self.animation_map, i32::from(offset / 8), "animation map")?;
+        reference(&self.transforms, map.transform, "transform")
+    }
+
     pub fn part_geometry(&self, part: &geometry::Part) -> Result<PartGeometry<'_>, Error> {
         let buffer = reference(&self.vertices, part.vertex_buffer, "vertex buffer")?;
         let vertices = range(buffer, part.vertex_offset, part.vertex_count, "vertices")?;
@@ -341,5 +355,47 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn resolves_animation_map_byte_offsets() {
+        let mut data = ModelData {
+            nodes: vec![scene::Node {
+                child: -1,
+                peer: -1,
+                animation_map_offset: 8,
+                unknown: 0,
+            }],
+            animation_map: vec![
+                scene::AnimationMap {
+                    transformation_type: 1,
+                    transform: 0,
+                },
+                scene::AnimationMap {
+                    transformation_type: 2,
+                    transform: 1,
+                },
+            ],
+            transforms: vec![[0.0; 16], [2.0; 16]],
+            ..ModelData::default()
+        };
+        assert_eq!(data.node_transform(0).unwrap(), &[2.0; 16]);
+        for offset in [-1, 1, 16] {
+            data.nodes[0].animation_map_offset = offset;
+            assert!(matches!(
+                data.node_transform(0),
+                Err(Error::InvalidReference { .. })
+            ));
+        }
+        data.nodes[0].animation_map_offset = 8;
+        data.animation_map[1].transform = 2;
+        assert!(matches!(
+            data.node_transform(0),
+            Err(Error::InvalidReference {
+                field: "transform",
+                ..
+            })
+        ));
+        assert!(data.node_transform(-1).is_err());
     }
 }

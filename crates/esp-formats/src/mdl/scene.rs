@@ -6,7 +6,7 @@ use binrw::BinRead;
 pub struct Node {
     pub child: i16,
     pub peer: i16,
-    pub animation_map: i16,
+    pub animation_map_offset: i16,
     pub unknown: i16,
 }
 
@@ -52,7 +52,7 @@ mod tests {
             [Node {
                 child: 1,
                 peer: -1,
-                animation_map: 2,
+                animation_map_offset: 2,
                 unknown: 123
             }]
         );

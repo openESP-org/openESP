@@ -14,6 +14,12 @@ fn decodes_external_models() {
             .decode()
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for data in [decoded.exterior, decoded.shadow].into_iter().flatten() {
+            for index in 0..data.nodes.len() {
+                data.node_transform(index.try_into().unwrap())
+                    .unwrap_or_else(|error| {
+                        panic!("{} scene node {index}: {error}", path.display())
+                    });
+            }
             for lod in &data.lods {
                 for part in &lod.parts {
                     data.part_geometry(part).unwrap_or_else(|error| {
