@@ -33,6 +33,10 @@ pub fn bone_references(data: &[u8]) -> Result<Vec<i16>, Error> {
     records(data, 2)
 }
 
+pub fn visibility_links(data: &[u8]) -> Result<Vec<i16>, Error> {
+    records(data, 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

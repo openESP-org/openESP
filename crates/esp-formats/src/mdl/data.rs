@@ -1,4 +1,6 @@
-use super::{Chunk, Error, animation, attachment, geometry, material, parse_chunks, scene};
+use super::{
+    Chunk, Error, animation, attachment, geometry, material, parse_chunks, scene, visibility,
+};
 use std::collections::HashSet;
 
 #[derive(Debug, Default)]
@@ -15,6 +17,8 @@ pub struct ModelData<'a> {
     pub animation_map: Vec<scene::AnimationMap>,
     pub animation_links: Vec<i16>,
     pub animations: Option<animation::AnimationBlock<'a>>,
+    pub visibility: Vec<visibility::Condition<'a>>,
+    pub visibility_links: Vec<i16>,
     pub bone_references: Vec<i16>,
     pub lods: Vec<Lod<'a>>,
     pub platforms: Vec<attachment::Platform<'a>>,
@@ -92,6 +96,8 @@ impl<'a> ModelData<'a> {
                     | b"PLAL"
                     | b"REFL"
                     | b"ANIB"
+                    | b"VISL"
+                    | b"SGVL"
             );
             if known && !seen.insert(child.id) {
                 return Err(Error::DuplicateSection(child.id));
@@ -106,6 +112,8 @@ impl<'a> ModelData<'a> {
                 b"SGAL" => result.animation_links = scene::animation_links(child.data)?,
                 b"SGBR" => result.bone_references = scene::bone_references(child.data)?,
                 b"ANIB" => result.animations = Some(animation::AnimationBlock::parse(child.data)?),
+                b"VISL" => result.visibility = visibility::conditions(child.data)?,
+                b"SGVL" => result.visibility_links = scene::visibility_links(child.data)?,
                 b"VERB" => {
                     for buffer in parse_chunks(child.data)? {
                         match &buffer.id {

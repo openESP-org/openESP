@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod material;
 pub mod model;
 pub mod scene;
+pub mod visibility;
 
 #[derive(BinRead)]
 #[br(little)]
