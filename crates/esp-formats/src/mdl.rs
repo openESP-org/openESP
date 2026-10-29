@@ -141,17 +141,15 @@ pub(super) fn parse_chunks(data: &[u8]) -> Result<Vec<Chunk<'_>>, Error> {
         let length = usize::try_from(chunk.size).map_err(|_| Error::InvalidSize)?;
         let start = offset + 8;
         let chunk_end = start.checked_add(length).ok_or(Error::InvalidSize)?;
-        let next = chunk_end
-            .checked_add(length % 2)
-            .ok_or(Error::InvalidSize)?;
-        if next > end {
+        // FSX MDL sections do not use RIFF's implicit word padding.
+        if chunk_end > end {
             return Err(Error::Truncated { offset: start });
         }
         chunks.push(Chunk {
             id: chunk.id,
             data: &data[start..chunk_end],
         });
-        offset = next;
+        offset = chunk_end;
     }
     Ok(chunks)
 }
@@ -199,8 +197,8 @@ mod tests {
     }
 
     #[test]
-    fn reads_chunks_and_padding() {
-        let data = b"RIFF\x16\0\0\0MDLXTEST\x01\0\0\0\x42\0NEXT\0\0\0\0tail";
+    fn reads_odd_sections_without_implicit_padding() {
+        let data = b"RIFF\x15\0\0\0MDLXTEST\x01\0\0\0\x42NEXT\0\0\0\0tail";
         let model = Model::parse(data).unwrap();
         assert_eq!(
             model.chunks,
@@ -237,7 +235,7 @@ mod tests {
             Error::UnsupportedFormat(*b"PV20")
         );
         assert!(matches!(
-            Model::parse(b"RIFF\x0d\0\0\0MDLXTEST\x01\0\0\0X"),
+            Model::parse(b"RIFF\x0d\0\0\0MDLXTEST\x02\0\0\0X"),
             Err(Error::Truncated { .. })
         ));
         assert!(matches!(

@@ -119,9 +119,6 @@ mod tests {
         let mut bytes = id.to_vec();
         bytes.extend((data.len() as u32).to_le_bytes());
         bytes.extend(data);
-        if data.len() % 2 == 1 {
-            bytes.push(0);
-        }
         bytes
     }
 
