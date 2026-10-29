@@ -32,7 +32,43 @@ pub struct Lod<'a> {
     pub unknown: Vec<Chunk<'a>>,
 }
 
+#[derive(Debug)]
+pub struct PartGeometry<'a> {
+    pub vertices: &'a [geometry::Vertex],
+    pub indices: &'a [u16],
+    pub material: &'a material::Material,
+    pub scene_node: &'a scene::Node,
+}
+
 impl<'a> ModelData<'a> {
+    pub fn part_geometry(&self, part: &geometry::Part) -> Result<PartGeometry<'_>, Error> {
+        let buffer = reference(&self.vertices, part.vertex_buffer, "vertex buffer")?;
+        let vertices = range(buffer, part.vertex_offset, part.vertex_count, "vertices")?;
+        let indices = range(
+            &self.indices,
+            part.index_offset,
+            part.index_count,
+            "indices",
+        )?;
+        for &index in indices {
+            if usize::from(index) >= vertices.len() {
+                return Err(Error::InvalidReference {
+                    field: "vertex index",
+                    value: i64::from(index),
+                    available: vertices.len(),
+                });
+            }
+        }
+        let material = reference(&self.materials, part.material, "material")?;
+        let scene_node = reference(&self.nodes, part.scene_node, "scene node")?;
+        Ok(PartGeometry {
+            vertices,
+            indices,
+            material,
+            scene_node,
+        })
+    }
+
     pub fn parse(chunk: &Chunk<'a>) -> Result<Self, Error> {
         if !matches!(&chunk.id, b"MDLD" | b"SHAM") {
             return Err(Error::UnexpectedSection(chunk.id));
@@ -118,6 +154,35 @@ impl<'a> ModelData<'a> {
     }
 }
 
+fn reference<'a, T>(entries: &'a [T], index: i32, field: &'static str) -> Result<&'a T, Error> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| entries.get(index))
+        .ok_or(Error::InvalidReference {
+            field,
+            value: i64::from(index),
+            available: entries.len(),
+        })
+}
+
+fn range<'a, T>(
+    entries: &'a [T],
+    start: u32,
+    count: u32,
+    field: &'static str,
+) -> Result<&'a [T], Error> {
+    let end = u64::from(start) + u64::from(count);
+    let bounds = usize::try_from(start).ok().zip(usize::try_from(end).ok());
+    bounds
+        .and_then(|(start, end)| entries.get(start..end))
+        .ok_or(Error::InvalidRange {
+            field,
+            start,
+            count,
+            available: entries.len(),
+        })
+}
+
 impl<'a> Lod<'a> {
     pub fn parse(chunk: &Chunk<'a>) -> Result<Self, Error> {
         let level = chunk.lod()?.ok_or(Error::UnexpectedSection(chunk.id))?;
@@ -154,8 +219,10 @@ mod tests {
     fn decodes_geometry_through_the_file_hierarchy() {
         let mut body = chunk(b"VERB", &chunk(b"VERT", &[0; 96]));
         body.extend(chunk(b"INDE", &[0, 0, 1, 0, 2, 0]));
+        body.extend(chunk(b"MATE", &[0; 120]));
+        body.extend(chunk(b"SCEN", &[255, 255, 255, 255, 0, 0, 0, 0]));
         let mut lod = 100i32.to_le_bytes().to_vec();
-        let part: Vec<_> = [1i32, -1, -1, 0, 0, 3, 0, 3, -1]
+        let part: Vec<_> = [1i32, 0, 0, 0, 0, 3, 0, 3, -1]
             .into_iter()
             .flat_map(i32::to_le_bytes)
             .collect();
@@ -172,6 +239,9 @@ mod tests {
         assert_eq!(data.indices, [0, 1, 2]);
         assert_eq!(data.lods[0].level, 100);
         assert_eq!(data.lods[0].parts[0].vertex_count, 3);
+        let geometry = data.part_geometry(&data.lods[0].parts[0]).unwrap();
+        assert_eq!(geometry.vertices.len(), 3);
+        assert_eq!(geometry.indices, &[0, 1, 2]);
         assert_eq!(data.unknown[0].data, &[42, 17]);
         assert_eq!(data.attachpoints[0].name, b"gear");
         for end in 0..file.len() {
@@ -198,5 +268,64 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn resolves_part_relative_indices_and_rejects_invalid_ranges() {
+        let vertices = geometry::vertices(&[0; 128]).unwrap();
+        let mut data = ModelData {
+            vertices: vec![vertices],
+            indices: vec![0, 1, 2],
+            materials: material::materials(&[0; 120]).unwrap(),
+            nodes: scene::nodes(&[255, 255, 255, 255, 0, 0, 0, 0]).unwrap(),
+            ..ModelData::default()
+        };
+        let mut part = geometry::Part {
+            primitive_type: 1,
+            scene_node: 0,
+            material: 0,
+            vertex_buffer: 0,
+            vertex_offset: 1,
+            vertex_count: 3,
+            index_offset: 0,
+            index_count: 3,
+            mouse_rectangle: -1,
+        };
+        assert_eq!(data.part_geometry(&part).unwrap().vertices.len(), 3);
+        part.vertex_offset = u32::MAX;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidRange { .. })
+        ));
+        part.vertex_offset = 1;
+        part.vertex_buffer = -1;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidReference { .. })
+        ));
+        part.vertex_buffer = 0;
+        part.index_count = u32::MAX;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidRange { .. })
+        ));
+        part.index_count = 3;
+        data.indices[2] = 3;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidReference {
+                field: "vertex index",
+                ..
+            })
+        ));
+        data.indices[2] = 2;
+        part.material = 1;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidReference {
+                field: "material",
+                ..
+            })
+        ));
     }
 }

@@ -17,12 +17,25 @@ struct Header {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    Truncated { offset: usize },
+    Truncated {
+        offset: usize,
+    },
     InvalidRiff,
     InvalidSize,
     UnsupportedFormat([u8; 4]),
     DuplicateSection([u8; 4]),
     UnexpectedSection([u8; 4]),
+    InvalidReference {
+        field: &'static str,
+        value: i64,
+        available: usize,
+    },
+    InvalidRange {
+        field: &'static str,
+        start: u32,
+        count: u32,
+        available: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -34,6 +47,20 @@ impl fmt::Display for Error {
             Self::UnsupportedFormat(id) => write!(f, "unsupported RIFF form {id:?}"),
             Self::DuplicateSection(id) => write!(f, "duplicate section {id:?}"),
             Self::UnexpectedSection(id) => write!(f, "unexpected section {id:?}"),
+            Self::InvalidReference {
+                field,
+                value,
+                available,
+            } => write!(f, "{field} reference {value} exceeds {available} entries"),
+            Self::InvalidRange {
+                field,
+                start,
+                count,
+                available,
+            } => write!(
+                f,
+                "{field} range {start}+{count} exceeds {available} entries"
+            ),
         }
     }
 }
