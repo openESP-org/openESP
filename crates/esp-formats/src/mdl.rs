@@ -1,6 +1,7 @@
 use binrw::BinRead;
 use std::{fmt, io::Cursor};
 
+pub mod data;
 pub mod geometry;
 pub mod material;
 pub mod scene;
@@ -18,6 +19,8 @@ pub enum Error {
     InvalidRiff,
     InvalidSize,
     UnsupportedFormat([u8; 4]),
+    DuplicateSection([u8; 4]),
+    UnexpectedSection([u8; 4]),
 }
 
 impl fmt::Display for Error {
@@ -27,6 +30,8 @@ impl fmt::Display for Error {
             Self::InvalidRiff => write!(f, "missing RIFF signature"),
             Self::InvalidSize => write!(f, "invalid RIFF size"),
             Self::UnsupportedFormat(id) => write!(f, "unsupported RIFF form {id:?}"),
+            Self::DuplicateSection(id) => write!(f, "duplicate section {id:?}"),
+            Self::UnexpectedSection(id) => write!(f, "unexpected section {id:?}"),
         }
     }
 }
@@ -125,7 +130,7 @@ impl<'a> Model<'a> {
     }
 }
 
-fn parse_chunks(data: &[u8]) -> Result<Vec<Chunk<'_>>, Error> {
+pub(super) fn parse_chunks(data: &[u8]) -> Result<Vec<Chunk<'_>>, Error> {
     let end = data.len();
     let mut offset = 0;
     let mut chunks = Vec::new();
