@@ -35,6 +35,39 @@ pub struct Chunk<'a> {
     pub data: &'a [u8],
 }
 
+#[derive(Debug, PartialEq, BinRead)]
+#[br(little)]
+pub struct BoundingBox {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl Chunk<'_> {
+    pub fn bounding_box(&self) -> Result<Option<BoundingBox>, Error> {
+        if &self.id != b"BBOX" {
+            return Ok(None);
+        }
+        if self.data.len() != 24 {
+            return Err(Error::InvalidSize);
+        }
+        BoundingBox::read(&mut Cursor::new(self.data))
+            .map(Some)
+            .map_err(|_| Error::InvalidSize)
+    }
+
+    pub fn radius(&self) -> Result<Option<f32>, Error> {
+        if &self.id != b"RADI" {
+            return Ok(None);
+        }
+        if self.data.len() != 4 {
+            return Err(Error::InvalidSize);
+        }
+        f32::read_le(&mut Cursor::new(self.data))
+            .map(Some)
+            .map_err(|_| Error::InvalidSize)
+    }
+}
+
 #[derive(Debug)]
 pub struct Model<'a> {
     pub chunks: Vec<Chunk<'a>>,
@@ -140,5 +173,47 @@ mod tests {
             Model::parse(b"RIFF\xff\xff\xff\xffMDLX"),
             Err(Error::Truncated { .. })
         ));
+    }
+
+    #[test]
+    fn reads_bounds_and_radius() {
+        let mut data = Vec::new();
+        for value in [-1.0f32, -2.0, -3.0, 4.0, 5.0, 6.0] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let bounds = Chunk {
+            id: *b"BBOX",
+            data: &data,
+        };
+        assert_eq!(
+            bounds.bounding_box().unwrap(),
+            Some(BoundingBox {
+                min: [-1.0, -2.0, -3.0],
+                max: [4.0, 5.0, 6.0]
+            })
+        );
+        assert_eq!(bounds.radius().unwrap(), None);
+        let radius_data = 7.5f32.to_le_bytes();
+        let radius = Chunk {
+            id: *b"RADI",
+            data: &radius_data,
+        };
+        assert_eq!(radius.radius().unwrap(), Some(7.5));
+        assert_eq!(
+            Chunk {
+                id: *b"BBOX",
+                data: &data[..23]
+            }
+            .bounding_box(),
+            Err(Error::InvalidSize)
+        );
+        assert_eq!(
+            Chunk {
+                id: *b"RADI",
+                data: b"12345"
+            }
+            .radius(),
+            Err(Error::InvalidSize)
+        );
     }
 }
