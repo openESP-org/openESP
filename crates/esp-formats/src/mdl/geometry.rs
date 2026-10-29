@@ -24,6 +24,50 @@ pub struct Part {
     pub mouse_rectangle: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, BinRead)]
+#[br(little)]
+pub struct Tangent {
+    pub first: [f32; 3],
+    pub second: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BinRead)]
+#[br(little)]
+pub struct SkinWeight {
+    pub bones: [u8; 4],
+    pub weights: [u8; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VertexBufferData<T> {
+    pub buffer_index: u32,
+    pub entries: Vec<T>,
+}
+
+pub fn tangents(data: &[u8]) -> Result<VertexBufferData<Tangent>, Error> {
+    buffer_data(data, 24)
+}
+
+pub fn skin_weights(data: &[u8]) -> Result<VertexBufferData<SkinWeight>, Error> {
+    buffer_data(data, 8)
+}
+
+pub fn bone_map(data: &[u8]) -> Result<VertexBufferData<i32>, Error> {
+    buffer_data(data, 4)
+}
+
+fn buffer_data<T>(data: &[u8], size: usize) -> Result<VertexBufferData<T>, Error>
+where
+    T: for<'a> BinRead<Args<'a> = ()>,
+{
+    let mut cursor = Cursor::new(data);
+    let buffer_index = u32::read_le(&mut cursor).map_err(|_| Error::Truncated { offset: 0 })?;
+    Ok(VertexBufferData {
+        buffer_index,
+        entries: records(&data[4..], size)?,
+    })
+}
+
 pub fn vertices(data: &[u8]) -> Result<Vec<Vertex>, Error> {
     records(data, 32)
 }
@@ -55,6 +99,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_skin_weights_without_normalizing_bytes() {
+        let buffer = skin_weights(&[2, 0, 0, 0, 1, 2, 3, 4, 255, 0, 128, 64]).unwrap();
+        assert_eq!(buffer.buffer_index, 2);
+        assert_eq!(buffer.entries[0].bones, [1, 2, 3, 4]);
+        assert_eq!(buffer.entries[0].weights, [255, 0, 128, 64]);
+        assert!(skin_weights(&[0; 3]).is_err());
+        assert_eq!(skin_weights(&[0; 11]), Err(Error::InvalidSize));
+        assert_eq!(
+            bone_map(&[1, 0, 0, 0, 255, 255, 255, 255]).unwrap().entries,
+            [-1]
+        );
+    }
+
+    #[test]
+    fn reads_tangent_vectors_after_buffer_index() {
+        let mut bytes = 3u32.to_le_bytes().to_vec();
+        for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            bytes.extend(value.to_le_bytes());
+        }
+        let buffer = tangents(&bytes).unwrap();
+        assert_eq!(buffer.buffer_index, 3);
+        assert_eq!(
+            buffer.entries,
+            [Tangent {
+                first: [1.0, 2.0, 3.0],
+                second: [4.0, 5.0, 6.0]
+            }]
+        );
+        assert_eq!(tangents(&bytes[..27]), Err(Error::InvalidSize));
+        assert!(tangents(&[0; 4]).unwrap().entries.is_empty());
+    }
 
     #[test]
     fn decodes_vertices_without_changing_coordinates() {
