@@ -1,4 +1,4 @@
-use super::{Chunk, Error, geometry, material, parse_chunks, scene};
+use super::{Chunk, Error, attachment, geometry, material, parse_chunks, scene};
 use std::collections::HashSet;
 
 #[derive(Debug, Default)]
@@ -16,6 +16,10 @@ pub struct ModelData<'a> {
     pub animation_links: Vec<i32>,
     pub bone_references: Vec<i16>,
     pub lods: Vec<Lod<'a>>,
+    pub platforms: Vec<attachment::Platform<'a>>,
+    pub attachpoints: Vec<attachment::AttachPoint<'a>>,
+    pub unknown_platform_sections: Vec<Chunk<'a>>,
+    pub unknown_attachpoint_sections: Vec<Chunk<'a>>,
     pub unknown: Vec<Chunk<'a>>,
     pub unknown_vertex_sections: Vec<Chunk<'a>>,
     pub unknown_lod_sections: Vec<Chunk<'a>>,
@@ -48,6 +52,8 @@ impl<'a> ModelData<'a> {
                     | b"SGAL"
                     | b"SGBR"
                     | b"LODT"
+                    | b"PLAL"
+                    | b"REFL"
             );
             if known && !seen.insert(child.id) {
                 return Err(Error::DuplicateSection(child.id));
@@ -80,6 +86,28 @@ impl<'a> ModelData<'a> {
                             result.lods.push(Lod::parse(&entry)?);
                         } else {
                             result.unknown_lod_sections.push(entry);
+                        }
+                    }
+                }
+                b"PLAL" => {
+                    for entry in parse_chunks(child.data)? {
+                        if &entry.id == b"PLAT" {
+                            result
+                                .platforms
+                                .push(attachment::Platform::parse(entry.data)?);
+                        } else {
+                            result.unknown_platform_sections.push(entry);
+                        }
+                    }
+                }
+                b"REFL" => {
+                    for entry in parse_chunks(child.data)? {
+                        if &entry.id == b"REFP" {
+                            result
+                                .attachpoints
+                                .push(attachment::AttachPoint::parse(entry.data)?);
+                        } else {
+                            result.unknown_attachpoint_sections.push(entry);
                         }
                     }
                 }
@@ -134,6 +162,7 @@ mod tests {
         lod.extend(chunk(b"PART", &part));
         body.extend(chunk(b"LODT", &chunk(b"LODE", &lod)));
         body.extend(chunk(b"UNKN", &[42, 17]));
+        body.extend(chunk(b"REFL", &chunk(b"REFP", b"\0\0\0\0\x05\0\0\0gear\0")));
         let mut payload = b"MDLX".to_vec();
         payload.extend(chunk(b"MDLD", &body));
         let file = chunk(b"RIFF", &payload);
@@ -144,6 +173,7 @@ mod tests {
         assert_eq!(data.lods[0].level, 100);
         assert_eq!(data.lods[0].parts[0].vertex_count, 3);
         assert_eq!(data.unknown[0].data, &[42, 17]);
+        assert_eq!(data.attachpoints[0].name, b"gear");
         for end in 0..file.len() {
             assert!(Model::parse(&file[..end]).is_err());
         }
