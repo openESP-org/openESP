@@ -2,6 +2,7 @@ use encoding_rs::Encoding;
 use ini::{Ini, ParseError, ParseOption};
 
 pub mod aircraft;
+pub mod camera;
 pub mod model;
 pub mod panel;
 pub mod sound;
@@ -9,6 +10,8 @@ pub mod texture;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValueError {
+    #[error("missing [{section}] {key}")]
+    Missing { section: String, key: String },
     #[error("duplicate [{section}] {key}")]
     Duplicate { section: String, key: String },
     #[error("invalid texture fallback index {0}")]
