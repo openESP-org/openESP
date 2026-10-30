@@ -1,6 +1,7 @@
 use encoding_rs::Encoding;
 use ini::{Ini, ParseError, ParseOption};
 
+pub mod aircraft;
 pub mod model;
 pub mod panel;
 pub mod texture;
