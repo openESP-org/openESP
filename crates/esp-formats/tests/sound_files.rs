@@ -1,4 +1,7 @@
-use esp_formats::cfg::{Config, sound::Sounds};
+use esp_formats::cfg::{
+    Config,
+    sound::{Engines, Sounds},
+};
 
 #[test]
 #[ignore = "requires ESP_FORMATS_SOUND_FILES containing paths to external sound.cfg files"]
@@ -10,6 +13,12 @@ fn parses_external_sound_lists() {
         let config = Config::from_bytes(&data, encoding_rs::WINDOWS_1252).unwrap();
         let sounds =
             Sounds::from_config(&config).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+        let engines = Engines::from_config(&config).unwrap();
+        for list in engines.lists.iter().filter(|list| !list.first.is_empty()) {
+            sounds
+                .chain(list.first)
+                .unwrap_or_else(|error| panic!("{path:?}: {error}"));
+        }
         for sound in &sounds.sounds {
             sounds
                 .chain(sound.section)

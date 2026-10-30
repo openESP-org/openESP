@@ -22,6 +22,69 @@ pub struct Sounds<'a> {
     pub sounds: Vec<Sound<'a>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineEvent {
+    Combustion,
+    Starter,
+    CombustionStart,
+    Shutdown,
+    JetWhine,
+    NonCombustion,
+    Propeller,
+    PropellerStrike,
+    Rotor,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct EngineList<'a> {
+    pub engine: u32,
+    pub event: EngineEvent,
+    pub first: &'a str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Engines<'a> {
+    pub count: Option<u32>,
+    pub lists: Vec<EngineList<'a>>,
+}
+
+impl<'a> Engines<'a> {
+    pub fn from_config(config: &'a Config) -> Result<Self, ValueError> {
+        let count = config
+            .value("sound_engine", "number_of_engines")?
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| invalid("sound_engine", "number_of_engines", value))
+            })
+            .transpose()?;
+        let mut lists = Vec::new();
+        for engine in 1..=4 {
+            for (suffix, event) in [
+                ("combustion", EngineEvent::Combustion),
+                ("starter", EngineEvent::Starter),
+                ("combustion_start", EngineEvent::CombustionStart),
+                ("shutdown", EngineEvent::Shutdown),
+                ("jet_whine", EngineEvent::JetWhine),
+                ("non_combustion", EngineEvent::NonCombustion),
+                ("prop", EngineEvent::Propeller),
+                ("prop_strike", EngineEvent::PropellerStrike),
+                ("rotor", EngineEvent::Rotor),
+            ] {
+                let key = format!("eng{engine}_{suffix}");
+                if let Some(first) = config.value("sound_engine", &key)? {
+                    lists.push(EngineList {
+                        engine,
+                        event,
+                        first,
+                    });
+                }
+            }
+        }
+        Ok(Self { count, lists })
+    }
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Parameters {
     pub flags: Option<u32>,
@@ -295,5 +358,65 @@ mod tests {
             Parameters::from_config(&config, "a"),
             Err(ValueError::Duplicate { .. })
         ));
+    }
+
+    #[test]
+    fn reads_engine_events_without_renumbering() {
+        let config = Config::parse("[SOUND_ENGINE]\nnumber_of_engines=4\nENG1_COMBUSTION=power\neng2_jet_whine=whine\neng3_prop=propeller\neng4_rotor=\n[power]\nfilename=engine").unwrap();
+        let engines = Engines::from_config(&config).unwrap();
+        assert_eq!(engines.count, Some(4));
+        assert_eq!(
+            engines.lists,
+            [
+                EngineList {
+                    engine: 1,
+                    event: EngineEvent::Combustion,
+                    first: "power"
+                },
+                EngineList {
+                    engine: 2,
+                    event: EngineEvent::JetWhine,
+                    first: "whine"
+                },
+                EngineList {
+                    engine: 3,
+                    event: EngineEvent::Propeller,
+                    first: "propeller"
+                },
+                EngineList {
+                    engine: 4,
+                    event: EngineEvent::Rotor,
+                    first: ""
+                },
+            ]
+        );
+        assert_eq!(
+            Sounds::from_config(&config)
+                .unwrap()
+                .chain(engines.lists[0].first)
+                .unwrap()[0]
+                .filenames,
+            ["engine"]
+        );
+        assert_eq!(
+            Engines::from_config(&Config::parse("").unwrap()).unwrap(),
+            Engines {
+                count: None,
+                lists: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_engine_lists_and_invalid_counts() {
+        for text in [
+            "number_of_engines=-1",
+            "number_of_engines=4294967296",
+            "number_of_engines=2\nNUMBER_OF_ENGINES=3",
+            "eng1_prop=a\nENG1_PROP=b",
+        ] {
+            let config = Config::parse(&format!("[sound_engine]\n{text}")).unwrap();
+            assert!(Engines::from_config(&config).is_err());
+        }
     }
 }
