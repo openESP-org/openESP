@@ -3,6 +3,7 @@ use std::io::Cursor;
 use uuid::Uuid;
 
 pub mod document;
+pub mod propdef;
 pub mod value;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +28,8 @@ pub enum Error {
     TextEncoding(#[from] std::str::Utf8Error),
     #[error("missing SPB definition for {0}")]
     MissingDefinition(Uuid),
+    #[error("unsupported SPB definition {0}")]
+    UnsupportedDefinition(Uuid),
     #[error("SPB set at {offset} declares {size} bytes, but only {available} remain")]
     SetSize {
         offset: usize,

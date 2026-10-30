@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub enum Definition {
     Set,
     Property(value::Type),
+    Unsupported,
 }
 
 #[derive(Debug, PartialEq)]
@@ -88,6 +89,7 @@ impl<'a> Bank<'a> {
                         position = end - remaining.len();
                         Content::Property(value)
                     }
+                    Definition::Unsupported => return Err(Error::UnsupportedDefinition(tag.guid)),
                 },
             };
             nodes.push(Node {
