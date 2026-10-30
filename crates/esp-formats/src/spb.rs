@@ -2,6 +2,7 @@ use binrw::BinRead;
 use std::io::Cursor;
 use uuid::Uuid;
 
+pub mod document;
 pub mod value;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -24,6 +25,16 @@ pub enum Error {
     TextTerminator,
     #[error("invalid SPB UTF-8 text: {0}")]
     TextEncoding(#[from] std::str::Utf8Error),
+    #[error("missing SPB definition for {0}")]
+    MissingDefinition(Uuid),
+    #[error("SPB set at {offset} declares {size} bytes, but only {available} remain")]
+    SetSize {
+        offset: usize,
+        size: i32,
+        available: usize,
+    },
+    #[error("SPB document exceeds the node limit {0}")]
+    NodeLimit(usize),
 }
 
 #[derive(BinRead)]
