@@ -2,6 +2,8 @@ use binrw::BinRead;
 use std::io::Cursor;
 use uuid::Uuid;
 
+pub mod value;
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("invalid SPB data at offset {offset}")]
@@ -14,6 +16,14 @@ pub enum Error {
     TagTable { count: u32, available: usize },
     #[error("SPB tag index {index} exceeds {count} entries")]
     TagIndex { index: i32, count: usize },
+    #[error("unsupported SPB value type {0}")]
+    UnsupportedType(String),
+    #[error("invalid SPB text length {0}")]
+    TextLength(i32),
+    #[error("SPB text is missing its null terminator")]
+    TextTerminator,
+    #[error("invalid SPB UTF-8 text: {0}")]
+    TextEncoding(#[from] std::str::Utf8Error),
 }
 
 #[derive(BinRead)]
