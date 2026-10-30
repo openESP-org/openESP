@@ -22,6 +22,108 @@ pub struct Sounds<'a> {
     pub sounds: Vec<Sound<'a>>,
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub struct Parameters {
+    pub flags: Option<u32>,
+    pub viewpoint: Option<u32>,
+    pub pitch_envelope: Option<Vec<[f64; 2]>>,
+    pub volume_envelope: Option<Vec<[f64; 2]>>,
+    pub minimum_volume: Option<f64>,
+    pub maximum_volume: Option<f64>,
+    pub initial_volume: Option<f64>,
+    pub minimum_rate: Option<f64>,
+    pub maximum_rate: Option<f64>,
+    pub minimum_speed: Option<f64>,
+    pub maximum_speed: Option<f64>,
+    pub inside_cone_angle: Option<f64>,
+    pub outside_cone_angle: Option<f64>,
+    pub cone_pitch: Option<f64>,
+    pub cone_heading: Option<f64>,
+    pub outside_cone_volume: Option<f64>,
+    pub full_scale_distance: Option<f64>,
+    pub panning: Option<f64>,
+}
+
+impl Parameters {
+    pub fn from_config(config: &Config, section: &str) -> Result<Self, ValueError> {
+        let number = |key| -> Result<Option<f64>, ValueError> {
+            config
+                .value(section, key)?
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| invalid(section, key, value))
+                })
+                .transpose()
+        };
+        let integer = |key| -> Result<Option<u32>, ValueError> {
+            config
+                .value(section, key)?
+                .map(|value| value.parse().map_err(|_| invalid(section, key, value)))
+                .transpose()
+        };
+        Ok(Self {
+            flags: integer("flags")?,
+            viewpoint: integer("viewpoint")?,
+            pitch_envelope: envelope(config, section, "rparams", 2)?,
+            volume_envelope: envelope(config, section, "vparams", 8)?,
+            minimum_volume: number("minimum_volume")?,
+            maximum_volume: number("maximum_volume")?,
+            initial_volume: number("initial_volume")?,
+            minimum_rate: number("minimum_rate")?,
+            maximum_rate: number("maximum_rate")?,
+            minimum_speed: number("minimum_speed")?,
+            maximum_speed: number("maximum_speed")?,
+            inside_cone_angle: number("insideconeangle")?,
+            outside_cone_angle: number("outsideconeangle")?,
+            cone_pitch: number("conepitch")?,
+            cone_heading: number("coneheading")?,
+            outside_cone_volume: number("outsideconevolume")?,
+            full_scale_distance: number("full_scale_distance")?,
+            panning: number("panning")?,
+        })
+    }
+}
+
+fn invalid(section: &str, key: &str, value: &str) -> ValueError {
+    ValueError::Invalid {
+        section: section.into(),
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+fn envelope(
+    config: &Config,
+    section: &str,
+    key: &str,
+    maximum: usize,
+) -> Result<Option<Vec<[f64; 2]>>, ValueError> {
+    let Some(value) = config.value(section, key)? else {
+        return Ok(None);
+    };
+    let mut fields = value.split(',');
+    let mut points = Vec::new();
+    while let Some(input) = fields.next() {
+        let output = fields.next().ok_or_else(|| invalid(section, key, value))?;
+        let parse = |field: &str| {
+            field
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| invalid(section, key, value))
+        };
+        if points.len() == maximum {
+            return Err(invalid(section, key, value));
+        }
+        points.push([parse(input)?, parse(output)?]);
+    }
+    Ok(Some(points))
+}
+
 impl<'a> Sounds<'a> {
     pub fn from_config(config: &'a Config) -> Result<Self, ValueError> {
         let mut sounds = Vec::new();
@@ -135,5 +237,63 @@ mod tests {
             sounds.chain("absent"),
             Err(Error::MissingSection("absent".into()))
         );
+    }
+
+    #[test]
+    fn reads_envelopes_and_optional_playback_parameters() {
+        let config = Config::parse("[wind_sound]\nrparams=16, 0.66, 100,1.464\nvparams=0,0,30.5,11.2,66.3,32.8\nminimum_volume=10000.000\nconepitch=-40\npanning=-10000\nfull_scale_distance=7e1\nflags=2147483648\nviewpoint=7").unwrap();
+        let parameters = Parameters::from_config(&config, "wind_sound").unwrap();
+        assert_eq!(
+            parameters.pitch_envelope,
+            Some(vec![[16.0, 0.66], [100.0, 1.464]])
+        );
+        assert_eq!(
+            parameters.volume_envelope,
+            Some(vec![[0.0, 0.0], [30.5, 11.2], [66.3, 32.8]])
+        );
+        assert_eq!(parameters.minimum_volume, Some(10000.0));
+        assert_eq!(parameters.cone_pitch, Some(-40.0));
+        assert_eq!(parameters.panning, Some(-10000.0));
+        assert_eq!(parameters.full_scale_distance, Some(70.0));
+        assert_eq!(parameters.flags, Some(0x80000000));
+        assert_eq!(parameters.viewpoint, Some(7));
+        assert_eq!(parameters.maximum_volume, None);
+    }
+
+    #[test]
+    fn rejects_malformed_numbers_and_envelopes() {
+        for value in [
+            "rparams=",
+            "rparams=0",
+            "rparams=0,1,2",
+            "rparams=0,1,2,3,4,5",
+            "vparams=0,NaN",
+            "vparams=0,inf",
+            "rparams=0,1,",
+            "flags=-1",
+            "minimum_rate=NaN",
+            "viewpoint=1.5",
+            "panning=bad",
+            "panning=10,000",
+        ] {
+            let config = Config::parse(&format!("[a]\n{value}")).unwrap();
+            assert!(
+                matches!(
+                    Parameters::from_config(&config, "a"),
+                    Err(ValueError::Invalid { .. })
+                ),
+                "{value}"
+            );
+        }
+        for count in [8, 9] {
+            let config =
+                Config::parse(&format!("[a]\nvparams={}", vec!["0,1"; count].join(","))).unwrap();
+            assert_eq!(Parameters::from_config(&config, "a").is_ok(), count == 8);
+        }
+        let config = Config::parse("[a]\nmaximum_rate=1\nMAXIMUM_RATE=2").unwrap();
+        assert!(matches!(
+            Parameters::from_config(&config, "a"),
+            Err(ValueError::Duplicate { .. })
+        ));
     }
 }
