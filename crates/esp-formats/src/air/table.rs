@@ -16,14 +16,48 @@ pub struct Curve<'a> {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct Surface<'a> {
+    pub rows: u32,
+    pub columns: u32,
+    // Row-major, including the input axes and the table-specific corner value.
+    pub values: Vec<f64>,
+    pub trailing_data: &'a [u8],
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Table<'a> {
     Curve(Curve<'a>),
     Mach([i16; 17]),
+    Surface(Surface<'a>),
 }
 
 impl<'a> Record<'a> {
     pub fn table(&self) -> Result<Option<Table<'a>>, Error> {
         match self.id {
+            0x1502..=0x1504 | 0x1506 | 0x1507 => {
+                let mut reader = Cursor::new(self.data);
+                let [rows, columns] =
+                    <[u32; 2]>::read_le(&mut reader).map_err(|_| self.size_error(8))?;
+                let entries = u64::from(rows) * u64::from(columns);
+                let available = self.data.len() - 8;
+                if entries > (available / 8) as u64 {
+                    return Err(Error::TableSize {
+                        id: self.id,
+                        entries,
+                        available,
+                    });
+                }
+                let values = (0..entries)
+                    .map(|_| f64::read_le(&mut reader))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| self.size_error(8 + entries as usize * 8))?;
+                Ok(Some(Table::Surface(Surface {
+                    rows,
+                    columns,
+                    values,
+                    trailing_data: &self.data[reader.position() as usize..],
+                })))
+            }
             0x341..=0x343
             | 0x400
             | 0x401
@@ -186,5 +220,62 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn reads_packed_surface_rows_axes_and_corner_values() {
+        let values = [0.9f64, 1.0, 2.0, 0.0, 66.0, 82.5, 0.42, 78.8, 95.4];
+        let data = [
+            [3u32, 3]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+            values.into_iter().flat_map(f64::to_le_bytes).collect(),
+            vec![0xbb; 80],
+        ]
+        .concat();
+        for id in [0x1502, 0x1503, 0x1504, 0x1506, 0x1507] {
+            let Some(Table::Surface(surface)) = record(id, &data).table().unwrap() else {
+                panic!("missing surface {id:#x}");
+            };
+            assert_eq!((surface.rows, surface.columns), (3, 3));
+            assert_eq!(surface.values, values);
+            assert_eq!(surface.trailing_data, [0xbb; 80]);
+            assert!(std::ptr::eq(
+                surface.trailing_data.as_ptr(),
+                data[80..].as_ptr()
+            ));
+        }
+    }
+
+    #[test]
+    fn bounds_surface_dimensions_before_allocating() {
+        let data = [
+            [2u32, 3]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+            vec![0; 48],
+        ]
+        .concat();
+        for end in 0..data.len() {
+            let error = record(0x1502, &data[..end]).table().unwrap_err();
+            if end < 8 {
+                assert!(matches!(error, Error::RecordSize { expected: 8, .. }));
+            } else {
+                assert!(matches!(error, Error::TableSize { entries: 6, .. }));
+            }
+        }
+        for dimensions in [[u32::MAX, u32::MAX], [u32::MAX, 1], [1, u32::MAX]] {
+            let data: Vec<_> = dimensions.into_iter().flat_map(u32::to_le_bytes).collect();
+            assert!(matches!(
+                record(0x1502, &data).table(),
+                Err(Error::TableSize { .. })
+            ));
+        }
+        let Some(Table::Surface(surface)) = record(0x1502, &[0; 8]).table().unwrap() else {
+            panic!("missing empty surface");
+        };
+        assert!(surface.values.is_empty());
     }
 }
