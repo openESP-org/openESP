@@ -14,6 +14,13 @@ fn decodes_external_models() {
             .decode()
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for data in [decoded.exterior, decoded.shadow].into_iter().flatten() {
+            for material in &data.materials {
+                material
+                    .texture_maps(&data.textures)
+                    .unwrap_or_else(|error| {
+                        panic!("{} material textures: {error}", path.display())
+                    });
+            }
             let parents = esp_formats::mdl::scene::parents(&data.nodes)
                 .unwrap_or_else(|error| panic!("{} scene hierarchy: {error}", path.display()));
             assert_eq!(parents.len(), data.nodes.len());

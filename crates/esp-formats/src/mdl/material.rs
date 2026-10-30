@@ -30,6 +30,45 @@ pub struct Material {
     pub final_alpha_multiply: f32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct TextureMaps<'a> {
+    pub diffuse: Option<&'a [u8]>,
+    pub detail: Option<&'a [u8]>,
+    pub bump: Option<&'a [u8]>,
+    pub specular: Option<&'a [u8]>,
+    pub emissive: Option<&'a [u8]>,
+    pub reflection: Option<&'a [u8]>,
+    pub fresnel: Option<&'a [u8]>,
+}
+
+impl Material {
+    pub fn texture_maps<'a>(&self, textures: &[&'a [u8]]) -> Result<TextureMaps<'a>, Error> {
+        let resolve = |flag, index, field| {
+            if self.flags & flag == 0 {
+                return Ok(None);
+            }
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| textures.get(index).copied())
+                .map(Some)
+                .ok_or(Error::InvalidReference {
+                    field,
+                    value: i64::from(index),
+                    available: textures.len(),
+                })
+        };
+        Ok(TextureMaps {
+            diffuse: resolve(0x02, self.diffuse_texture, "diffuse texture")?,
+            detail: resolve(0x10, self.detail_texture, "detail texture")?,
+            bump: resolve(0x04, self.bump_texture, "bump texture")?,
+            specular: resolve(0x08, self.specular_texture, "specular texture")?,
+            emissive: resolve(0x80, self.emissive_texture, "emissive texture")?,
+            reflection: resolve(0x20, self.reflection_texture, "reflection texture")?,
+            fresnel: resolve(0x700, self.fresnel_texture, "fresnel texture")?,
+        })
+    }
+}
+
 pub fn materials(data: &[u8]) -> Result<Vec<Material>, Error> {
     records(data, 120)
 }
@@ -93,5 +132,63 @@ mod tests {
         assert!(names[2].is_empty());
         assert_eq!(textures(&bytes[..191]), Err(Error::InvalidSize));
         assert!(textures(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolves_only_enabled_texture_maps() {
+        let mut material = materials(&[0; 120]).unwrap().remove(0);
+        let names: &[&[u8]] = &[
+            b"diffuse.dds",
+            b"detail.dds",
+            b"bump.dds",
+            b"specular.dds",
+            b"emissive.dds",
+            b"reflection.dds",
+            b"fresnel.dds",
+        ];
+        material.diffuse_texture = 0;
+        material.detail_texture = 1;
+        material.bump_texture = 2;
+        material.specular_texture = 3;
+        material.emissive_texture = 4;
+        material.reflection_texture = 5;
+        material.fresnel_texture = 6;
+        material.flags = 0x7be;
+        assert_eq!(
+            material.texture_maps(names).unwrap(),
+            TextureMaps {
+                diffuse: Some(names[0]),
+                detail: Some(names[1]),
+                bump: Some(names[2]),
+                specular: Some(names[3]),
+                emissive: Some(names[4]),
+                reflection: Some(names[5]),
+                fresnel: Some(names[6]),
+            }
+        );
+        for flag in [0x02, 0x10, 0x04, 0x08, 0x80, 0x20, 0x100, 0x200, 0x400] {
+            material.flags = flag;
+            assert!(matches!(
+                material.texture_maps(&[]),
+                Err(Error::InvalidReference { .. })
+            ));
+        }
+        for index in [-1, i32::MIN, 7, i32::MAX] {
+            material.flags = 0x02;
+            material.diffuse_texture = index;
+            assert!(matches!(
+                material.texture_maps(names),
+                Err(Error::InvalidReference {
+                    field: "diffuse texture",
+                    ..
+                })
+            ));
+        }
+        material.flags = 0x02000040;
+        let maps = material.texture_maps(&[]).unwrap();
+        assert_eq!(maps.diffuse, None);
+        assert_eq!(maps.reflection, None);
+        assert_eq!(maps.fresnel, None);
+        assert_eq!(material.flags, 0x02000040);
     }
 }
