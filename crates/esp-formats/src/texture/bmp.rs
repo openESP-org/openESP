@@ -1,4 +1,5 @@
 use binrw::BinRead;
+use ddsfile::{D3DFormat, DataFormat};
 use image::{DynamicImage, ImageDecoder, Limits, codecs::bmp::BmpDecoder};
 use std::io::Cursor;
 
@@ -8,6 +9,14 @@ pub enum Error {
     Header(#[from] binrw::Error),
     #[error("invalid BMP file size, header size, or pixel offset")]
     Layout,
+    #[error("unsupported extended BMP header size {0}")]
+    UnsupportedHeader(usize),
+    #[error("unsupported FS70 extension version {0}")]
+    UnsupportedExtension(u32),
+    #[error("invalid compressed BMP dimensions or plane count")]
+    Dimensions,
+    #[error("compressed BMP surface needs {required} bytes, found {available}")]
+    TruncatedSurface { required: u64, available: usize },
     #[error("BMP decoding failed: {0}")]
     Decode(#[from] image::ImageError),
 }
@@ -18,6 +27,27 @@ pub struct FileHeader {
     pub size: u32,
     pub reserved: [u16; 2],
     pub pixel_offset: u32,
+}
+
+#[derive(BinRead)]
+#[br(little)]
+struct InfoPrefix {
+    _size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    _bits: u16,
+    compression: [u8; 4],
+}
+
+#[derive(Debug)]
+pub struct CompressedSurface<'a> {
+    pub width: u32,
+    pub stored_height: i32,
+    pub format: D3DFormat,
+    pub row_pitch: usize,
+    pub data: &'a [u8],
+    pub remaining_data: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -80,6 +110,51 @@ impl<'a> Bitmap<'a> {
         limits.reserve(decoder.total_bytes())?;
         Ok(DynamicImage::from_decoder(decoder)?)
     }
+
+    pub fn compressed_surface(&self) -> Result<Option<CompressedSurface<'a>>, Error> {
+        if !self.metadata.starts_with(b"FS70") {
+            return Ok(None);
+        }
+        if self.dib_header.len() != 40 {
+            return Err(Error::UnsupportedHeader(self.dib_header.len()));
+        }
+        let info = InfoPrefix::read(&mut Cursor::new(self.dib_header))?;
+        let format = match &info.compression {
+            b"DXT1" => D3DFormat::DXT1,
+            b"DXT3" => D3DFormat::DXT3,
+            b"DXT5" => D3DFormat::DXT5,
+            _ => return Ok(None),
+        };
+        let version = u32::read_le(&mut Cursor::new(&self.metadata[4..]))?;
+        if version != 20 {
+            return Err(Error::UnsupportedExtension(version));
+        }
+        if self.metadata.len() < 20 {
+            return Err(Error::Layout);
+        }
+        if info.width <= 0 || info.height == 0 || info.planes != 1 {
+            return Err(Error::Dimensions);
+        }
+        let width = info.width as u32;
+        let block_size = format.get_block_size().ok_or(Error::Layout)?;
+        let pitch = u64::from(width.div_ceil(4)) * u64::from(block_size);
+        let required = pitch * u64::from(info.height.unsigned_abs().div_ceil(4));
+        let (data, remaining_data) = usize::try_from(required)
+            .ok()
+            .and_then(|size| self.pixels.split_at_checked(size))
+            .ok_or(Error::TruncatedSurface {
+                required,
+                available: self.pixels.len(),
+            })?;
+        Ok(Some(CompressedSurface {
+            width,
+            stored_height: info.height,
+            format,
+            row_pitch: usize::try_from(pitch).map_err(|_| Error::Layout)?,
+            data,
+            remaining_data,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +193,80 @@ mod tests {
         bytes.extend_from_slice(metadata);
         bytes.extend_from_slice(pixels);
         bytes
+    }
+
+    fn fs70() -> [u8; 20] {
+        let mut header = [0; 20];
+        header[..4].copy_from_slice(b"FS70");
+        header[4..8].copy_from_slice(&20u32.to_le_bytes());
+        header[9] = 4;
+        header[14] = 3;
+        header
+    }
+
+    #[test]
+    fn extracts_compressed_surfaces_without_interpreting_unknown_mip_fields() {
+        for (compression, format, block_size) in [
+            (*b"DXT1", D3DFormat::DXT1, 8),
+            (*b"DXT3", D3DFormat::DXT3, 16),
+            (*b"DXT5", D3DFormat::DXT5, 16),
+        ] {
+            let payload = vec![0xaa; block_size * 4 + 17];
+            let bytes = bitmap(7, 5, 16, u32::from_le_bytes(compression), &fs70(), &payload);
+            let bitmap = Bitmap::parse(&bytes).unwrap();
+            let surface = bitmap.compressed_surface().unwrap().unwrap();
+            assert_eq!(surface.width, 7);
+            assert_eq!(surface.stored_height, 5);
+            assert_eq!(surface.format, format);
+            assert_eq!(surface.row_pitch, block_size * 2);
+            assert_eq!(surface.data.len(), block_size * 4);
+            assert_eq!(surface.remaining_data, [0xaa; 17]);
+            assert_eq!(bitmap.metadata(), fs70());
+            assert!(std::ptr::eq(surface.data.as_ptr(), bytes[74..].as_ptr()));
+        }
+        let bytes = bitmap(1, 1, 24, 0, &[], &[0; 4]);
+        assert!(
+            Bitmap::parse(&bytes)
+                .unwrap()
+                .compressed_surface()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bounds_compressed_surfaces_and_rejects_unsupported_extensions() {
+        let compression = u32::from_le_bytes(*b"DXT3");
+        for size in 0..64 {
+            let bytes = bitmap(7, 5, 16, compression, &fs70(), &vec![0; size]);
+            assert!(matches!(
+                Bitmap::parse(&bytes).unwrap().compressed_surface(),
+                Err(Error::TruncatedSurface { required: 64, .. })
+            ));
+        }
+        for (width, height) in [(0, 4), (-1, 4), (4, 0)] {
+            let bytes = bitmap(width, height, 16, compression, &fs70(), &[0; 16]);
+            assert!(matches!(
+                Bitmap::parse(&bytes).unwrap().compressed_surface(),
+                Err(Error::Dimensions)
+            ));
+        }
+        let bytes = bitmap(i32::MAX, i32::MIN, 16, compression, &fs70(), &[]);
+        assert!(matches!(
+            Bitmap::parse(&bytes).unwrap().compressed_surface(),
+            Err(Error::TruncatedSurface { .. })
+        ));
+        let mut extension = fs70();
+        extension[4..8].copy_from_slice(&21u32.to_le_bytes());
+        let bytes = bitmap(4, 4, 16, compression, &extension, &[0; 16]);
+        assert!(matches!(
+            Bitmap::parse(&bytes).unwrap().compressed_surface(),
+            Err(Error::UnsupportedExtension(21))
+        ));
+        for size in 4..20 {
+            let bytes = bitmap(4, 4, 16, compression, &fs70()[..size], &[0; 16]);
+            assert!(Bitmap::parse(&bytes).unwrap().compressed_surface().is_err());
+        }
     }
 
     #[test]
