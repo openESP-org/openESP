@@ -9,6 +9,7 @@ cabinet = { version = "0.1.5", package = "ms-cabinet", default-features = false,
 ddsfile = "0.6.0"
 encoding_rs = "0.8.42"
 petgraph = "0.8.3"
+roxmltree = "0.21.2"
 rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 thiserror = "2.0.21"
 uuid = "1.29.0"
