@@ -28,6 +28,7 @@ pub enum Error {
     UnsupportedFormat([u8; 4]),
     DuplicateSection([u8; 4]),
     UnexpectedSection([u8; 4]),
+    MissingSection([u8; 4]),
     InvalidReference {
         field: &'static str,
         value: i64,
@@ -44,6 +45,9 @@ pub enum Error {
     },
     AmbiguousParent {
         node: usize,
+    },
+    AmbiguousBone {
+        identity: i32,
     },
     DuplicateBuffer {
         section: [u8; 4],
@@ -66,6 +70,7 @@ impl fmt::Display for Error {
             Self::UnsupportedFormat(id) => write!(f, "unsupported RIFF form {id:?}"),
             Self::DuplicateSection(id) => write!(f, "duplicate section {id:?}"),
             Self::UnexpectedSection(id) => write!(f, "unexpected section {id:?}"),
+            Self::MissingSection(id) => write!(f, "missing section {id:?}"),
             Self::InvalidReference {
                 field,
                 value,
@@ -86,6 +91,9 @@ impl fmt::Display for Error {
             Self::AmbiguousParent { node } => {
                 write!(f, "scene node {node} has conflicting parents")
             }
+            Self::AmbiguousBone { identity } => {
+                write!(f, "bone identity {identity} matches multiple scene nodes")
+            }
             Self::DuplicateBuffer { section, index } => {
                 write!(f, "duplicate {section:?} buffer {index}")
             }
@@ -96,7 +104,7 @@ impl fmt::Display for Error {
                 actual,
             } => write!(
                 f,
-                "{section:?} buffer {index} has {actual} entries, expected {expected} vertices"
+                "{section:?} buffer {index} has {actual} entries, expected {expected}"
             ),
         }
     }

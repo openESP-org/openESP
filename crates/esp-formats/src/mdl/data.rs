@@ -1,7 +1,7 @@
 use super::{
     Chunk, Error, animation, attachment, geometry, material, parse_chunks, scene, visibility,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default)]
 pub struct ModelData<'a> {
@@ -58,6 +58,66 @@ pub struct VertexAttributes<'a> {
 }
 
 impl<'a> ModelData<'a> {
+    pub fn bone_nodes(&self, index: i32) -> Result<Option<Vec<usize>>, Error> {
+        let attributes = self.vertex_attributes(index)?;
+        let Some(bone_map) = attributes.bone_map else {
+            return if attributes.skin_weights.is_some() {
+                Err(Error::MissingSection(*b"BMAP"))
+            } else {
+                Ok(None)
+            };
+        };
+        if self.bone_references.len() != self.nodes.len() {
+            return Err(Error::AttributeCount {
+                section: *b"SGBR",
+                index: 0,
+                expected: self.nodes.len(),
+                actual: self.bone_references.len(),
+            });
+        }
+        let mut identities = HashMap::new();
+        for (node, &identity) in self.bone_references.iter().enumerate() {
+            if identity == -1 {
+                continue;
+            }
+            if identity < 0 {
+                return Err(Error::InvalidReference {
+                    field: "scene bone identity",
+                    value: i64::from(identity),
+                    available: self.nodes.len(),
+                });
+            }
+            if identities.insert(i32::from(identity), node).is_some() {
+                return Err(Error::AmbiguousBone {
+                    identity: i32::from(identity),
+                });
+            }
+        }
+        let nodes = bone_map
+            .iter()
+            .map(|&identity| {
+                identities
+                    .get(&identity)
+                    .copied()
+                    .ok_or(Error::InvalidReference {
+                        field: "bone identity",
+                        value: i64::from(identity),
+                        available: identities.len(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(weights) = attributes.skin_weights {
+            for weight in weights {
+                for (&bone, &amount) in weight.bones.iter().zip(&weight.weights) {
+                    if amount != 0 {
+                        reference(&nodes, i32::from(bone), "skin bone index")?;
+                    }
+                }
+            }
+        }
+        Ok(Some(nodes))
+    }
+
     pub fn vertex_attributes(&self, index: i32) -> Result<VertexAttributes<'_>, Error> {
         let vertices = reference(&self.vertices, index, "vertex buffer")?;
         let index = index as u32;
@@ -599,5 +659,82 @@ mod tests {
             data.skin_weights.clear();
             data.bone_maps.clear();
         }
+    }
+
+    #[test]
+    fn maps_bone_identities_to_nodes_and_ignores_unused_weight_slots() {
+        let node = scene::Node {
+            child: -1,
+            peer: -1,
+            animation_map_offset: 0,
+            unknown: 0,
+        };
+        let mut data = ModelData {
+            vertices: vec![geometry::vertices(&[0; 32]).unwrap()],
+            bone_maps: vec![geometry::VertexBufferData {
+                buffer_index: 0,
+                entries: vec![20, 10],
+            }],
+            skin_weights: vec![geometry::VertexBufferData {
+                buffer_index: 0,
+                entries: vec![geometry::SkinWeight {
+                    bones: [0, 1, 255, 255],
+                    weights: [128, 127, 0, 0],
+                }],
+            }],
+            nodes: vec![node; 4],
+            bone_references: vec![-1, 10, -1, 20],
+            ..ModelData::default()
+        };
+        assert_eq!(data.bone_nodes(0).unwrap(), Some(vec![3, 1]));
+        data.skin_weights[0].entries[0].weights[2] = 1;
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::InvalidReference {
+                field: "skin bone index",
+                value: 255,
+                ..
+            })
+        ));
+        data.skin_weights[0].entries[0].weights[2] = 0;
+        data.bone_references[2] = 10;
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::AmbiguousBone { identity: 10 })
+        ));
+        data.bone_references[2] = -2;
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::InvalidReference {
+                field: "scene bone identity",
+                value: -2,
+                ..
+            })
+        ));
+        data.bone_references[2] = -1;
+        data.bone_maps[0].entries[0] = 2;
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::InvalidReference {
+                field: "bone identity",
+                value: 2,
+                ..
+            })
+        ));
+        data.bone_references.pop();
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::AttributeCount {
+                section: [b'S', b'G', b'B', b'R'],
+                ..
+            })
+        ));
+        data.bone_maps.clear();
+        assert!(matches!(
+            data.bone_nodes(0),
+            Err(Error::MissingSection([b'B', b'M', b'A', b'P']))
+        ));
+        data.skin_weights.clear();
+        assert_eq!(data.bone_nodes(0).unwrap(), None);
     }
 }
