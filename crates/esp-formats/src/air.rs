@@ -2,6 +2,7 @@ use binrw::BinRead;
 use std::io::Cursor;
 
 pub mod parameters;
+pub mod table;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -19,6 +20,12 @@ pub enum Error {
         id: u32,
         expected: usize,
         actual: usize,
+    },
+    #[error("AIR table {id:#x} declares {entries} entries, but only {available} bytes remain")]
+    TableSize {
+        id: u32,
+        entries: u64,
+        available: usize,
     },
 }
 

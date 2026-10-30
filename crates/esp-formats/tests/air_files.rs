@@ -11,6 +11,7 @@ fn parses_external_flight_dynamics() {
         assert!(!records.is_empty());
         for record in &records {
             record.aerodynamic_parameters().unwrap();
+            record.table().unwrap();
         }
         assert_eq!(
             records
