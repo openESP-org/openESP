@@ -45,6 +45,16 @@ pub enum Error {
     AmbiguousParent {
         node: usize,
     },
+    DuplicateBuffer {
+        section: [u8; 4],
+        index: u32,
+    },
+    AttributeCount {
+        section: [u8; 4],
+        index: u32,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -76,6 +86,18 @@ impl fmt::Display for Error {
             Self::AmbiguousParent { node } => {
                 write!(f, "scene node {node} has conflicting parents")
             }
+            Self::DuplicateBuffer { section, index } => {
+                write!(f, "duplicate {section:?} buffer {index}")
+            }
+            Self::AttributeCount {
+                section,
+                index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{section:?} buffer {index} has {actual} entries, expected {expected} vertices"
+            ),
         }
     }
 }

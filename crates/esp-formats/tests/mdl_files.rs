@@ -14,6 +14,12 @@ fn decodes_external_models() {
             .decode()
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for data in [decoded.exterior, decoded.shadow].into_iter().flatten() {
+            for index in 0..data.vertices.len() {
+                data.vertex_attributes(index.try_into().unwrap())
+                    .unwrap_or_else(|error| {
+                        panic!("{} vertex buffer {index}: {error}", path.display())
+                    });
+            }
             for material in &data.materials {
                 material
                     .texture_maps(&data.textures)

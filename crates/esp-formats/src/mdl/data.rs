@@ -41,12 +41,50 @@ pub struct Lod<'a> {
 #[derive(Debug)]
 pub struct PartGeometry<'a> {
     pub vertices: &'a [geometry::Vertex],
+    pub tangents: Option<&'a [geometry::Tangent]>,
+    pub skin_weights: Option<&'a [geometry::SkinWeight]>,
+    pub bone_map: Option<&'a [i32]>,
     pub indices: &'a [u16],
     pub material: &'a material::Material,
     pub scene_node: &'a scene::Node,
 }
 
+#[derive(Debug)]
+pub struct VertexAttributes<'a> {
+    pub vertices: &'a [geometry::Vertex],
+    pub tangents: Option<&'a [geometry::Tangent]>,
+    pub skin_weights: Option<&'a [geometry::SkinWeight]>,
+    pub bone_map: Option<&'a [i32]>,
+}
+
 impl<'a> ModelData<'a> {
+    pub fn vertex_attributes(&self, index: i32) -> Result<VertexAttributes<'_>, Error> {
+        let vertices = reference(&self.vertices, index, "vertex buffer")?;
+        let index = index as u32;
+        let tangents = buffer(&self.tangents, index, *b"TANS")?;
+        let skin_weights = buffer(&self.skin_weights, index, *b"SKIN")?;
+        let bone_map = buffer(&self.bone_maps, index, *b"BMAP")?;
+        for (section, actual) in [
+            (*b"TANS", tangents.map(<[_]>::len)),
+            (*b"SKIN", skin_weights.map(<[_]>::len)),
+        ] {
+            if let Some(actual) = actual.filter(|&actual| actual != vertices.len()) {
+                return Err(Error::AttributeCount {
+                    section,
+                    index,
+                    expected: vertices.len(),
+                    actual,
+                });
+            }
+        }
+        Ok(VertexAttributes {
+            vertices,
+            tangents,
+            skin_weights,
+            bone_map,
+        })
+    }
+
     pub fn node_transform(&self, index: i32) -> Result<&[f32; 16], Error> {
         let node = reference(&self.nodes, index, "scene node")?;
         let offset = node.animation_map_offset;
@@ -62,8 +100,28 @@ impl<'a> ModelData<'a> {
     }
 
     pub fn part_geometry(&self, part: &geometry::Part) -> Result<PartGeometry<'_>, Error> {
-        let buffer = reference(&self.vertices, part.vertex_buffer, "vertex buffer")?;
-        let vertices = range(buffer, part.vertex_offset, part.vertex_count, "vertices")?;
+        let attributes = self.vertex_attributes(part.vertex_buffer)?;
+        let vertices = range(
+            attributes.vertices,
+            part.vertex_offset,
+            part.vertex_count,
+            "vertices",
+        )?;
+        let tangents = attributes
+            .tangents
+            .map(|entries| range(entries, part.vertex_offset, part.vertex_count, "tangents"))
+            .transpose()?;
+        let skin_weights = attributes
+            .skin_weights
+            .map(|entries| {
+                range(
+                    entries,
+                    part.vertex_offset,
+                    part.vertex_count,
+                    "skin weights",
+                )
+            })
+            .transpose()?;
         let indices = range(
             &self.indices,
             part.index_offset,
@@ -83,6 +141,9 @@ impl<'a> ModelData<'a> {
         let scene_node = reference(&self.nodes, part.scene_node, "scene node")?;
         Ok(PartGeometry {
             vertices,
+            tangents,
+            skin_weights,
+            bone_map: attributes.bone_map,
             indices,
             material,
             scene_node,
@@ -180,6 +241,19 @@ impl<'a> ModelData<'a> {
         }
         Ok(result)
     }
+}
+
+fn buffer<T>(
+    buffers: &[geometry::VertexBufferData<T>],
+    index: u32,
+    section: [u8; 4],
+) -> Result<Option<&[T]>, Error> {
+    let mut matches = buffers.iter().filter(|buffer| buffer.buffer_index == index);
+    let entries = matches.next().map(|buffer| buffer.entries.as_slice());
+    if matches.next().is_some() {
+        return Err(Error::DuplicateBuffer { section, index });
+    }
+    Ok(entries)
 }
 
 fn reference<'a, T>(entries: &'a [T], index: i32, field: &'static str) -> Result<&'a T, Error> {
@@ -397,5 +471,133 @@ mod tests {
             })
         ));
         assert!(data.node_transform(-1).is_err());
+    }
+
+    #[test]
+    fn resolves_auxiliary_buffers_by_index_and_slices_part_attributes() {
+        let mut verb = chunk(b"VERT", &[0; 64]);
+        verb.extend(chunk(b"VERT", &[0; 96]));
+        let tangents = [
+            1u32.to_le_bytes().to_vec(),
+            (1..=18)
+                .flat_map(|value| (value as f32).to_le_bytes())
+                .collect(),
+        ]
+        .concat();
+        verb.extend(chunk(b"TANS", &tangents));
+        let skin = [
+            1u32.to_le_bytes().to_vec(),
+            [0, 1, 255, 255, 128, 127, 0, 0].repeat(3),
+        ]
+        .concat();
+        verb.extend(chunk(b"SKIN", &skin));
+        verb.extend(chunk(
+            b"BMAP",
+            &[1i32, 10, 20]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ));
+        let body = [
+            chunk(b"VERB", &verb),
+            chunk(b"MATE", &[0; 120]),
+            chunk(b"SCEN", &[255, 255, 255, 255, 0, 0, 0, 0]),
+            chunk(b"INDE", &[0, 0, 1, 0]),
+        ]
+        .concat();
+        let mut data = ModelData::parse(&Chunk {
+            id: *b"MDLD",
+            data: &body,
+        })
+        .unwrap();
+        let first = data.vertex_attributes(0).unwrap();
+        assert_eq!(first.vertices.len(), 2);
+        assert!(first.tangents.is_none());
+        assert!(first.skin_weights.is_none());
+        assert!(first.bone_map.is_none());
+        let part = geometry::Part {
+            primitive_type: 1,
+            scene_node: 0,
+            material: 0,
+            vertex_buffer: 1,
+            vertex_offset: 1,
+            vertex_count: 2,
+            index_offset: 0,
+            index_count: 2,
+            mouse_rectangle: -1,
+        };
+        let geometry = data.part_geometry(&part).unwrap();
+        assert_eq!(geometry.tangents.unwrap()[0].first, [7.0, 8.0, 9.0]);
+        assert_eq!(geometry.tangents.unwrap().len(), 2);
+        assert_eq!(geometry.skin_weights.unwrap().len(), 2);
+        assert_eq!(geometry.skin_weights.unwrap()[1].bones, [0, 1, 255, 255]);
+        assert_eq!(geometry.bone_map.unwrap(), [10, 20]);
+        assert!(data.vertex_attributes(-1).is_err());
+        assert!(data.vertex_attributes(2).is_err());
+        data.skin_weights[0].entries.pop();
+        assert!(matches!(
+            data.vertex_attributes(1),
+            Err(Error::AttributeCount {
+                section: [b'S', b'K', b'I', b'N'],
+                expected: 3,
+                actual: 2,
+                ..
+            })
+        ));
+        data.skin_weights.clear();
+        data.tangents[0].entries.pop();
+        assert!(matches!(
+            data.vertex_attributes(1),
+            Err(Error::AttributeCount {
+                section: [b'T', b'A', b'N', b'S'],
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_auxiliary_buffers() {
+        let mut data = ModelData {
+            vertices: vec![vec![]],
+            ..ModelData::default()
+        };
+        for section in [*b"TANS", *b"SKIN", *b"BMAP"] {
+            match &section {
+                b"TANS" => {
+                    data.tangents = vec![
+                        geometry::VertexBufferData {
+                            buffer_index: 0,
+                            entries: vec![]
+                        };
+                        2
+                    ]
+                }
+                b"SKIN" => {
+                    data.skin_weights = vec![
+                        geometry::VertexBufferData {
+                            buffer_index: 0,
+                            entries: vec![]
+                        };
+                        2
+                    ]
+                }
+                b"BMAP" => {
+                    data.bone_maps = vec![
+                        geometry::VertexBufferData {
+                            buffer_index: 0,
+                            entries: vec![]
+                        };
+                        2
+                    ]
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(data.vertex_attributes(0), Err(Error::DuplicateBuffer { section: actual, index: 0 }) if actual == section)
+            );
+            data.tangents.clear();
+            data.skin_weights.clear();
+            data.bone_maps.clear();
+        }
     }
 }
