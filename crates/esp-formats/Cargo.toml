@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 binrw = "0.15.2"
+ddsfile = "0.6.0"
 encoding_rs = "0.8.42"
 rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 thiserror = "2.0.21"
