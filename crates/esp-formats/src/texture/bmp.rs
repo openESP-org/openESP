@@ -13,8 +13,10 @@ pub enum Error {
     UnsupportedHeader(usize),
     #[error("unsupported FS70 extension version {0}")]
     UnsupportedExtension(u32),
-    #[error("invalid compressed BMP dimensions or plane count")]
+    #[error("invalid BMP dimensions or plane count")]
     Dimensions,
+    #[error("explicit gauge alpha requires a 32-bit uncompressed BMP")]
+    AlphaFormat,
     #[error("compressed BMP surface needs {required} bytes, found {available}")]
     TruncatedSurface { required: u64, available: usize },
     #[error("BMP decoding failed: {0}")]
@@ -36,7 +38,7 @@ struct InfoPrefix {
     width: i32,
     height: i32,
     planes: u16,
-    _bits: u16,
+    bits: u16,
     compression: [u8; 4],
 }
 
@@ -109,6 +111,34 @@ impl<'a> Bitmap<'a> {
         decoder.set_limits(limits.clone())?;
         limits.reserve(decoder.total_bytes())?;
         Ok(DynamicImage::from_decoder(decoder)?)
+    }
+
+    pub fn decode_alpha(&self, mut limits: Limits) -> Result<DynamicImage, Error> {
+        if self.dib_header.len() != 40 {
+            return Err(Error::UnsupportedHeader(self.dib_header.len()));
+        }
+        let info = InfoPrefix::read(&mut Cursor::new(self.dib_header))?;
+        if info.bits != 32 || info.compression != [0; 4] {
+            return Err(Error::AlphaFormat);
+        }
+        if info.width <= 0 || info.height == 0 || info.planes != 1 {
+            return Err(Error::Dimensions);
+        }
+        let required = u64::from(info.width as u32) * u64::from(info.height.unsigned_abs()) * 4;
+        if required > self.pixels.len() as u64 {
+            return Err(Error::Layout);
+        }
+        limits.reserve(required)?;
+        let mut rgba = self.decode(limits)?.into_rgba8();
+        let width = info.width as usize;
+        let rows = info.height.unsigned_abs() as usize;
+        // BI_RGB reserves its fourth byte; gauges can explicitly opt into using it as alpha.
+        for (index, pixel) in rgba.pixels_mut().enumerate() {
+            let y = index / width;
+            let source_y = if info.height > 0 { rows - 1 - y } else { y };
+            pixel.0[3] = self.pixels[(source_y * width + index % width) * 4 + 3];
+        }
+        Ok(DynamicImage::ImageRgba8(rgba))
     }
 
     pub fn compressed_surface(&self) -> Result<Option<CompressedSurface<'a>>, Error> {
@@ -266,6 +296,61 @@ mod tests {
         for size in 4..20 {
             let bytes = bitmap(4, 4, 16, compression, &fs70()[..size], &[0; 16]);
             assert!(Bitmap::parse(&bytes).unwrap().compressed_surface().is_err());
+        }
+    }
+
+    #[test]
+    fn decodes_explicit_gauge_alpha_without_changing_ordinary_bmp_semantics() {
+        for height in [-2, 2] {
+            let bytes = bitmap(
+                2,
+                height,
+                32,
+                0,
+                &[],
+                &[
+                    0, 0, 255, 0, 0, 255, 0, 128, 255, 0, 0, 255, 255, 255, 255, 17,
+                ],
+            );
+            let bmp = Bitmap::parse(&bytes).unwrap();
+            let rgba = bmp.decode_alpha(Limits::default()).unwrap().into_rgba8();
+            assert_eq!(rgba.dimensions(), (2, 2));
+            let expected = if height < 0 {
+                vec![
+                    255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 255, 17,
+                ]
+            } else {
+                vec![
+                    0, 0, 255, 255, 255, 255, 255, 17, 255, 0, 0, 0, 0, 255, 0, 128,
+                ]
+            };
+            assert_eq!(rgba.as_raw(), &expected);
+            assert!(
+                bmp.decode(Limits::default())
+                    .unwrap()
+                    .into_rgba8()
+                    .pixels()
+                    .all(|pixel| pixel.0[3] == 255)
+            );
+            let mut limits = Limits::default();
+            limits.max_alloc = Some(15);
+            assert!(bmp.decode_alpha(limits).is_err());
+        }
+        let bytes = bitmap(1, 1, 24, 0, &[], &[0; 4]);
+        assert!(matches!(
+            Bitmap::parse(&bytes)
+                .unwrap()
+                .decode_alpha(Limits::default()),
+            Err(Error::AlphaFormat)
+        ));
+        for size in 0..16 {
+            let bytes = bitmap(2, 2, 32, 0, &[], &vec![0; size]);
+            assert!(
+                Bitmap::parse(&bytes)
+                    .unwrap()
+                    .decode_alpha(Limits::default())
+                    .is_err()
+            );
         }
     }
 
