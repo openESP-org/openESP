@@ -14,6 +14,9 @@ fn decodes_external_models() {
             .decode()
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for data in [decoded.exterior, decoded.shadow].into_iter().flatten() {
+            let parents = esp_formats::mdl::scene::parents(&data.nodes)
+                .unwrap_or_else(|error| panic!("{} scene hierarchy: {error}", path.display()));
+            assert_eq!(parents.len(), data.nodes.len());
             for index in 0..data.nodes.len() {
                 data.node_transform(index.try_into().unwrap())
                     .unwrap_or_else(|error| {

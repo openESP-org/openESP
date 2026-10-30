@@ -1,5 +1,6 @@
 use super::{Error, geometry::records};
 use binrw::BinRead;
+use petgraph::{algo::toposort, graphmap::DiGraphMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, BinRead)]
 #[br(little)]
@@ -37,9 +38,94 @@ pub fn visibility_links(data: &[u8]) -> Result<Vec<i16>, Error> {
     records(data, 2)
 }
 
+pub fn parents(nodes: &[Node]) -> Result<Vec<Option<usize>>, Error> {
+    let mut graph = DiGraphMap::<usize, ()>::new();
+    for (index, node) in nodes.iter().enumerate() {
+        graph.add_node(index);
+        for (field, link) in [("scene child", node.child), ("scene peer", node.peer)] {
+            if link == -1 {
+                continue;
+            }
+            let target = usize::try_from(link)
+                .ok()
+                .filter(|&target| target < nodes.len())
+                .ok_or(Error::InvalidReference {
+                    field,
+                    value: i64::from(link),
+                    available: nodes.len(),
+                })?;
+            graph.add_edge(index, target, ());
+        }
+    }
+    let order = toposort(&graph, None).map_err(|cycle| Error::CyclicScene {
+        node: cycle.node_id(),
+    })?;
+    let mut parents = vec![None; nodes.len()];
+    let mut assigned = vec![false; nodes.len()];
+    for index in order {
+        let node = &nodes[index];
+        for (link, parent) in [(node.child, Some(index)), (node.peer, parents[index])] {
+            if link == -1 {
+                continue;
+            }
+            let link = link as usize;
+            if assigned[link] && parents[link] != parent {
+                return Err(Error::AmbiguousParent { node: link });
+            }
+            parents[link] = parent;
+            assigned[link] = true;
+        }
+    }
+    Ok(parents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(child: i16, peer: i16) -> Node {
+        Node {
+            child,
+            peer,
+            animation_map_offset: 0,
+            unknown: 0,
+        }
+    }
+
+    #[test]
+    fn resolves_parents_without_assuming_node_order() {
+        let nodes = [node(-1, -1), node(3, -1), node(0, 1), node(-1, -1)];
+        assert_eq!(parents(&nodes).unwrap(), [Some(2), None, None, Some(1)]);
+        let nodes = [node(1, -1), node(3, 2), node(-1, -1), node(-1, -1)];
+        assert_eq!(parents(&nodes).unwrap(), [None, Some(0), Some(0), Some(1)]);
+        assert!(parents(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_cycles_and_invalid_node_links() {
+        for nodes in [
+            vec![node(0, -1)],
+            vec![node(1, -1), node(-1, 0)],
+            vec![node(-1, 1), node(-1, 0)],
+        ] {
+            assert!(matches!(parents(&nodes), Err(Error::CyclicScene { .. })));
+        }
+        for node in [node(-2, -1), node(1, -1), node(-1, -2), node(-1, 1)] {
+            assert!(matches!(
+                parents(&[node]),
+                Err(Error::InvalidReference { .. })
+            ));
+        }
+        assert!(matches!(
+            parents(&[node(2, -1), node(2, -1), node(-1, -1)]),
+            Err(Error::AmbiguousParent { node: 2 })
+        ));
+        let nodes: Vec<_> = (0..10000)
+            .map(|index| node(if index == 9999 { -1 } else { index + 1 }, -1))
+            .collect();
+        let hierarchy = parents(&nodes).unwrap();
+        assert_eq!(hierarchy[9999], Some(9998));
+    }
 
     #[test]
     fn preserves_node_indices_and_unknown_fields() {

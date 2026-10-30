@@ -39,6 +39,12 @@ pub enum Error {
         count: u32,
         available: usize,
     },
+    CyclicScene {
+        node: usize,
+    },
+    AmbiguousParent {
+        node: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -64,6 +70,12 @@ impl fmt::Display for Error {
                 f,
                 "{field} range {start}+{count} exceeds {available} entries"
             ),
+            Self::CyclicScene { node } => {
+                write!(f, "scene hierarchy contains a cycle at node {node}")
+            }
+            Self::AmbiguousParent { node } => {
+                write!(f, "scene node {node} has conflicting parents")
+            }
         }
     }
 }
