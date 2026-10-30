@@ -4,6 +4,7 @@ use ini::{Ini, ParseError, ParseOption};
 pub mod aircraft;
 pub mod model;
 pub mod panel;
+pub mod sound;
 pub mod texture;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
