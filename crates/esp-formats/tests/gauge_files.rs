@@ -14,6 +14,11 @@ fn parses_external_gauge_documents() {
             .unwrap();
         let gauge = Gauge::parse(&text).unwrap_or_else(|error| panic!("{path:?}: {error}"));
         gauge.size().unwrap();
+        let images = gauge
+            .image_references()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|error| panic!("{path:?}: {error}"));
+        assert_eq!(images.len(), gauge.images().count());
         for image in gauge.images() {
             assert!(image.attribute("Name").is_some(), "{path:?}: {image:?}");
         }

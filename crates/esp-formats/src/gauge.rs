@@ -16,6 +16,19 @@ pub enum Error {
     GaugeCount(usize),
     #[error("invalid gauge size: {0}")]
     Size(String),
+    #[error("invalid gauge image: {0}")]
+    Image(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImageReference<'a> {
+    pub name: &'a str,
+    pub mask: bool,
+    pub alpha: Option<bool>,
+    pub transparent: Option<bool>,
+    pub bright: Option<bool>,
+    pub luminous: Option<bool>,
+    pub bilinear: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -125,6 +138,58 @@ impl<'input> Gauge<'input> {
         self.root()
             .descendants()
             .filter(|node| node.has_tag_name("Image") || node.has_tag_name("MaskImage"))
+    }
+
+    pub fn image_references(&self) -> impl Iterator<Item = Result<ImageReference<'_>, Error>> {
+        self.images().map(|node| {
+            let flag = |name: &str| -> Result<Option<bool>, Error> {
+                let parse = |value: &str| -> Result<bool, Error> {
+                    match value.trim() {
+                        value
+                            if value.eq_ignore_ascii_case("true")
+                                || value.eq_ignore_ascii_case("yes") =>
+                        {
+                            Ok(true)
+                        }
+                        value
+                            if value.eq_ignore_ascii_case("false")
+                                || value.eq_ignore_ascii_case("no") =>
+                        {
+                            Ok(false)
+                        }
+                        _ => Err(Error::Image(format!("{name}={value}"))),
+                    }
+                };
+                match self.schema {
+                    Schema::Legacy => node.attribute(name).map(parse).transpose(),
+                    Schema::Ace => {
+                        let mut properties =
+                            node.children().filter(|child| child.has_tag_name(name));
+                        let value = properties.next();
+                        if properties.next().is_some() {
+                            return Err(Error::Image(format!("duplicate {name}")));
+                        }
+                        value.map(|child| parse(&text_content(child))).transpose()
+                    }
+                }
+            };
+            Ok(ImageReference {
+                name: node
+                    .attribute("Name")
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| Error::Image("missing Name".into()))?,
+                mask: node.has_tag_name("MaskImage"),
+                alpha: flag("Alpha")?,
+                transparent: flag("Transparent")?,
+                bright: flag("Bright")?,
+                luminous: flag("Luminous")?,
+                bilinear: flag("Bilinear")?,
+            })
+        })
+    }
+
+    pub fn art_directory(&self) -> Option<&str> {
+        self.root().attribute("ArtDirectory")
     }
 
     pub fn macros(&self) -> impl Iterator<Item = Node<'_, 'input>> {
@@ -240,6 +305,73 @@ mod tests {
         }
         for size in ["1", "1,2,3", "4294967296,2", "1.5,2"] {
             assert!(Gauge::parse(&format!("<SimBase.Document Type='AceXML'><SimGauge.Gauge><Size>{size}</Size></SimGauge.Gauge></SimBase.Document>")).unwrap().size().is_err());
+        }
+    }
+
+    #[test]
+    fn reads_image_modes_from_both_xml_schemas() {
+        for source in [
+            "<Gauge ArtDirectory='Art'><Image Name='background.bmp'/><Element><MaskImage Name='mask.bmp' Alpha='Yes' Transparent='no' Bright='TRUE' Luminous='false' Bilinear='yes'/></Element></Gauge>",
+            "<SimBase.Document Type='AceXML'><SimGauge.Gauge ArtDirectory='Art'><Image Name='background.bmp'/><Element><MaskImage Name='mask.bmp'><Alpha>Tr<!--comment-->ue</Alpha><Transparent>False</Transparent><Bright>Yes</Bright><Luminous>No</Luminous><Bilinear>True</Bilinear></MaskImage></Element></SimGauge.Gauge></SimBase.Document>",
+        ] {
+            let gauge = Gauge::parse(source).unwrap();
+            assert_eq!(gauge.art_directory(), Some("Art"));
+            assert_eq!(
+                gauge
+                    .image_references()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                [
+                    ImageReference {
+                        name: "background.bmp",
+                        mask: false,
+                        alpha: None,
+                        transparent: None,
+                        bright: None,
+                        luminous: None,
+                        bilinear: None
+                    },
+                    ImageReference {
+                        name: "mask.bmp",
+                        mask: true,
+                        alpha: Some(true),
+                        transparent: Some(false),
+                        bright: Some(true),
+                        luminous: Some(false),
+                        bilinear: Some(true)
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn reports_ambiguous_and_invalid_image_properties() {
+        for image in [
+            "<Image/>",
+            "<Image Name=''/>",
+            "<Image Name='a.bmp' Alpha='perhaps'/>",
+            "<Image Name='a.bmp' Transparent=''/>",
+        ] {
+            let source = format!("<Gauge>{image}</Gauge>");
+            let gauge = Gauge::parse(&source).unwrap();
+            assert!(matches!(
+                gauge.image_references().next().unwrap(),
+                Err(Error::Image(_))
+            ));
+        }
+        for property in [
+            "<Alpha>True</Alpha><Alpha>False</Alpha>",
+            "<Bright>1</Bright>",
+        ] {
+            let source = format!(
+                "<SimBase.Document Type='AceXML'><SimGauge.Gauge><Image Name='a.bmp'>{property}</Image></SimGauge.Gauge></SimBase.Document>"
+            );
+            let gauge = Gauge::parse(&source).unwrap();
+            assert!(matches!(
+                gauge.image_references().next().unwrap(),
+                Err(Error::Image(_))
+            ));
         }
     }
 }
