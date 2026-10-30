@@ -2,6 +2,7 @@ use encoding_rs::Encoding;
 use ini::{Ini, ParseError, ParseOption};
 
 pub mod model;
+pub mod panel;
 pub mod texture;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -10,6 +11,31 @@ pub enum ValueError {
     Duplicate { section: String, key: String },
     #[error("invalid texture fallback index {0}")]
     FallbackIndex(String),
+    #[error("invalid numeric index {0}")]
+    Index(String),
+    #[error("invalid [{section}] {key}: {value}")]
+    Invalid {
+        section: String,
+        key: String,
+        value: String,
+    },
+}
+
+pub(crate) fn indexed_name(name: &str, prefix: &str) -> Result<Option<u32>, ValueError> {
+    let Some(start) = name.get(..prefix.len()) else {
+        return Ok(None);
+    };
+    if !start.eq_ignore_ascii_case(prefix) {
+        return Ok(None);
+    }
+    let suffix = &name[prefix.len()..];
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(None);
+    }
+    suffix
+        .parse()
+        .map(Some)
+        .map_err(|_| ValueError::Index(name.into()))
 }
 
 #[derive(Debug, thiserror::Error)]
