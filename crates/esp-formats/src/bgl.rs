@@ -1,6 +1,8 @@
 use binrw::BinRead;
 use std::io::Cursor;
 
+pub mod guid;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid BGL binary data: {0}")]
@@ -13,6 +15,8 @@ pub enum Error {
     DirectorySize,
     #[error("BGL indirect record range exceeds its pointer table")]
     IndirectRange,
+    #[error("BGL section is not a GUID index")]
+    NotGuidIndex,
 }
 
 #[derive(Debug, BinRead)]
