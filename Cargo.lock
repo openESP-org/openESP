@@ -165,6 +165,7 @@ dependencies = [
  "binrw",
  "ddsfile",
  "encoding_rs",
+ "ms-cabinet",
  "petgraph",
  "rust-ini",
  "thiserror",
@@ -265,6 +266,21 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "ms-cabinet"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0161501d1ba9955ad2f01c2cfc62fe06744b3a44eac29b0f48312941968f49d0"
+dependencies = [
+ "ms-compress",
+]
+
+[[package]]
+name = "ms-compress"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "319b99243f88f9fd7cc338135241d91b711be88fb2ce2a4a3ee0fb09ae283d05"
 
 [[package]]
 name = "multiversion_no_op"

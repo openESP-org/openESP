@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 binrw = "0.15.2"
+cabinet = { version = "0.1.5", package = "ms-cabinet", default-features = false, features = ["mszip", "lzx", "quantum"] }
 ddsfile = "0.6.0"
 encoding_rs = "0.8.42"
 petgraph = "0.8.3"
