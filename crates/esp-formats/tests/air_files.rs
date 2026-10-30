@@ -9,6 +9,9 @@ fn parses_external_flight_dynamics() {
         let bytes = std::fs::read(&path).unwrap();
         let records = air::parse(&bytes).unwrap_or_else(|error| panic!("{path:?}: {error}"));
         assert!(!records.is_empty());
+        for record in &records {
+            record.aerodynamic_parameters().unwrap();
+        }
         assert_eq!(
             records
                 .iter()

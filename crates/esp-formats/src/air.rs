@@ -1,6 +1,8 @@
 use binrw::BinRead;
 use std::io::Cursor;
 
+pub mod parameters;
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("truncated AIR record header at offset {offset}")]
@@ -11,6 +13,12 @@ pub enum Error {
         offset: usize,
         size: u32,
         available: usize,
+    },
+    #[error("AIR record {id:#x} has {actual} bytes, expected {expected}")]
+    RecordSize {
+        id: u32,
+        expected: usize,
+        actual: usize,
     },
 }
 
