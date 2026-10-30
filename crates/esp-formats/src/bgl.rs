@@ -2,6 +2,7 @@ use binrw::BinRead;
 use std::io::Cursor;
 
 pub mod guid;
+pub mod scenery;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -17,6 +18,12 @@ pub enum Error {
     IndirectRange,
     #[error("BGL section is not a GUID index")]
     NotGuidIndex,
+    #[error("invalid BGL record size {size} at offset {offset:#x}")]
+    RecordSize { offset: usize, size: u32 },
+    #[error("invalid BGL attachment delimiter at offset {0:#x}")]
+    AttachmentDelimiter(usize),
+    #[error("unterminated BGL string")]
+    UnterminatedString,
 }
 
 #[derive(Debug, BinRead)]

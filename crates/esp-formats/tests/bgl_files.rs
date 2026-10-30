@@ -26,7 +26,32 @@ fn decodes_external_containers() {
             }
             match &section.directory {
                 Directory::Direct(subsections) => {
-                    assert_eq!(subsections.len(), section.entry_count as usize)
+                    assert_eq!(subsections.len(), section.entry_count as usize);
+                    if section.kind == 0x25 {
+                        for subsection in subsections {
+                            let records =
+                                esp_formats::bgl::scenery::parse(subsection.records.data).unwrap();
+                            assert_eq!(
+                                records
+                                    .iter()
+                                    .map(|record| record.raw_data.len())
+                                    .sum::<usize>(),
+                                subsection.records.data.len()
+                            );
+                            for record in records {
+                                if let Some(object) = record.decode().unwrap() {
+                                    assert!(
+                                        (-180.0..=180.0)
+                                            .contains(&object.placement.longitude_degrees())
+                                    );
+                                    assert!(
+                                        (-90.0..=90.0)
+                                            .contains(&object.placement.latitude_degrees())
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 Directory::Indirect { subsections, .. } => {
                     assert_eq!(subsections.len(), section.entry_count as usize)
