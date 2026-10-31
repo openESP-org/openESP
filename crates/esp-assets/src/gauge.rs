@@ -6,6 +6,7 @@ use image::{
     imageops::{FilterType, overlay, resize},
 };
 use rayon::prelude::*;
+use std::sync::Arc;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
 
@@ -52,13 +53,29 @@ pub struct PanelMouseArea {
     pub repeat: bool,
     gauge_origin: (f64, f64),
     gauge_scale: (f64, f64),
+    visibility: Vec<Arc<Program>>,
 }
 
+impl PanelMouseArea {
+    fn visible(&self, host: &mut impl Host) -> std::result::Result<bool, esp_script::Error> {
+        for program in &self.visibility {
+            let value = program
+                .evaluate(host)?
+                .ok_or(esp_script::Error::Stack)?
+                .number()?;
+            if value == 0.0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
 struct MouseAreaSource {
     bounds: (f64, f64, f64, f64),
     source: String,
     events: Vec<MouseEvent>,
     repeat: bool,
+    visibility: Vec<Arc<Program>>,
 }
 
 struct Canvas {
@@ -106,6 +123,20 @@ impl PanelImage {
             .collect()
     }
 
+    pub fn visible_mouse_areas_at(
+        &self,
+        x: f64,
+        y: f64,
+        host: &mut impl Host,
+    ) -> Result<Vec<usize>> {
+        let mut visible = Vec::new();
+        for index in self.mouse_areas_at(x, y) {
+            if self.mouse_areas[index].visible(host)? {
+                visible.push(index);
+            }
+        }
+        Ok(visible)
+    }
     pub fn mouse_event(
         &self,
         event: MouseEvent,
@@ -159,6 +190,16 @@ impl PanelImage {
                     (position[1] - area.gauge_origin.1) / area.gauge_scale.1,
                 ];
                 let mut host = MouseHost(host, event, position);
+                if event != MouseEvent::LeftRelease {
+                    match area.visible(&mut host) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            continue;
+                        }
+                    }
+                }
                 if let Err(error) = area.script.evaluate(&mut host) {
                     failure.get_or_insert(error);
                 }
@@ -518,6 +559,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     repeat: raw.repeat,
                     gauge_origin: (cx, cy),
                     gauge_scale: (sx, sy),
+                    visibility: raw.visibility,
                 }),
                 Err(error) => eprintln!("mouse script: {error}"),
             }
@@ -592,8 +634,8 @@ fn collect_mouse_areas(
     offset_y: f64,
     out: &mut Vec<MouseAreaSource>,
 ) -> Result<()> {
-    let mut stack = vec![(node, offset_x, offset_y)];
-    while let Some((node, offset_x, offset_y)) = stack.pop() {
+    let mut stack = vec![(node, offset_x, offset_y, Vec::<Arc<Program>>::new())];
+    while let Some((node, offset_x, offset_y, parents)) = stack.pop() {
         for child in node.children().filter(|c| c.has_tag_name("MouseArea")) {
             let bounds = position(child).and_then(|(dx, dy)| {
                 let (x, y) = finite_position(offset_x + dx, offset_y + dy)?;
@@ -607,6 +649,20 @@ fn collect_mouse_areas(
                     continue;
                 }
             };
+            let mut visibility = parents.clone();
+            if let Some(node) = child
+                .children()
+                .find(|node| node.has_tag_name("Visibility"))
+            {
+                let source = esp_formats::gauge::text_content(node);
+                match Program::compile(source.trim()) {
+                    Ok(program) if !source.trim().is_empty() => visibility.push(Arc::new(program)),
+                    _ => {
+                        eprintln!("unsupported mouse visibility: {source}");
+                        continue;
+                    }
+                }
+            }
             for click in child.children().filter(|c| c.has_tag_name("MouseClick")) {
                 let click_type = click
                     .children()
@@ -672,10 +728,11 @@ fn collect_mouse_areas(
                         source,
                         events,
                         repeat,
+                        visibility: visibility.clone(),
                     });
                 }
             }
-            stack.push((child, x, y));
+            stack.push((child, x, y, visibility));
         }
     }
     Ok(())
@@ -968,6 +1025,7 @@ mod tests {
                     repeat: raw.repeat,
                     gauge_origin: (0.0, 0.0),
                     gauge_scale: (1.0, 1.0),
+                    visibility: raw.visibility,
                 })
                 .collect(),
             gauges: vec![],
@@ -1056,6 +1114,7 @@ mod tests {
                 repeat: false,
                 gauge_origin: (0.0, 0.0),
                 gauge_scale: (1.0, 1.0),
+                visibility: vec![],
             }],
             gauges: vec![], conditions: vec![], background: Rgba([0; 4]),
         };
@@ -1121,6 +1180,7 @@ mod tests {
                     repeat: area.repeat,
                     gauge_origin: (0.0, 0.0),
                     gauge_scale: (1.0, 1.0),
+                    visibility: area.visibility,
                 })
                 .collect(),
             gauges: vec![],
@@ -1138,5 +1198,118 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(host.0.len(), 1);
+    }
+
+    #[test]
+    fn hidden_parent_blocks_input_but_captured_release_clears_state() {
+        let gauge = Gauge::parse(r#"<Gauge><MouseArea><Size X="2" Y="2"/>
+            <Visibility>(L:Visible,bool)</Visibility>
+            <MouseArea><Size X="2" Y="2"/><Visibility>1</Visibility>
+            <MouseClick><ClickType>LeftSingle+LeftRelease+WheelUp</ClickType>
+            <ClickRepeat>True</ClickRepeat><Script>(M:Event) 'LeftRelease' scmp 0 == if{ 0 (&gt;L:Pressed) } els{ 1 (&gt;L:Pressed) }</Script>
+            </MouseClick></MouseArea></MouseArea></Gauge>"#).unwrap();
+        let mut raw = Vec::new();
+        collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].visibility.len(), 2);
+        let panel = PanelImage {
+            image: RgbaImage::new(2, 2),
+            omitted_gauges: 0,
+            omitted_elements: 0,
+            mouse_areas: raw
+                .into_iter()
+                .map(|area| PanelMouseArea {
+                    x: area.bounds.0,
+                    y: area.bounds.1,
+                    w: area.bounds.2,
+                    h: area.bounds.3,
+                    script: Program::compile(&area.source).unwrap(),
+                    events: area.events,
+                    repeat: area.repeat,
+                    gauge_origin: (0.0, 0.0),
+                    gauge_scale: (1.0, 1.0),
+                    visibility: area.visibility,
+                })
+                .collect(),
+            gauges: vec![],
+            conditions: vec![],
+            background: Rgba([0; 4]),
+        };
+        struct State {
+            visible: f64,
+            pressed: f64,
+        }
+        impl Host for State {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "VISIBLE" => Ok(Value::Number(self.visible)),
+                    "PRESSED" => Ok(Value::Number(self.pressed)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                assert_eq!(reference.name, "PRESSED");
+                self.pressed = value.number()?;
+                Ok(())
+            }
+        }
+        let mut host = State {
+            visible: 0.0,
+            pressed: 0.0,
+        };
+        assert!(
+            panel
+                .visible_mouse_areas_at(1.0, 1.0, &mut host)
+                .unwrap()
+                .is_empty()
+        );
+        for event in [
+            MouseEvent::LeftSingle,
+            MouseEvent::LeftDrag,
+            MouseEvent::WheelUp,
+            MouseEvent::DownRepeat,
+        ] {
+            assert!(
+                !panel
+                    .mouse_event(event, &[0], [1.0, 1.0], &mut host)
+                    .unwrap()
+            );
+            assert_eq!(host.pressed, 0.0);
+        }
+        host.visible = 1.0;
+        let captured = panel.visible_mouse_areas_at(1.0, 1.0, &mut host).unwrap();
+        assert_eq!(captured, [0]);
+        assert!(
+            panel
+                .mouse_event(MouseEvent::LeftSingle, &captured, [1.0, 1.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(host.pressed, 1.0);
+        host.visible = 0.0;
+        assert!(
+            panel
+                .mouse_event(MouseEvent::LeftRelease, &captured, [3.0, 3.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(host.pressed, 0.0);
+        host.visible = f64::NAN;
+        assert!(panel.visible_mouse_areas_at(1.0, 1.0, &mut host).is_err());
+        assert!(
+            panel
+                .mouse_event(MouseEvent::WheelUp, &[0], [1.0, 1.0], &mut host)
+                .is_err()
+        );
+        assert_eq!(host.pressed, 0.0);
+    }
+
+    #[test]
+    fn invalid_parent_visibility_omits_its_controls() {
+        let gauge = Gauge::parse(r#"<Gauge><MouseArea><Visibility>unsupported</Visibility>
+            <MouseArea><Size X="1" Y="1"/><MouseClick><KeyEvent>BAD</KeyEvent></MouseClick></MouseArea>
+            </MouseArea><MouseArea><Size X="1" Y="1"/><MouseClick><KeyEvent>GOOD</KeyEvent></MouseClick></MouseArea></Gauge>"#).unwrap();
+        let mut raw = Vec::new();
+        collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].source, "(>K:GOOD)");
     }
 }

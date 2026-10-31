@@ -170,10 +170,19 @@ impl App {
             }
             Some((name, areas, *position))
         } else {
-            self.cockpit_target().and_then(|(name, x, y)| {
-                let panel = self.aircraft.as_ref()?.panel_images.get(&name)?;
-                Some((name, panel.mouse_areas_at(x, y), [x, y]))
-            })
+            if let Some((name, x, y)) = self.cockpit_target() {
+                let panel = self
+                    .aircraft
+                    .as_ref()
+                    .context("aircraft is absent")?
+                    .panel_images
+                    .get(&name)
+                    .context("cockpit panel is absent")?;
+                let areas = panel.visible_mouse_areas_at(x, y, &mut self.variables)?;
+                Some((name, areas, [x, y]))
+            } else {
+                None
+            }
         };
         let Some((name, areas, position)) = target else {
             return Ok(());
