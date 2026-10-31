@@ -96,7 +96,12 @@ impl<'a> AnimationBlock<'a> {
 
 impl<'a> Animation<'a> {
     fn parse(data: &'a [u8]) -> Result<Self, Error> {
-        let prefix = data.get(..45).ok_or(Error::Truncated { offset: 0 })?;
+        let prefix = data.get(..36).ok_or(Error::Truncated { offset: 0 })?;
+        let parameter = &data[36..];
+        let parameter_length = parameter
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or(Error::Truncated { offset: 36 })?;
         let mut cursor = Cursor::new(prefix);
         let guid = <[u8; 16]>::read_le(&mut cursor).map_err(|_| Error::InvalidSize)?;
         let length = f32::read_le(&mut cursor).map_err(|_| Error::InvalidSize)?;
@@ -104,11 +109,11 @@ impl<'a> Animation<'a> {
             guid: Uuid::from_bytes_le(guid),
             length,
             type_name: c_string(&prefix[20..36]),
-            type_parameter: c_string(&prefix[36..45]),
+            type_parameter: &parameter[..parameter_length],
             tracks: Vec::new(),
             unknown: Vec::new(),
         };
-        for chunk in parse_chunks(&data[45..])? {
+        for chunk in parse_chunks(&parameter[parameter_length + 1..])? {
             if &chunk.id == b"XANS" {
                 result.tracks.push(Track::parse(chunk.data)?);
             } else {
@@ -222,6 +227,20 @@ mod tests {
         let mut body = chunk(b"XANH", &9.2f32.to_le_bytes());
         body.extend(chunk(b"XANL", &chunk(b"XANI", &animation)));
         chunk(b"RIFF", &body)
+    }
+
+    #[test]
+    fn reads_variable_length_type_parameters() {
+        for parameter in [b"".as_slice(), b"AutoPlay", b"AutoPlay,Random"] {
+            let mut bytes = vec![0; 36];
+            bytes.extend(parameter);
+            bytes.push(0);
+            bytes.extend(chunk(b"XAPS", b"code"));
+            let animation = Animation::parse(&bytes).unwrap();
+            assert_eq!(animation.type_parameter, parameter);
+            assert_eq!(animation.unknown[0].data, b"code");
+        }
+        assert!(Animation::parse(&[1; 40]).is_err());
     }
 
     #[test]
