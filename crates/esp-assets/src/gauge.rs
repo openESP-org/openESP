@@ -27,34 +27,64 @@ struct Canvas {
 struct Layer {
     image: RgbaImage,
     position: (i64, i64),
-    conditions: Vec<usize>,
+    conditions: Vec<Requirement>,
+    visible: bool,
 }
 
 struct Condition {
     program: Program,
-    visible: bool,
+    value: Option<f64>,
+    minimum: Option<f64>,
+    maximum: Option<f64>,
     reported: bool,
+}
+
+#[derive(Clone)]
+enum Requirement {
+    Visible(usize),
+    Case(usize, f64),
 }
 
 impl PanelImage {
     pub fn update(&mut self, host: &mut impl Host) -> bool {
-        let mut changed = false;
         for condition in &mut self.conditions {
             let result = condition
                 .program
                 .evaluate(host)
                 .and_then(|value| value.ok_or(esp_script::Error::Stack)?.number());
             match result {
-                Ok(value) => {
-                    let visible = value != 0.0;
-                    changed |= condition.visible != visible;
-                    condition.visible = visible;
+                Ok(mut value) => {
+                    if let Some(minimum) = condition.minimum {
+                        value = value.max(minimum);
+                    }
+                    if let Some(maximum) = condition.maximum {
+                        value = value.min(maximum);
+                    }
+                    condition.value = Some(value);
                 }
                 Err(error) if !condition.reported => {
-                    eprintln!("gauge visibility: {error}");
+                    eprintln!("gauge expression: {error}");
                     condition.reported = true;
                 }
                 Err(_) => {}
+            }
+        }
+        let mut changed = false;
+        for gauge in &mut self.gauges {
+            for layer in &mut gauge.layers {
+                let visible = layer
+                    .conditions
+                    .iter()
+                    .all(|requirement| match requirement {
+                        Requirement::Visible(index) => self.conditions[*index]
+                            .value
+                            .is_some_and(|value| value != 0.0),
+                        Requirement::Case(index, expected) => {
+                            self.conditions[*index].value == Some(*expected)
+                        }
+                    });
+                changed |= visible != layer.visible;
+                layer.visible = visible;
             }
         }
         if changed {
@@ -70,11 +100,7 @@ impl PanelImage {
         for gauge in &self.gauges {
             let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
             for layer in &gauge.layers {
-                if layer
-                    .conditions
-                    .iter()
-                    .all(|&index| self.conditions[index].visible)
-                {
+                if layer.visible {
                     overlay(&mut art, &layer.image, layer.position.0, layer.position.1);
                 }
             }
@@ -164,7 +190,6 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                             "Rotate"
                                 | "Rotation"
                                 | "Shift"
-                                | "Select"
                                 | "MaskImage"
                                 | "LeftScript"
                                 | "TopScript"
@@ -181,10 +206,12 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 let source = visibility.text().unwrap_or("").trim();
                 match Program::compile(source) {
                     Ok(program) if !source.is_empty() => {
-                        parents.push(conditions.len());
+                        parents.push(Requirement::Visible(conditions.len()));
                         conditions.push(Condition {
                             program,
-                            visible: false,
+                            value: None,
+                            minimum: None,
+                            maximum: None,
                             reported: false,
                         });
                     }
@@ -193,6 +220,66 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         continue;
                     }
                 }
+            }
+            if node.has_tag_name("Select") {
+                let Some(expression) = node.children().find(|c| c.has_tag_name("Expression"))
+                else {
+                    omitted_elements += 1;
+                    continue;
+                };
+                let Some(source) = expression
+                    .children()
+                    .find(|c| c.has_tag_name("Script"))
+                    .and_then(|c| c.text())
+                    .filter(|source| !source.trim().is_empty())
+                else {
+                    omitted_elements += 1;
+                    continue;
+                };
+                let Ok(program) = Program::compile(source.trim()) else {
+                    omitted_elements += 1;
+                    continue;
+                };
+                let bound = |name| -> Result<Option<f64>> {
+                    let value = expression
+                        .children()
+                        .find(|c| c.has_tag_name(name))
+                        .and_then(|c| c.text())
+                        .map(|v| v.trim().parse::<f64>())
+                        .transpose()?;
+                    anyhow::ensure!(value.is_none_or(f64::is_finite), "invalid select bound");
+                    Ok(value.filter(|value| *value != -9_999_999.0))
+                };
+                let minimum = bound("Minimum")?;
+                let maximum = bound("Maximum")?;
+                anyhow::ensure!(
+                    minimum.zip(maximum).is_none_or(|(min, max)| min <= max),
+                    "invalid select bounds"
+                );
+                let index = conditions.len();
+                conditions.push(Condition {
+                    program,
+                    value: None,
+                    minimum,
+                    maximum,
+                    reported: false,
+                });
+                for case in node.children().filter(|c| c.has_tag_name("Case")).rev() {
+                    let Some(value) = case
+                        .children()
+                        .find(|c| c.has_tag_name("ExpressionResult"))
+                        .and_then(|c| c.text())
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                        .filter(|value| value.is_finite())
+                    else {
+                        omitted_elements += 1;
+                        continue;
+                    };
+                    let mut requirements = parents.clone();
+                    requirements.push(Requirement::Case(index, value));
+                    stack.push((case, x, y, requirements));
+                }
+                continue;
             }
             let (x, y) = if node.has_tag_name("Element") {
                 let (px, py) = position(node)?;
@@ -235,11 +322,15 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 layers.push(Layer {
                     image: bitmap,
                     position: (x.round() as i64, y.round() as i64),
+                    visible: parents.is_empty(),
                     conditions: parents.clone(),
                 });
             }
             for child in node.children().filter(|c| c.is_element()).rev() {
-                if child.has_tag_name("Element") || child.has_tag_name("Image") {
+                if child.has_tag_name("Element")
+                    || child.has_tag_name("Image")
+                    || child.has_tag_name("Select")
+                {
                     stack.push((child, x, y, parents.clone()));
                 }
             }
@@ -398,5 +489,37 @@ mod tests {
         host.0 = 0.0;
         assert!(image.update(&mut host));
         assert_eq!(image.image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn selects_gauge_images_from_expression() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            panel_path.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=2,2\npixel_size=2,2\ntexture=$screen\ngauge00=example!dial,0,0",
+        )
+        .unwrap();
+        std::fs::write(module.join("dial.xml"), r#"<Gauge><Size X="2" Y="2"/><Element><Select><Expression><Minimum>0</Minimum><Maximum>1</Maximum><Script>(L:SWITCH, bool)</Script></Expression><Case><ExpressionResult>0</ExpressionResult><Image Name="off.bmp"/></Case><Case><ExpressionResult>1</ExpressionResult><Image Name="on.bmp"/></Case></Select></Element></Gauge>"#).unwrap();
+        for (name, color) in [("off.bmp", [255, 0, 0]), ("on.bmp", [0, 255, 0])] {
+            let mut data = Vec::new();
+            image::codecs::bmp::BmpEncoder::new(&mut data)
+                .encode(&color, 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            std::fs::write(module.join(name), data).unwrap();
+        }
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(0.0);
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        host.0 = 1.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        host.0 = 2.0;
+        assert!(!image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 255, 0, 255]);
     }
 }

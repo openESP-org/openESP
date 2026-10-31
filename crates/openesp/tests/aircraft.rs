@@ -123,3 +123,33 @@ fn renders_fire_annunciator() {
         "fire input did not change a cockpit indicator"
     );
 }
+
+#[test]
+#[ignore = "requires a GPU, desktop and an aircraft with an XML flight director switch"]
+fn renders_flight_director_switch() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut differences = 0;
+    for path in content::aircraft_paths() {
+        let off = capture(
+            &path,
+            true,
+            &["A:Autopilot flight director active,bool=0"],
+            &temp.path().join("off.png"),
+        );
+        let on = capture(
+            &path,
+            true,
+            &["A:Autopilot flight director active,bool=1"],
+            &temp.path().join("on.png"),
+        );
+        differences += off
+            .pixels()
+            .zip(on.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+    }
+    assert!(
+        differences > 20,
+        "flight director input did not change the cockpit switch"
+    );
+}
