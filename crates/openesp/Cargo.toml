@@ -1,0 +1,17 @@
+[package]
+name = "openesp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+esp-assets = { path = "../esp-assets" }
+esp-render = { path = "../esp-render" }
+glam = "0.30"
+pollster = "0.4"
+winit = "0.30"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"

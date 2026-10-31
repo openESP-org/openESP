@@ -107,7 +107,11 @@ fn number(config: &Config, section: &str, key: &str) -> Result<Option<f64>, Valu
         .transpose()
 }
 
-fn vector(config: &Config, section: &str, key: &str) -> Result<Option<[f64; 3]>, ValueError> {
+pub(super) fn vector(
+    config: &Config,
+    section: &str,
+    key: &str,
+) -> Result<Option<[f64; 3]>, ValueError> {
     let Some(value) = config.value(section, key)? else {
         return Ok(None);
     };

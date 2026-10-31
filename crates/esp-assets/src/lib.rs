@@ -3,6 +3,8 @@ use esp_formats::{cfg, mdl};
 use glam::{Mat4, Vec3};
 use std::path::{Component, Path, PathBuf};
 
+pub mod texture;
+
 pub struct Aircraft {
     pub title: String,
     pub exterior: Model,
@@ -120,10 +122,17 @@ impl Aircraft {
                 }
             }
         }
+        let datum = cfg::aircraft::ReferencePoints::from_config(&aircraft)?
+            .datum_feet
+            .unwrap_or([0.0; 3]);
         let eyepoint = cfg::camera::Views::from_config(&aircraft)?
             .eyepoint_feet
             .map(|[longitudinal, lateral, vertical]| {
-                Vec3::new(lateral as f32, vertical as f32, longitudinal as f32) * 0.3048
+                Vec3::new(
+                    (lateral + datum[1]) as f32,
+                    (vertical + datum[2]) as f32,
+                    (longitudinal + datum[0]) as f32,
+                ) * 0.3048
             });
         Ok(Self {
             title: variant.title.unwrap_or("Aircraft").into(),

@@ -12,6 +12,29 @@ pub struct Configuration<'a> {
     pub texture: Option<&'a str>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct ReferencePoints {
+    pub datum_feet: Option<[f64; 3]>,
+    pub empty_cg_feet: Option<[f64; 3]>,
+}
+
+impl ReferencePoints {
+    pub fn from_config(config: &Config) -> Result<Self, ValueError> {
+        Ok(Self {
+            datum_feet: super::camera::vector(
+                config,
+                "weight_and_balance",
+                "reference_datum_position",
+            )?,
+            empty_cg_feet: super::camera::vector(
+                config,
+                "weight_and_balance",
+                "empty_weight_cg_position",
+            )?,
+        })
+    }
+}
+
 pub fn configurations(config: &Config) -> Result<Vec<Configuration<'_>>, ValueError> {
     let mut result = Vec::new();
     for (section, _) in &config.sections {
@@ -46,6 +69,25 @@ pub fn configurations(config: &Config) -> Result<Vec<Configuration<'_>>, ValueEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_reference_points_and_rejects_invalid_triplets() {
+        let config = Config::parse("[weight_and_balance]\nreference_datum_position=3.6,0,0\nempty_weight_cg_position=-3,0,0").unwrap();
+        let points = ReferencePoints::from_config(&config).unwrap();
+        assert_eq!(points.datum_feet, Some([3.6, 0.0, 0.0]));
+        assert_eq!(points.empty_cg_feet, Some([-3.0, 0.0, 0.0]));
+        for value in ["1,2", "1,2,NaN", "1,2,3,4"] {
+            assert!(
+                ReferencePoints::from_config(
+                    &Config::parse(&format!(
+                        "[weight_and_balance]\nreference_datum_position={value}"
+                    ))
+                    .unwrap()
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn reads_configuration_references_without_resolving_paths() {

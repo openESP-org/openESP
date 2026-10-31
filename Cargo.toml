@@ -2,5 +2,7 @@
 resolver = "3"
 members = [
     "crates/esp-formats",
-    "crates/esp-assets"
+    "crates/esp-assets",
+    "crates/esp-render",
+    "crates/openesp"
 ]
