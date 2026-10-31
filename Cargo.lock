@@ -697,6 +697,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "esp-assets",
+ "esp-script",
+ "glam 0.30.10",
+ "petgraph",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1640,6 +1651,8 @@ dependencies = [
  "clap",
  "esp-assets",
  "esp-render",
+ "esp-script",
+ "esp-sim",
  "glam 0.30.10",
  "image",
  "pollster",

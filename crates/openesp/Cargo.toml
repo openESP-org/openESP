@@ -8,6 +8,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 esp-assets = { path = "../esp-assets" }
 esp-render = { path = "../esp-render" }
+esp-sim = { path = "../esp-sim" }
+esp-script = { path = "../esp-script" }
 glam = "0.30"
 pollster = "0.4"
 winit = "0.30"

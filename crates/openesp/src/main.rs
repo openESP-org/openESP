@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use esp_assets::Aircraft;
 use esp_render::{Camera, Renderer};
+use esp_script::Value;
+use esp_sim::{animation::ModelState, variables::Variables};
 use glam::{DVec3, Vec3};
 use std::{
     collections::HashSet,
@@ -29,6 +31,41 @@ struct Arguments {
     frames: Option<u64>,
     #[arg(long)]
     screenshot: Option<PathBuf>,
+    #[arg(long = "variable", value_parser = parse_variable)]
+    variables: Vec<Variable>,
+}
+
+#[derive(Clone)]
+struct Variable {
+    category: char,
+    name: String,
+    unit: String,
+    value: f64,
+}
+
+fn parse_variable(text: &str) -> Result<Variable, String> {
+    let (reference, value) = text
+        .rsplit_once('=')
+        .ok_or("expected CATEGORY:NAME,UNIT=VALUE")?;
+    let (category, name) = reference
+        .split_once(':')
+        .ok_or("expected variable category")?;
+    let (name, unit) = name.rsplit_once(',').ok_or("expected variable unit")?;
+    let mut chars = category.chars();
+    let category = chars.next().ok_or("empty variable category")?;
+    if chars.next().is_some() {
+        return Err("invalid variable category".into());
+    }
+    let value = value.parse::<f64>().map_err(|e| e.to_string())?;
+    if !value.is_finite() {
+        return Err("variable must be finite".into());
+    }
+    Ok(Variable {
+        category,
+        name: name.into(),
+        unit: unit.into(),
+        value,
+    })
 }
 
 struct App {
@@ -36,6 +73,12 @@ struct App {
     loaded: mpsc::Receiver<Result<Aircraft>>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    aircraft: Option<Aircraft>,
+    exterior_state: Option<ModelState>,
+    interior_state: Option<ModelState>,
+    variables: Variables,
+    door_open: bool,
+    reported_diagnostics: HashSet<String>,
     camera: Camera,
     keys: HashSet<KeyCode>,
     mouse_look: bool,
@@ -55,7 +98,7 @@ impl App {
             } else {
                 let target = renderer.centre.as_dvec3();
                 Camera::looking_at(
-                    target + DVec3::new(0.9, 0.4, 1.4) * f64::from(renderer.radius),
+                    target + DVec3::new(-0.9, 0.4, 1.4) * f64::from(renderer.radius),
                     target,
                 )
             };
@@ -73,6 +116,13 @@ impl App {
                         window.clone(),
                         &aircraft,
                     ))?);
+                    self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
+                    self.interior_state = aircraft
+                        .interior
+                        .as_ref()
+                        .map(ModelState::new)
+                        .transpose()?;
+                    self.aircraft = Some(aircraft);
                     self.reset_camera();
                     self.last_frame = Instant::now();
                 }
@@ -101,7 +151,52 @@ impl App {
             5.0
         };
         self.camera.move_local(movement, dt * speed);
+        let roll = axis(KeyCode::ArrowRight, KeyCode::ArrowLeft) as f64;
+        let pitch = axis(KeyCode::ArrowDown, KeyCode::ArrowUp) as f64;
+        for (name, value) in [
+            ("YOKE X POSITION", roll * 100.0),
+            ("YOKE Y POSITION", pitch * 100.0),
+            ("AILERON LEFT DEFLECTION PCT", roll * 100.0),
+            ("AILERON RIGHT DEFLECTION PCT", -roll * 100.0),
+            ("ELEVATOR DEFLECTION PCT", pitch * 100.0),
+            ("EXIT OPEN:0", if self.door_open { 100.0 } else { 0.0 }),
+        ] {
+            self.variables.set_number(name, "percent", value);
+        }
+        for variable in &self.arguments.variables {
+            self.variables.set(
+                variable.category,
+                &variable.name,
+                Some(&variable.unit),
+                Value::Number(variable.value),
+            );
+        }
+        if let Some(aircraft) = &self.aircraft {
+            if let Some(state) = &mut self.exterior_state {
+                state.update(&aircraft.exterior, &mut self.variables, dt)?;
+            }
+            if let (Some(model), Some(state)) = (&aircraft.interior, &mut self.interior_state) {
+                state.update(model, &mut self.variables, dt)?;
+            }
+        }
+        for state in [&mut self.exterior_state, &mut self.interior_state]
+            .into_iter()
+            .flatten()
+        {
+            for diagnostic in state.diagnostics.drain(..) {
+                if !self.reported_diagnostics.contains(&diagnostic) {
+                    eprintln!("model: {diagnostic}");
+                    self.reported_diagnostics.insert(diagnostic);
+                }
+            }
+        }
         if let Some(renderer) = &mut self.renderer {
+            if let Some(state) = &self.exterior_state {
+                renderer.update_model(false, &state.transforms, &state.visible)?;
+            }
+            if let Some(state) = &self.interior_state {
+                renderer.update_model(true, &state.transforms, &state.visible)?;
+            }
             let screenshot = if self.frames == 0 {
                 self.arguments.screenshot.as_deref()
             } else {
@@ -146,6 +241,10 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => {
                 self.keys.clear();
                 self.mouse_look = false;
+                if let Some(window) = &self.window {
+                    window.set_cursor_visible(true);
+                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                }
             }
             WindowEvent::MouseInput {
                 state,
@@ -155,6 +254,18 @@ impl ApplicationHandler for App {
                 self.mouse_look = state == ElementState::Pressed;
                 if let Some(window) = &self.window {
                     window.set_cursor_visible(!self.mouse_look);
+                    let grab = if self.mouse_look {
+                        window
+                            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                            .or_else(|_| {
+                                window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                            })
+                    } else {
+                        window.set_cursor_grab(winit::window::CursorGrabMode::None)
+                    };
+                    if let Err(error) = grab {
+                        eprintln!("mouse capture: {error}");
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -169,6 +280,7 @@ impl ApplicationHandler for App {
                                     self.reset_camera();
                                 }
                                 KeyCode::Home => self.reset_camera(),
+                                KeyCode::KeyO => self.door_open = !self.door_open,
                                 _ => {}
                             }
                         }
@@ -227,6 +339,12 @@ fn main() -> Result<()> {
         loaded,
         window: None,
         renderer: None,
+        aircraft: None,
+        exterior_state: None,
+        interior_state: None,
+        variables: Variables::default(),
+        door_open: false,
+        reported_diagnostics: HashSet::new(),
         camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
         keys: HashSet::new(),
         mouse_look: false,

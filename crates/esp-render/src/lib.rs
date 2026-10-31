@@ -36,6 +36,8 @@ struct Draw {
     bind: wgpu::BindGroup,
     blended: bool,
     centre: Vec3,
+    node: Option<usize>,
+    visible: bool,
 }
 
 struct DrawData<'a> {
@@ -44,6 +46,7 @@ struct DrawData<'a> {
     transform: Mat4,
     uniform: DrawUniform,
     blended: bool,
+    node: Option<usize>,
 }
 
 pub struct Renderer {
@@ -105,6 +108,7 @@ impl Renderer {
         {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
+        config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera"),
@@ -274,6 +278,7 @@ impl Renderer {
                         uniform,
                         blended: material.source.source_blend == 5
                             || material.source.destination_blend != 1,
+                        node: Some(mesh.node),
                     },
                 ));
             }
@@ -336,6 +341,7 @@ impl Renderer {
                     settings: [0.0, 1.0, 0.0, 0.0],
                 },
                 blended: false,
+                node: None,
             },
         );
         let cockpit_eye = aircraft
@@ -370,6 +376,26 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth = depth_target(&self.device, &self.config);
+    }
+
+    pub fn update_model(
+        &mut self,
+        cockpit: bool,
+        transforms: &[Mat4],
+        visible: &[bool],
+    ) -> Result<()> {
+        let draws = if cockpit {
+            &mut self.interior
+        } else {
+            &mut self.exterior
+        };
+        for draw in draws {
+            if let Some(node) = draw.node {
+                draw.transform = *transforms.get(node).context("missing scene transform")?;
+                draw.visible = *visible.get(node).context("missing scene visibility")?;
+            }
+        }
+        Ok(())
     }
 
     pub fn render(
@@ -414,7 +440,7 @@ impl Renderer {
             self.queue
                 .write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
         }
-        let mut transparent: Vec<_> = draws.iter().filter(|d| d.blended).collect();
+        let mut transparent: Vec<_> = draws.iter().filter(|d| d.visible && d.blended).collect();
         transparent.sort_by(|a, b| {
             let distance = |d: &Draw| {
                 (self.aircraft_origin + d.transform.transform_point3(d.centre).as_dvec3()
@@ -463,7 +489,7 @@ impl Renderer {
                 pass.draw_indexed(0..draw.count, 0, 0..1);
             };
             draw_one(&mut pass, &self.ground);
-            for draw in draws.iter().filter(|d| !d.blended) {
+            for draw in draws.iter().filter(|d| d.visible && !d.blended) {
                 draw_one(&mut pass, draw);
             }
             pass.set_pipeline(&self.blended);
@@ -646,6 +672,7 @@ fn make_draw(
         transform,
         uniform,
         blended,
+        node,
     } = data;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("draw"),
@@ -693,5 +720,7 @@ fn make_draw(
         bind,
         blended,
         centre,
+        node,
+        visible: true,
     }
 }

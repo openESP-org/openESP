@@ -1,8 +1,12 @@
 use anyhow::{Context, Result, bail};
 use esp_formats::{cfg, mdl};
 use glam::{Mat4, Vec3};
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Component, Path, PathBuf},
+};
 
+pub mod animation;
 pub mod texture;
 
 pub struct Aircraft {
@@ -17,11 +21,15 @@ pub struct Model {
     pub nodes: Vec<Node>,
     pub materials: Vec<Material>,
     pub lods: Vec<Lod>,
+    pub animations: Vec<animation::Animation>,
+    pub visibility: Vec<animation::Visibility>,
 }
 
 pub struct Node {
     pub parent: Option<usize>,
     pub transform: Mat4,
+    pub animation: Option<usize>,
+    pub visibility: Option<usize>,
 }
 
 pub struct Material {
@@ -175,6 +183,34 @@ impl Model {
         let decoded = mdl::Model::parse(bytes)?.decode()?;
         let data = decoded.exterior.context("model has no MDLD data")?;
         let parents = mdl::scene::parents(&data.nodes)?;
+        let animations = animation::animations(&data)?;
+        let visibility = animation::visibility(&data)?;
+        let track_ids = animations
+            .iter()
+            .flat_map(|a| &a.tracks)
+            .map(|t| t.id as usize)
+            .collect::<HashSet<_>>();
+        let links = |entries: &[i16], available: &HashSet<usize>| -> Result<Vec<Option<usize>>> {
+            if entries.is_empty() {
+                return Ok(vec![None; data.nodes.len()]);
+            }
+            anyhow::ensure!(
+                entries.len() == data.nodes.len(),
+                "node linkage count mismatch"
+            );
+            entries
+                .iter()
+                .map(|&entry| match entry {
+                    -1 => Ok(None),
+                    entry if entry >= 0 && available.contains(&(entry as usize)) => {
+                        Ok(Some(entry as usize))
+                    }
+                    _ => bail!("invalid node linkage {entry}"),
+                })
+                .collect()
+        };
+        let animation_links = links(&data.animation_links, &track_ids)?;
+        let visibility_links = links(&data.visibility_links, &(0..visibility.len()).collect())?;
         let nodes = parents
             .into_iter()
             .enumerate()
@@ -183,7 +219,12 @@ impl Model {
                 if !transform.is_finite() || transform.determinant().abs() < 1e-12 {
                     bail!("invalid node transform {i}");
                 }
-                Ok(Node { parent, transform })
+                Ok(Node {
+                    parent,
+                    transform,
+                    animation: animation_links[i],
+                    visibility: visibility_links[i],
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let materials = data
@@ -240,6 +281,8 @@ impl Model {
             nodes,
             materials,
             lods,
+            animations,
+            visibility,
         })
     }
 
@@ -294,14 +337,20 @@ mod tests {
                 Node {
                     parent: Some(1),
                     transform: Mat4::from_translation(Vec3::X),
+                    animation: None,
+                    visibility: None,
                 },
                 Node {
                     parent: None,
                     transform: Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                    animation: None,
+                    visibility: None,
                 },
             ],
             materials: vec![],
             lods: vec![],
+            animations: vec![],
+            visibility: vec![],
         };
         assert!(
             model.transforms().unwrap()[0]

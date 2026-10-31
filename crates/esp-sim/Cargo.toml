@@ -1,0 +1,11 @@
+[package]
+name = "esp-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+esp-assets = { path = "../esp-assets" }
+esp-script = { path = "../esp-script" }
+glam = "0.30"
+petgraph = "0.8"

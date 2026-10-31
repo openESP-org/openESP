@@ -7,7 +7,12 @@ use std::{
 #[path = "../../../tests/support/content.rs"]
 mod content;
 
-fn capture(aircraft: &Path, cockpit: bool, output: &Path) -> image::RgbaImage {
+fn capture(
+    aircraft: &Path,
+    cockpit: bool,
+    variable: Option<&str>,
+    output: &Path,
+) -> image::RgbaImage {
     let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
     command
         .arg("--aircraft")
@@ -16,6 +21,9 @@ fn capture(aircraft: &Path, cockpit: bool, output: &Path) -> image::RgbaImage {
         .arg(output);
     if cockpit {
         command.arg("--cockpit");
+    }
+    if let Some(variable) = variable {
+        command.args(["--variable", variable]);
     }
     let mut child = command.stdout(Stdio::null()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -46,8 +54,8 @@ fn capture(aircraft: &Path, cockpit: bool, output: &Path) -> image::RgbaImage {
 fn renders_external_aircraft_and_cockpits() {
     let temp = tempfile::tempdir().unwrap();
     for path in content::aircraft_paths() {
-        let exterior = capture(&path, false, &temp.path().join("exterior.png"));
-        let interior = capture(&path, true, &temp.path().join("interior.png"));
+        let exterior = capture(&path, false, None, &temp.path().join("exterior.png"));
+        let interior = capture(&path, true, None, &temp.path().join("interior.png"));
         assert_eq!(exterior.dimensions(), interior.dimensions());
         let difference = exterior
             .pixels()
@@ -59,4 +67,34 @@ fn renders_external_aircraft_and_cockpits() {
             "cockpit did not change the scene"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original aircraft with EXIT OPEN:0 animations"]
+fn renders_door_animation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut differences = 0;
+    for path in content::aircraft_paths() {
+        let closed = capture(
+            &path,
+            false,
+            Some("A:EXIT OPEN:0,percent=0"),
+            &temp.path().join("closed.png"),
+        );
+        let open = capture(
+            &path,
+            false,
+            Some("A:EXIT OPEN:0,percent=100"),
+            &temp.path().join("open.png"),
+        );
+        differences += closed
+            .pixels()
+            .zip(open.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+    }
+    assert!(
+        differences > 1000,
+        "door input did not visibly change the rendered aircraft"
+    );
 }
