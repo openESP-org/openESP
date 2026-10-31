@@ -7,12 +7,14 @@ use std::{
 };
 
 pub mod animation;
+pub mod panel;
 pub mod texture;
 
 pub struct Aircraft {
     pub title: String,
     pub exterior: Model,
     pub interior: Option<Model>,
+    pub panel: Option<panel::Panel>,
     pub eyepoint: Option<Vec3>,
     pub texture_directories: Vec<PathBuf>,
 }
@@ -118,6 +120,7 @@ impl Aircraft {
         let load = |name: &str| Model::load(&resolve_path(&directory, &format!("{name}.mdl"))?);
         let exterior = load(models.normal.context("model.cfg has no exterior model")?)?;
         let interior = models.interior.map(load).transpose()?;
+        let panel = panel::Panel::load(root, variant.panel)?;
         let texture_directory = variant_directory(root, "texture", variant.texture)?;
         let mut texture_directories = vec![texture_directory.clone()];
         if let Ok(path) = resolve_path(&texture_directory, "texture.cfg") {
@@ -146,6 +149,7 @@ impl Aircraft {
             title: variant.title.unwrap_or("Aircraft").into(),
             exterior,
             interior,
+            panel,
             eyepoint,
             texture_directories,
         })

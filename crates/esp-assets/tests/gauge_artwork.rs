@@ -39,3 +39,34 @@ fn decodes_external_gauge_artwork() {
     assert!(decoded > 0, "no gauge bitmap artwork found");
     eprintln!("decoded {decoded} gauge bitmaps");
 }
+
+#[test]
+#[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS with local XML gauges"]
+fn resolves_configured_xml_gauges() {
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = esp_assets::Aircraft::load(&path, 0).unwrap();
+        let Some(panel) = aircraft.panel else {
+            continue;
+        };
+        let layout = panel.layout().unwrap();
+        for gauge in layout
+            .windows
+            .iter()
+            .filter(|window| window.kind == esp_formats::cfg::panel::WindowKind::VirtualCockpit)
+            .flat_map(|window| &window.gauges)
+        {
+            if let Some(bytes) = panel
+                .read_xml_gauge(gauge.reference, 8 * 1024 * 1024)
+                .unwrap()
+            {
+                let text = std::str::from_utf8(&bytes).unwrap();
+                let parsed = esp_formats::gauge::Gauge::parse(text).unwrap();
+                assert!(parsed.size().unwrap().is_some());
+                count += 1;
+            }
+        }
+    }
+    assert!(count > 0, "no configured local XML gauges found");
+    eprintln!("resolved {count} configured XML gauges");
+}
