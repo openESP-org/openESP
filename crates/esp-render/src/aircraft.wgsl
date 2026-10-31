@@ -23,7 +23,20 @@ struct Output {
 }
 @fragment fn fs_main(input: Output) -> @location(0) vec4<f32> {
     var colour = textureSample(diffuse_texture, texture_sampler, input.uv) * draw.diffuse;
-    if colour.a < draw.settings.z { discard; }
+    let alpha = colour.a;
+    let threshold = draw.settings.z;
+    var passes = true;
+    switch u32(draw.settings.w) {
+        case 1u: { passes = false; }
+        case 2u: { passes = alpha < threshold; }
+        case 3u: { passes = alpha == threshold; }
+        case 4u: { passes = alpha <= threshold; }
+        case 5u: { passes = alpha > threshold; }
+        case 6u: { passes = alpha != threshold; }
+        case 7u: { passes = alpha >= threshold; }
+        default: {}
+    }
+    if !passes { discard; }
     if draw.settings.y > 0.0 {
         let distance = abs(fract(input.uv - 0.5) - 0.5);
         let width = max(fwidth(input.uv), vec2(0.0001));

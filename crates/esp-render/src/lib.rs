@@ -7,7 +7,9 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 pub mod camera;
+mod material;
 pub use camera::Camera;
+use material::PipelineKey;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -38,6 +40,7 @@ struct Draw {
     centre: Vec3,
     node: Option<usize>,
     visible: bool,
+    pipeline: usize,
 }
 
 struct DrawData<'a> {
@@ -47,6 +50,7 @@ struct DrawData<'a> {
     uniform: DrawUniform,
     blended: bool,
     node: Option<usize>,
+    pipeline: usize,
 }
 
 pub struct Renderer {
@@ -55,8 +59,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     depth: wgpu::TextureView,
-    opaque: wgpu::RenderPipeline,
-    blended: wgpu::RenderPipeline,
+    pipelines: Vec<wgpu::RenderPipeline>,
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     exterior: Vec<Draw>,
@@ -163,31 +166,37 @@ impl Renderer {
             label: Some("aircraft"),
             source: wgpu::ShaderSource::Wgsl(include_str!("aircraft.wgsl").into()),
         });
-        let pipeline = |blend: bool| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(if blend { "transparent" } else { "opaque" }), layout: Some(&layout),
+        let pipeline = |key: PipelineKey| -> Result<wgpu::RenderPipeline> {
+            Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aircraft material"), layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout { array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2] })],
             },
-            primitive: wgpu::PrimitiveState { front_face: wgpu::FrontFace::Cw, cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState { front_face: wgpu::FrontFace::Cw, cull_mode: if key.double_sided {None}else{Some(wgpu::Face::Back)}, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(!blend),
+                format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(key.depth_write),
                 depth_compare: Some(wgpu::CompareFunction::GreaterEqual), stencil: Default::default(), bias: Default::default(),
             }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState { format: config.format,
-                    blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                    blend: key.blend()?, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None, cache: None,
-        })
+        }))
         };
-        let opaque = pipeline(false);
-        let blended = pipeline(true);
+        let ground_key = PipelineKey {
+            source: 2,
+            destination: 1,
+            depth_write: true,
+            double_sided: true,
+        };
+        let mut pipelines = vec![pipeline(ground_key)?];
+        let mut pipeline_indices = HashMap::from([(ground_key, 0)]);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
             contents: bytemuck::cast_slice(&Mat4::IDENTITY.to_cols_array()),
@@ -216,6 +225,27 @@ impl Renderer {
             let mut draws = Vec::new();
             for mesh in &lod.meshes {
                 let material = &model.materials[mesh.material];
+                if material.source.flags & 0x00400000 != 0 {
+                    anyhow::ensure!(
+                        (1..=8).contains(&material.source.alpha_test_function),
+                        "unsupported FSX alpha test function {}",
+                        material.source.alpha_test_function
+                    );
+                }
+                let key = PipelineKey::new(
+                    material.source.source_blend,
+                    material.source.destination_blend,
+                    material.source.flags,
+                    material.source.flags2,
+                );
+                let pipeline_index = if let Some(&index) = pipeline_indices.get(&key) {
+                    index
+                } else {
+                    let index = pipelines.len();
+                    pipelines.push(pipeline(key)?);
+                    pipeline_indices.insert(key, index);
+                    index
+                };
                 let mut flip_v = false;
                 let view = if let Some(name) = &material.diffuse_texture {
                     if let Some((view, flip)) = textures.get(name) {
@@ -254,7 +284,11 @@ impl Renderer {
                 let uniform = DrawUniform {
                     model: Mat4::IDENTITY.to_cols_array_2d(),
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
-                    diffuse: material.source.diffuse,
+                    diffuse: if material.diffuse_texture.is_some() {
+                        [1.0, 1.0, 1.0, material.source.diffuse[3]]
+                    } else {
+                        material.source.diffuse
+                    },
                     settings: [
                         if flip_v { 1.0 } else { 0.0 },
                         0.0,
@@ -263,7 +297,11 @@ impl Renderer {
                         } else {
                             0.0
                         },
-                        0.0,
+                        if material.source.flags & 0x00400000 != 0 {
+                            material.source.alpha_test_function as f32
+                        } else {
+                            8.0
+                        },
                     ],
                 };
                 draws.push(make_draw(
@@ -276,9 +314,10 @@ impl Renderer {
                         indices: &mesh.indices,
                         transform: transforms[mesh.node],
                         uniform,
-                        blended: material.source.source_blend == 5
+                        blended: material.source.source_blend != 2
                             || material.source.destination_blend != 1,
                         node: Some(mesh.node),
+                        pipeline: pipeline_index,
                     },
                 ));
             }
@@ -342,6 +381,7 @@ impl Renderer {
                 },
                 blended: false,
                 node: None,
+                pipeline: 0,
             },
         );
         let cockpit_eye = aircraft
@@ -354,8 +394,7 @@ impl Renderer {
             queue,
             config,
             depth,
-            opaque,
-            blended,
+            pipelines,
             camera_buffer,
             camera_bind,
             exterior,
@@ -481,8 +520,8 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_bind, &[]);
-            pass.set_pipeline(&self.opaque);
             let draw_one = |pass: &mut wgpu::RenderPass<'_>, draw: &Draw| {
+                pass.set_pipeline(&self.pipelines[draw.pipeline]);
                 pass.set_bind_group(1, &draw.bind, &[]);
                 pass.set_vertex_buffer(0, draw.vertices.slice(..));
                 pass.set_index_buffer(draw.indices.slice(..), wgpu::IndexFormat::Uint16);
@@ -492,7 +531,6 @@ impl Renderer {
             for draw in draws.iter().filter(|d| d.visible && !d.blended) {
                 draw_one(&mut pass, draw);
             }
-            pass.set_pipeline(&self.blended);
             for draw in transparent {
                 draw_one(&mut pass, draw);
             }
@@ -673,6 +711,7 @@ fn make_draw(
         uniform,
         blended,
         node,
+        pipeline,
     } = data;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("draw"),
@@ -722,5 +761,6 @@ fn make_draw(
         centre,
         node,
         visible: true,
+        pipeline,
     }
 }
