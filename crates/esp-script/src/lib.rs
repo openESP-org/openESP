@@ -207,7 +207,14 @@ impl Program {
             match instruction {
                 Instruction::Push(value) => stack.push(value.clone()),
                 Instruction::Read(reference) => stack.push(host.read(reference)?),
-                Instruction::Write(reference) => host.write(reference, pop(&mut stack)?)?,
+                Instruction::Write(reference) => {
+                    let value = if reference.category == 'K' {
+                        stack.pop().unwrap_or(Value::Number(0.0))
+                    } else {
+                        pop(&mut stack)?
+                    };
+                    host.write(reference, value)?;
+                }
                 Instruction::Unary(op) => {
                     let a = pop(&mut stack)?.number()?;
                     stack.push(Value::Number(op(a)));
@@ -464,6 +471,29 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn key_events_accept_an_optional_value() {
+        let mut host = Variables::default();
+        Program::compile("(>K:TOGGLE_FLIGHT_DIRECTOR) 200 (>K:ADF_CARD_SET)")
+            .unwrap()
+            .evaluate(&mut host)
+            .unwrap();
+        assert_eq!(
+            host.0[&Reference::new('K', "TOGGLE_FLIGHT_DIRECTOR", None)],
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            host.0[&Reference::new('K', "ADF_CARD_SET", None)],
+            Value::Number(200.0)
+        );
+        assert!(
+            Program::compile("(>L:VALUE)")
+                .unwrap()
+                .evaluate(&mut host)
+                .is_err()
+        );
+    }
+
     #[test]
     fn rejects_malformed_unsupported_and_invalid_execution() {
         for code in ["1 if{", "}", "els{1}", "(A:x", "'x", "s50", "NaN", "while"] {
