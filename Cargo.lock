@@ -688,6 +688,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-script"
+version = "0.1.0"
+dependencies = [
+ "esp-formats",
+ "thiserror 2.0.21",
+ "winnow",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

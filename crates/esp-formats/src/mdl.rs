@@ -8,6 +8,7 @@ pub mod data;
 pub mod geometry;
 pub mod material;
 pub mod model;
+pub mod parameter;
 pub mod scene;
 pub mod visibility;
 
