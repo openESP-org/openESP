@@ -88,11 +88,9 @@ fn composes_external_cockpit_artwork() {
             .filter(|w| w.kind == esp_formats::cfg::panel::WindowKind::VirtualCockpit)
         {
             let Some(name) = window.texture else { continue };
-            let image = esp_assets::gauge::static_panel(panel, name)
-                .unwrap()
-                .unwrap();
+            let image = esp_assets::gauge::load_panel(panel, name).unwrap().unwrap();
             eprintln!(
-                "{} {name}: {} omitted gauges, {} dynamic elements",
+                "{} {name}: {} omitted gauges, {} omitted elements",
                 aircraft.title, image.omitted_gauges, image.omitted_elements
             );
             assert!(image.image.width() > 0 && image.image.height() > 0);

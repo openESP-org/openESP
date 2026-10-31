@@ -7,12 +7,7 @@ use std::{
 #[path = "../../../tests/support/content.rs"]
 mod content;
 
-fn capture(
-    aircraft: &Path,
-    cockpit: bool,
-    variable: Option<&str>,
-    output: &Path,
-) -> image::RgbaImage {
+fn capture(aircraft: &Path, cockpit: bool, variables: &[&str], output: &Path) -> image::RgbaImage {
     let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
     command
         .arg("--aircraft")
@@ -22,7 +17,7 @@ fn capture(
     if cockpit {
         command.arg("--cockpit");
     }
-    if let Some(variable) = variable {
+    for variable in variables {
         command.args(["--variable", variable]);
     }
     let mut child = command.stdout(Stdio::null()).spawn().unwrap();
@@ -54,8 +49,8 @@ fn capture(
 fn renders_external_aircraft_and_cockpits() {
     let temp = tempfile::tempdir().unwrap();
     for path in content::aircraft_paths() {
-        let exterior = capture(&path, false, None, &temp.path().join("exterior.png"));
-        let interior = capture(&path, true, None, &temp.path().join("interior.png"));
+        let exterior = capture(&path, false, &[], &temp.path().join("exterior.png"));
+        let interior = capture(&path, true, &[], &temp.path().join("interior.png"));
         assert_eq!(exterior.dimensions(), interior.dimensions());
         let difference = exterior
             .pixels()
@@ -78,13 +73,13 @@ fn renders_door_animation() {
         let closed = capture(
             &path,
             false,
-            Some("A:EXIT OPEN:0,percent=0"),
+            &["A:EXIT OPEN:0,percent=0"],
             &temp.path().join("closed.png"),
         );
         let open = capture(
             &path,
             false,
-            Some("A:EXIT OPEN:0,percent=100"),
+            &["A:EXIT OPEN:0,percent=100"],
             &temp.path().join("open.png"),
         );
         differences += closed
@@ -96,5 +91,35 @@ fn renders_door_animation() {
     assert!(
         differences > 1000,
         "door input did not visibly change the rendered aircraft"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and an aircraft with XML fire annunciators"]
+fn renders_fire_annunciator() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut differences = 0;
+    for path in content::aircraft_paths() {
+        let off = capture(
+            &path,
+            true,
+            &["A:Eng On Fire:1,bool=0", "A:Eng On Fire:2,bool=0"],
+            &temp.path().join("off.png"),
+        );
+        let on = capture(
+            &path,
+            true,
+            &["A:Eng On Fire:1,bool=1", "A:Eng On Fire:2,bool=0"],
+            &temp.path().join("on.png"),
+        );
+        differences += off
+            .pixels()
+            .zip(on.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+    }
+    assert!(
+        differences > 50,
+        "fire input did not change a cockpit indicator"
     );
 }

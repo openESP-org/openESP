@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use esp_formats::{cfg::panel::WindowKind, gauge::Gauge};
+use esp_script::{Host, Program};
 use image::{
     Rgba, RgbaImage,
     imageops::{FilterType, overlay, resize},
@@ -11,9 +12,79 @@ pub struct PanelImage {
     pub image: RgbaImage,
     pub omitted_gauges: usize,
     pub omitted_elements: usize,
+    gauges: Vec<Canvas>,
+    conditions: Vec<Condition>,
+    background: Rgba<u8>,
 }
 
-pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
+struct Canvas {
+    size: (u32, u32),
+    target: (u32, u32),
+    position: (i64, i64),
+    layers: Vec<Layer>,
+}
+
+struct Layer {
+    image: RgbaImage,
+    position: (i64, i64),
+    conditions: Vec<usize>,
+}
+
+struct Condition {
+    program: Program,
+    visible: bool,
+    reported: bool,
+}
+
+impl PanelImage {
+    pub fn update(&mut self, host: &mut impl Host) -> bool {
+        let mut changed = false;
+        for condition in &mut self.conditions {
+            let result = condition
+                .program
+                .evaluate(host)
+                .and_then(|value| value.ok_or(esp_script::Error::Stack)?.number());
+            match result {
+                Ok(value) => {
+                    let visible = value != 0.0;
+                    changed |= condition.visible != visible;
+                    condition.visible = visible;
+                }
+                Err(error) if !condition.reported => {
+                    eprintln!("gauge visibility: {error}");
+                    condition.reported = true;
+                }
+                Err(_) => {}
+            }
+        }
+        if changed {
+            self.compose();
+        }
+        changed
+    }
+
+    fn compose(&mut self) {
+        for pixel in self.image.pixels_mut() {
+            *pixel = self.background;
+        }
+        for gauge in &self.gauges {
+            let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
+            for layer in &gauge.layers {
+                if layer
+                    .conditions
+                    .iter()
+                    .all(|&index| self.conditions[index].visible)
+                {
+                    overlay(&mut art, &layer.image, layer.position.0, layer.position.1);
+                }
+            }
+            let scaled = resize(&art, gauge.target.0, gauge.target.1, FilterType::Triangle);
+            overlay(&mut self.image, &scaled, gauge.position.0, gauge.position.1);
+        }
+    }
+}
+
+pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
     let layout = panel.layout()?;
     let Some(window) = layout.windows.iter().find(|w| {
         w.kind == WindowKind::VirtualCockpit
@@ -39,7 +110,10 @@ pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> 
         dimensions.width > 0.0 && layout_height > 0.0,
         "invalid panel layout size"
     );
-    let mut output = RgbaImage::from_pixel(width, height, Rgba(panel.background(window.section)?));
+    let background = Rgba(panel.background(window.section)?);
+    let output = RgbaImage::from_pixel(width, height, background);
+    let mut gauges = Vec::new();
+    let mut conditions = Vec::new();
     let mut omitted_gauges = 0;
     let mut omitted_elements = 0;
     for gauge in &window.gauges {
@@ -79,20 +153,46 @@ pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> 
         if w == 0 || h == 0 || w > 8192 || h > 8192 {
             anyhow::bail!("invalid gauge size {w}x{h}");
         }
-        let mut art = RgbaImage::new(w, h);
-        let mut stack = vec![(document.root(), 0.0, 0.0)];
-        while let Some((node, x, y)) = stack.pop() {
+        let mut layers = Vec::new();
+        let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new())];
+        while let Some((node, x, y, mut parents)) = stack.pop() {
             if node.has_tag_name("Element")
                 && node.children().any(|child| {
                     child.is_element()
                         && matches!(
                             child.tag_name().name(),
-                            "Visibility" | "Rotate" | "Rotation" | "Shift" | "Select" | "MaskImage"
+                            "Rotate"
+                                | "Rotation"
+                                | "Shift"
+                                | "Select"
+                                | "MaskImage"
+                                | "LeftScript"
+                                | "TopScript"
+                                | "ClipRect"
                         )
                 })
             {
                 omitted_elements += 1;
                 continue;
+            }
+            if node.has_tag_name("Element")
+                && let Some(visibility) = node.children().find(|c| c.has_tag_name("Visibility"))
+            {
+                let source = visibility.text().unwrap_or("").trim();
+                match Program::compile(source) {
+                    Ok(program) if !source.is_empty() => {
+                        parents.push(conditions.len());
+                        conditions.push(Condition {
+                            program,
+                            visible: false,
+                            reported: false,
+                        });
+                    }
+                    _ => {
+                        omitted_elements += 1;
+                        continue;
+                    }
+                }
             }
             let (x, y) = if node.has_tag_name("Element") {
                 let (px, py) = position(node)?;
@@ -132,11 +232,15 @@ pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> 
                         return Err(error).with_context(|| format!("{}: {name}", gauge.reference));
                     }
                 };
-                overlay(&mut art, &bitmap, x.round() as i64, y.round() as i64);
+                layers.push(Layer {
+                    image: bitmap,
+                    position: (x.round() as i64, y.round() as i64),
+                    conditions: parents.clone(),
+                });
             }
             for child in node.children().filter(|c| c.is_element()).rev() {
                 if child.has_tag_name("Element") || child.has_tag_name("Image") {
-                    stack.push((child, x, y));
+                    stack.push((child, x, y, parents.clone()));
                 }
             }
         }
@@ -144,19 +248,26 @@ pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> 
             dimension(gauge.width.unwrap_or(f64::from(w)) * f64::from(width) / dimensions.width)?;
         let target_height =
             dimension(gauge.height.unwrap_or(f64::from(h)) * f64::from(height) / layout_height)?;
-        let scaled = resize(&art, target_width, target_height, FilterType::Triangle);
-        overlay(
-            &mut output,
-            &scaled,
-            (gauge.x * f64::from(width) / dimensions.width).round() as i64,
-            (gauge.y * f64::from(height) / layout_height).round() as i64,
-        );
+        gauges.push(Canvas {
+            size: (w, h),
+            target: (target_width, target_height),
+            position: (
+                (gauge.x * f64::from(width) / dimensions.width).round() as i64,
+                (gauge.y * f64::from(height) / layout_height).round() as i64,
+            ),
+            layers,
+        });
     }
-    Ok(Some(PanelImage {
+    let mut result = PanelImage {
         image: output,
         omitted_gauges,
         omitted_elements,
-    }))
+        gauges,
+        conditions,
+        background,
+    };
+    result.compose();
+    Ok(Some(result))
 }
 
 fn dimension(value: f64) -> Result<u32> {
@@ -190,8 +301,21 @@ fn finite_position(x: f64, y: f64) -> Result<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esp_script::{Error, Reference, Value};
+
+    struct TestHost(f64);
+
+    impl Host for TestHost {
+        fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+            Ok(Value::Number(self.0))
+        }
+
+        fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+            Err(Error::Type)
+        }
+    }
     #[test]
-    fn composes_static_images_and_omits_dynamic_elements() {
+    fn composes_images_with_hidden_elements() {
         let root = tempfile::tempdir().unwrap();
         let panel_path = root.path().join("panel");
         let module = panel_path.join("example");
@@ -204,8 +328,8 @@ mod tests {
             .unwrap();
         std::fs::write(module.join("red.bmp"), data).unwrap();
         let panel = Panel::load(root.path(), None).unwrap().unwrap();
-        let result = static_panel(&panel, "$SCREEN").unwrap().unwrap();
-        assert_eq!(result.omitted_elements, 1);
+        let result = load_panel(&panel, "$SCREEN").unwrap().unwrap();
+        assert_eq!(result.omitted_elements, 0);
         assert_eq!(result.omitted_gauges, 0);
         assert_eq!(result.image.get_pixel(3, 3).0, [255, 0, 0, 255]);
         assert_eq!(result.image.get_pixel(2, 2).0, [10, 20, 30, 255]);
@@ -238,10 +362,41 @@ mod tests {
             .unwrap();
         std::fs::write(module.join("background.bmp"), data).unwrap();
         let panel = Panel::load(root.path(), None).unwrap().unwrap();
-        let result = static_panel(&panel, "$screen").unwrap().unwrap();
+        let result = load_panel(&panel, "$screen").unwrap().unwrap();
         assert_eq!(result.omitted_gauges, 0);
         assert_eq!(result.image.get_pixel(1, 1).0, [255, 0, 0, 255]);
         assert_eq!(result.image.get_pixel(2, 1).0, [0, 255, 0, 255]);
         assert_eq!(result.image.get_pixel(3, 1).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn updates_visible_layers_and_restores_background() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            panel_path.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=2,2\npixel_size=2,2\ntexture=$screen\ngauge00=example!dial,0,0",
+        )
+        .unwrap();
+        std::fs::write(module.join("dial.xml"), r#"<Gauge><Size X="2" Y="2"/><Element><Visibility>(L:POWER, bool)</Visibility><Element><Image Name="lamp.bmp"/></Element></Element></Gauge>"#).unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("lamp.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(0.0);
+        assert!(!image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        host.0 = 1.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert!(!image.update(&mut host));
+        host.0 = 0.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 0, 0, 255]);
     }
 }

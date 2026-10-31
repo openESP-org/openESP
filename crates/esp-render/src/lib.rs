@@ -64,6 +64,7 @@ pub struct Renderer {
     camera_bind: wgpu::BindGroup,
     exterior: Vec<Draw>,
     interior: Vec<Draw>,
+    panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
     pub centre: Vec3,
     pub radius: f32,
@@ -219,6 +220,7 @@ impl Renderer {
             ..Default::default()
         });
         let mut textures: HashMap<String, (wgpu::TextureView, bool)> = HashMap::new();
+        let mut panels = HashMap::new();
         let mut upload = |model: &Model| -> Result<Vec<Draw>> {
             let transforms = model.transforms()?;
             let lod = model.lods.first().context("model has no LODs")?;
@@ -252,14 +254,16 @@ impl Renderer {
                         flip_v = *flip;
                         view.clone()
                     } else {
+                        let mut is_panel = false;
                         let texture = match aircraft.texture_path(name) {
                             Ok(Some(path)) => texture::Texture::load(&path, compressed)?,
                             Ok(None) => {
                                 if let Some(panel) =
                                     aircraft.panel_images.get(&name.to_ascii_uppercase())
                                 {
+                                    is_panel = true;
                                     eprintln!(
-                                        "{name}: static gauge images only ({} missing gauges, {} omitted elements)",
+                                        "{name}: partial gauge rendering ({} missing gauges, {} omitted elements)",
                                         panel.omitted_gauges, panel.omitted_elements
                                     );
                                     texture::Texture::rgba(
@@ -279,7 +283,11 @@ impl Renderer {
                             }
                         };
                         flip_v = texture.flip_v;
-                        let view = upload_texture(&device, &queue, &texture)?;
+                        let uploaded = upload_texture(&device, &queue, &texture)?;
+                        let view = uploaded.create_view(&Default::default());
+                        if is_panel {
+                            panels.insert(name.to_ascii_uppercase(), uploaded);
+                        }
                         textures.insert(name.clone(), (view.clone(), flip_v));
                         view
                     }
@@ -289,6 +297,7 @@ impl Renderer {
                         &queue,
                         &texture::Texture::rgba(1, 1, vec![255; 4], false),
                     )?
+                    .create_view(&Default::default())
                 };
                 let vertices: Vec<_> = mesh
                     .vertices
@@ -381,7 +390,8 @@ impl Renderer {
             &device,
             &queue,
             &texture::Texture::rgba(1, 1, vec![255; 4], false),
-        )?;
+        )?
+        .create_view(&Default::default());
         let ground = make_draw(
             &device,
             &draw_layout,
@@ -417,6 +427,7 @@ impl Renderer {
             camera_bind,
             exterior,
             interior,
+            panels,
             ground,
             centre,
             radius,
@@ -433,6 +444,38 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth = depth_target(&self.device, &self.config);
+    }
+
+    pub fn update_panel(&self, name: &str, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
+        let Some(texture) = self.panels.get(name) else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            texture.width() == width
+                && texture.height() == height
+                && pixels.len() == width as usize * height as usize * 4,
+            "invalid panel texture update"
+        );
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
     }
 
     pub fn update_model(
@@ -660,7 +703,7 @@ fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     image: &texture::Texture,
-) -> Result<wgpu::TextureView> {
+) -> Result<wgpu::Texture> {
     let format = match image.format {
         texture::Format::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
         texture::Format::Bc1 => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
@@ -712,7 +755,7 @@ fn upload_texture(
             },
         );
     }
-    Ok(texture.create_view(&Default::default()))
+    Ok(texture)
 }
 
 fn make_draw(

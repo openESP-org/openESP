@@ -137,7 +137,7 @@ impl Aircraft {
             {
                 let key = name.to_ascii_uppercase();
                 if let std::collections::hash_map::Entry::Vacant(entry) = panel_images.entry(key) {
-                    match gauge::static_panel(panel, name) {
+                    match gauge::load_panel(panel, name) {
                         Ok(Some(image)) => {
                             entry.insert(image);
                         }
