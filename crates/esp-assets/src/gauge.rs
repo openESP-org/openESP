@@ -49,18 +49,36 @@ pub fn static_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> 
         };
         let text = std::str::from_utf8(&xml)?;
         let document = Gauge::parse(text)?;
-        let Some([w, h]) = document.size()? else {
+        let module = gauge
+            .reference
+            .split_once('!')
+            .context("invalid gauge reference")?
+            .0;
+        let size = match document.size()? {
+            Some(size) => Some(size),
+            None => {
+                let image = document.root().children().find(|n| n.has_tag_name("Image"));
+                if let Some(name) = image
+                    .filter(|n| n.attribute("ImageSizes").is_none())
+                    .and_then(|n| n.attribute("Name"))
+                {
+                    panel
+                        .read_resource(module, name, 64 * 1024 * 1024)?
+                        .map(|data| gauge_bitmap(&data, false, false))
+                        .transpose()?
+                        .map(|image| [image.width(), image.height()])
+                } else {
+                    None
+                }
+            }
+        };
+        let Some([w, h]) = size else {
             omitted_gauges += 1;
             continue;
         };
         if w == 0 || h == 0 || w > 8192 || h > 8192 {
             anyhow::bail!("invalid gauge size {w}x{h}");
         }
-        let module = gauge
-            .reference
-            .split_once('!')
-            .context("invalid gauge reference")?
-            .0;
         let mut art = RgbaImage::new(w, h);
         let mut stack = vec![(document.root(), 0.0, 0.0)];
         while let Some((node, x, y)) = stack.pop() {
@@ -191,5 +209,39 @@ mod tests {
         assert_eq!(result.omitted_gauges, 0);
         assert_eq!(result.image.get_pixel(3, 3).0, [255, 0, 0, 255]);
         assert_eq!(result.image.get_pixel(2, 2).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn uses_background_bitmap_for_unsized_gauge() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            panel_path.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=4,4\npixel_size=4,4\ntexture=$screen\ngauge00=example!dial,1,1",
+        )
+        .unwrap();
+        std::fs::write(
+            module.join("dial.xml"),
+            r#"<Gauge Name="Dial"><Image Name="background.bmp"/></Gauge>"#,
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        std::fs::write(module.join("background.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let result = static_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(result.omitted_gauges, 0);
+        assert_eq!(result.image.get_pixel(1, 1).0, [255, 0, 0, 255]);
+        assert_eq!(result.image.get_pixel(2, 1).0, [0, 255, 0, 255]);
+        assert_eq!(result.image.get_pixel(3, 1).0, [0, 0, 0, 255]);
     }
 }
