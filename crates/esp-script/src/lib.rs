@@ -115,12 +115,14 @@ enum Token<'a> {
     Text(&'a str),
     Open,
     Close,
+    Comment,
 }
 
 fn token<'a>(input: &mut &'a str) -> ModalResult<Token<'a>> {
     delimited(
         multispace0,
         alt((
+            delimited("(*", take_until(0.., "*)"), "*)").value(Token::Comment),
             delimited('(', take_until(0.., ")"), ')').map(Token::Variable),
             delimited('\'', take_until(0.., "'"), '\'').map(Token::Text),
             '{'.value(Token::Open),
@@ -137,7 +139,10 @@ impl Program {
         let mut input = source.trim();
         let mut tokens = Vec::new();
         while !input.is_empty() {
-            tokens.push(token(&mut input).map_err(|_| Error::Syntax(source.len() - input.len()))?);
+            let token = token(&mut input).map_err(|_| Error::Syntax(source.len() - input.len()))?;
+            if !matches!(token, Token::Comment) {
+                tokens.push(token);
+            }
         }
         let mut instructions = Vec::new();
         let mut blocks = Vec::new();
@@ -189,6 +194,7 @@ impl Program {
                     });
                 }
                 Token::Word(word) => instructions.push(operation(word)?),
+                Token::Comment => {}
             }
             index += 1;
         }
@@ -492,6 +498,21 @@ mod tests {
                 .evaluate(&mut host)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn ignores_comments_without_changing_strings_or_branches() {
+        assert_eq!(number("1 (* ignored ) { + (A:MISSING,bool) *) 2 +"), 3.0);
+        assert_eq!(number("0 if{ 1 } (* between branches *) els{ 2 }"), 2.0);
+        assert_eq!(number("(* first *)(* second *)4"), 4.0);
+        assert_eq!(
+            Program::compile("'(* literal *)'")
+                .unwrap()
+                .evaluate(&mut Variables::default())
+                .unwrap(),
+            Some(Value::Text("(* literal *)".into()))
+        );
+        assert!(Program::compile("(* unterminated").is_err());
     }
 
     #[test]
