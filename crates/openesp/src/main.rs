@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use esp_assets::Aircraft;
+use esp_assets::{Aircraft, gauge::MouseEvent};
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
 use esp_sim::{animation::ModelState, picking, variables::Variables};
@@ -13,7 +13,7 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -85,6 +85,7 @@ struct App {
     keys: HashSet<KeyCode>,
     mouse_look: bool,
     cursor: Option<(f64, f64)>,
+    pressed_panel: Option<(String, Vec<usize>)>,
     last_frame: Instant,
     frames: u64,
     error: Option<anyhow::Error>,
@@ -108,65 +109,64 @@ impl App {
         }
     }
 
-    fn cockpit_click(&mut self) -> Result<()> {
-        let Some((cx, cy)) = self.cursor else {
-            return Ok(());
-        };
-        let Some(window) = &self.window else {
-            return Ok(());
-        };
-        let size = window.inner_size();
+    fn cockpit_target(&self) -> Option<(String, f64, f64)> {
+        let (cx, cy) = self.cursor?;
+        let size = self.window.as_ref()?.inner_size();
         if size.width == 0 || size.height == 0 {
-            return Ok(());
+            return None;
         }
-        let Some(renderer) = &self.renderer else {
-            return Ok(());
-        };
-        let Some(aircraft) = &self.aircraft else {
-            return Ok(());
-        };
-        let Some(interior) = &aircraft.interior else {
-            return Ok(());
-        };
-        let Some(state) = &self.interior_state else {
-            return Ok(());
-        };
-
+        let renderer = self.renderer.as_ref()?;
+        let aircraft = self.aircraft.as_ref()?;
+        let interior = aircraft.interior.as_ref()?;
+        let state = self.interior_state.as_ref()?;
         let aspect = size.width as f32 / size.height as f32;
         let nx = (cx / size.width as f64 * 2.0 - 1.0) as f32;
         let ny = (1.0 - cy / size.height as f64 * 2.0) as f32;
-        let Some((ray_origin, ray_dir)) = self.camera.ray(nx, ny, aspect) else {
-            return Ok(());
-        };
+        let (ray_origin, ray_dir) = self.camera.ray(nx, ny, aspect)?;
         let aircraft_to_camera = (renderer.aircraft_origin - self.camera.position).as_vec3();
-
-        let Some(hit) = picking::pick(interior, state, aircraft_to_camera, ray_origin, ray_dir)
-        else {
-            return Ok(());
-        };
-
+        let hit = picking::pick(interior, state, aircraft_to_camera, ray_origin, ray_dir)?;
         let mesh = &interior.lods[0].meshes[hit.mesh];
-        let Some(texture_name) = interior
+        let key = interior
             .materials
-            .get(mesh.material)
-            .and_then(|m| m.diffuse_texture.as_ref())
-        else {
+            .get(mesh.material)?
+            .diffuse_texture
+            .as_ref()?
+            .to_ascii_uppercase();
+        let panel = aircraft.panel_images.get(&key)?;
+        Some((
+            key,
+            f64::from(hit.uv[0].rem_euclid(1.0)) * f64::from(panel.image.width()),
+            f64::from(hit.uv[1].rem_euclid(1.0)) * f64::from(panel.image.height()),
+        ))
+    }
+
+    fn cockpit_mouse(&mut self, event: MouseEvent) -> Result<()> {
+        let target = if event == MouseEvent::LeftRelease {
+            self.pressed_panel.take()
+        } else {
+            self.cockpit_target().and_then(|(name, x, y)| {
+                let panel = self.aircraft.as_ref()?.panel_images.get(&name)?;
+                Some((name, panel.mouse_areas_at(x, y)))
+            })
+        };
+        let Some((name, areas)) = target else {
             return Ok(());
         };
-        let key = texture_name.to_ascii_uppercase();
-        let Some(panel_image) = aircraft.panel_images.get(&key) else {
-            return Ok(());
-        };
-
-        let px = hit.uv[0].rem_euclid(1.0) as f64 * panel_image.image.width() as f64;
-        let py = hit.uv[1].rem_euclid(1.0) as f64 * panel_image.image.height() as f64;
-
-        let result = panel_image.left_click(px, py, &mut self.variables);
+        if event == MouseEvent::LeftSingle {
+            self.pressed_panel = Some((name.clone(), areas.clone()));
+        }
+        let panel = self
+            .aircraft
+            .as_ref()
+            .context("aircraft is absent")?
+            .panel_images
+            .get(&name)
+            .context("captured panel is absent")?;
+        let result = panel.mouse_event(event, &areas, &mut self.variables);
         for error in self.variables.dispatch_events() {
             eprintln!("cockpit event: {error}");
         }
         result?;
-
         Ok(())
     }
 
@@ -316,6 +316,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                if let Err(error) = self.cockpit_mouse(MouseEvent::LeftRelease) {
+                    eprintln!("cockpit release: {error}");
+                }
+                self.cursor = None;
                 self.keys.clear();
                 self.mouse_look = false;
                 if let Some(window) = &self.window {
@@ -326,16 +330,39 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some((position.x, position.y));
             }
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if self.arguments.cockpit
+                if state == ElementState::Released {
+                    if let Err(error) = self.cockpit_mouse(MouseEvent::LeftRelease) {
+                        eprintln!("cockpit release: {error}");
+                    }
+                } else if self.arguments.cockpit
                     && !self.mouse_look
-                    && let Err(error) = self.cockpit_click()
+                    && let Err(error) = self.cockpit_mouse(MouseEvent::LeftSingle)
                 {
                     eprintln!("cockpit click: {error}");
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.arguments.cockpit && !self.mouse_look => {
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    MouseScrollDelta::PixelDelta(position) => position.y,
+                };
+                let event = if y > 0.0 {
+                    Some(MouseEvent::WheelUp)
+                } else if y < 0.0 {
+                    Some(MouseEvent::WheelDown)
+                } else {
+                    None
+                };
+                if let Some(event) = event
+                    && let Err(error) = self.cockpit_mouse(event)
+                {
+                    eprintln!("cockpit wheel: {error}");
                 }
             }
             WindowEvent::MouseInput {
@@ -343,6 +370,11 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
+                if state == ElementState::Pressed
+                    && let Err(error) = self.cockpit_mouse(MouseEvent::LeftRelease)
+                {
+                    eprintln!("cockpit release: {error}");
+                }
                 self.mouse_look = state == ElementState::Pressed;
                 if let Some(window) = &self.window {
                     window.set_cursor_visible(!self.mouse_look);
@@ -368,6 +400,10 @@ impl ApplicationHandler for App {
                             match key {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Tab => {
+                                    if let Err(error) = self.cockpit_mouse(MouseEvent::LeftRelease)
+                                    {
+                                        eprintln!("cockpit release: {error}");
+                                    }
                                     self.arguments.cockpit = !self.arguments.cockpit;
                                     self.reset_camera();
                                 }
@@ -448,6 +484,7 @@ fn main() -> Result<()> {
         keys: HashSet::new(),
         mouse_look: false,
         cursor: None,
+        pressed_panel: None,
         last_frame: Instant::now(),
         frames: 0,
         error: None,
@@ -457,4 +494,87 @@ fn main() -> Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use esp_script::{Host, Reference};
+
+    #[test]
+    fn releases_captured_panel_without_a_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        std::fs::create_dir_all(directory.join("example")).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=1,1\npixel_size=1,1\ntexture=$test\ngauge00=example!button,0,0,1,1").unwrap();
+        std::fs::write(directory.join("example/button.xml"), r#"<Gauge><Size X="1" Y="1"/><MouseArea><Size X="1" Y="1"/><MouseClick><ClickType>LeftSingle+LeftRelease</ClickType><Script>(M:Event) 'LeftSingle' scmp 0 == if{ 1 (&gt;L:Pressed) } (M:Event) 'LeftRelease' scmp 0 == if{ 0 (&gt;L:Pressed) (L:Releases) ++ (&gt;L:Releases) }</Script></MouseClick></MouseArea></Gauge>"#).unwrap();
+        let panel = esp_assets::panel::Panel::load(root.path(), None)
+            .unwrap()
+            .unwrap();
+        let image = esp_assets::gauge::load_panel(&panel, "$test")
+            .unwrap()
+            .unwrap();
+        let areas = image.mouse_areas_at(0.5, 0.5);
+        let mut variables = Variables::default();
+        image
+            .mouse_event(MouseEvent::LeftSingle, &areas, &mut variables)
+            .unwrap();
+        let empty_model = || esp_assets::Model {
+            nodes: vec![],
+            materials: vec![],
+            lods: vec![],
+            animations: vec![],
+            visibility: vec![],
+        };
+        let (_, loaded) = mpsc::channel();
+        let mut app = App {
+            arguments: Arguments::parse_from(["openesp", "--aircraft", "unused"]),
+            loaded,
+            window: None,
+            renderer: None,
+            aircraft: Some(Aircraft {
+                title: "test".into(),
+                exterior: empty_model(),
+                interior: None,
+                panel: Some(panel),
+                panel_images: [("$TEST".into(), image)].into(),
+                eyepoint: None,
+                texture_directories: vec![],
+            }),
+            exterior_state: None,
+            interior_state: None,
+            variables,
+            door_open: false,
+            reported_diagnostics: HashSet::new(),
+            camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
+            keys: HashSet::new(),
+            mouse_look: true,
+            cursor: None,
+            pressed_panel: Some(("$TEST".into(), areas)),
+            last_frame: Instant::now(),
+            frames: 0,
+            error: None,
+        };
+        app.cockpit_mouse(MouseEvent::LeftRelease).unwrap();
+        assert!(app.pressed_panel.is_none());
+        assert_eq!(
+            app.variables
+                .read(&Reference::new('L', "Pressed", None))
+                .unwrap(),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            app.variables
+                .read(&Reference::new('L', "Releases", None))
+                .unwrap(),
+            Value::Number(1.0)
+        );
+        app.cockpit_mouse(MouseEvent::LeftRelease).unwrap();
+        assert_eq!(
+            app.variables
+                .read(&Reference::new('L', "Releases", None))
+                .unwrap(),
+            Value::Number(1.0)
+        );
+    }
 }

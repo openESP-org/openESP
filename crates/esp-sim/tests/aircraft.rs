@@ -184,3 +184,42 @@ fn xml_click_updates_flight_director_artwork_and_animation() {
     }
     assert!(verified > 0, "no original XML flight director verified");
 }
+
+#[test]
+#[ignore = "requires original XML clock gauges and OPENESP_AIRCRAFT_PATHS"]
+fn original_clock_button_responds_to_press_and_release() {
+    use esp_assets::gauge::MouseEvent;
+    use esp_sim::variables::Variables;
+    let depressed = Reference::new('L', "Clock DAT Depressed", None);
+    let function = Reference::new('L', "Clock DAT Function", None);
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        for panel in aircraft.panel_images.values() {
+            for (index, area) in panel.mouse_areas.iter().enumerate() {
+                if !area.events.contains(&MouseEvent::LeftRelease) {
+                    continue;
+                }
+                let mut variables = Variables::default();
+                if panel
+                    .mouse_event(MouseEvent::LeftSingle, &[index], &mut variables)
+                    .is_err()
+                {
+                    continue;
+                }
+                if variables.read(&depressed).unwrap() != Value::Number(1.0) {
+                    continue;
+                }
+                let captured = panel.mouse_areas_at(area.x + area.w * 0.5, area.y + area.h * 0.5);
+                panel
+                    .mouse_event(MouseEvent::LeftRelease, &captured, &mut variables)
+                    .unwrap();
+                assert_eq!(variables.read(&depressed).unwrap(), Value::Number(0.0));
+                assert_eq!(variables.read(&function).unwrap(), Value::Number(1.0));
+                assert_eq!(variables.drain_events().count(), 0);
+                verified += 1;
+            }
+        }
+    }
+    assert!(verified > 0, "no original XML clock button verified");
+}

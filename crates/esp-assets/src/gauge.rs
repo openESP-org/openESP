@@ -19,12 +19,38 @@ pub struct PanelImage {
     background: Rgba<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEvent {
+    LeftSingle,
+    LeftRelease,
+    WheelUp,
+    WheelDown,
+}
+
+impl MouseEvent {
+    fn name(self) -> &'static str {
+        match self {
+            Self::LeftSingle => "LeftSingle",
+            Self::LeftRelease => "LeftRelease",
+            Self::WheelUp => "WheelUp",
+            Self::WheelDown => "WheelDown",
+        }
+    }
+}
+
 pub struct PanelMouseArea {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
     pub script: Program,
+    pub events: Vec<MouseEvent>,
+}
+
+struct MouseAreaSource {
+    bounds: (f64, f64, f64, f64),
+    source: String,
+    events: Vec<MouseEvent>,
 }
 
 struct Canvas {
@@ -57,14 +83,35 @@ enum Requirement {
 
 impl PanelImage {
     pub fn left_click(&self, x: f64, y: f64, host: &mut impl Host) -> Result<bool> {
-        struct MouseHost<'a, H>(&'a mut H);
+        let areas = self.mouse_areas_at(x, y);
+        self.mouse_event(MouseEvent::LeftSingle, &areas, host)
+    }
+
+    pub fn mouse_areas_at(&self, x: f64, y: f64) -> Vec<usize> {
+        self.mouse_areas
+            .iter()
+            .enumerate()
+            .filter_map(|(index, area)| {
+                (x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h)
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn mouse_event(
+        &self,
+        event: MouseEvent,
+        areas: &[usize],
+        host: &mut impl Host,
+    ) -> Result<bool> {
+        struct MouseHost<'a, H>(&'a mut H, MouseEvent);
         impl<H: Host> Host for MouseHost<'_, H> {
             fn read(
                 &mut self,
                 reference: &esp_script::Reference,
             ) -> std::result::Result<esp_script::Value, esp_script::Error> {
                 if reference.category == 'M' && reference.name == "EVENT" {
-                    Ok(esp_script::Value::Text("LeftSingle".into()))
+                    Ok(esp_script::Value::Text(self.1.name().into()))
                 } else {
                     self.0.read(reference)
                 }
@@ -77,15 +124,25 @@ impl PanelImage {
                 self.0.write(reference, value)
             }
         }
-        let mut host = MouseHost(host);
+        let mut host = MouseHost(host, event);
         let mut handled = false;
-        for area in &self.mouse_areas {
-            if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h {
-                area.script.evaluate(&mut host)?;
+        let mut failure = None;
+        for &index in areas {
+            let area = self
+                .mouse_areas
+                .get(index)
+                .context("invalid mouse area index")?;
+            if area.events.contains(&event) {
+                if let Err(error) = area.script.evaluate(&mut host) {
+                    failure.get_or_insert(error);
+                }
                 handled = true;
             }
         }
-        Ok(handled)
+        match failure {
+            Some(error) => Err(error.into()),
+            None => Ok(handled),
+        }
     }
 
     pub fn update(&mut self, host: &mut impl Host) -> bool {
@@ -422,14 +479,16 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
         let sy = f64::from(canvas.target.1) / f64::from(canvas.size.1);
         let cx = canvas.position.0 as f64;
         let cy = canvas.position.1 as f64;
-        for (ax, ay, aw, ah, source) in raw_areas {
-            match Program::compile(&source) {
+        for raw in raw_areas {
+            let (ax, ay, aw, ah) = raw.bounds;
+            match Program::compile(&raw.source) {
                 Ok(script) => mouse_areas.push(PanelMouseArea {
                     x: cx + ax * sx,
                     y: cy + ay * sy,
                     w: aw * sx,
                     h: ah * sy,
                     script,
+                    events: raw.events,
                 }),
                 Err(error) => eprintln!("mouse script: {error}"),
             }
@@ -502,7 +561,7 @@ fn collect_mouse_areas(
     node: roxmltree::Node<'_, '_>,
     offset_x: f64,
     offset_y: f64,
-    out: &mut Vec<(f64, f64, f64, f64, String)>,
+    out: &mut Vec<MouseAreaSource>,
 ) -> Result<()> {
     let mut stack = vec![(node, offset_x, offset_y)];
     while let Some((node, offset_x, offset_y)) = stack.pop() {
@@ -525,12 +584,25 @@ fn collect_mouse_areas(
                     .find(|c| c.has_tag_name("ClickType"))
                     .map(esp_formats::gauge::text_content)
                     .unwrap_or_default();
-                let left = click_type.trim().is_empty()
-                    || click_type.split('+').any(|kind| {
-                        kind.trim().eq_ignore_ascii_case("LeftSingle")
-                            || kind.trim().eq_ignore_ascii_case("LeftAll")
-                    });
-                if !left {
+                let mut events = Vec::new();
+                if click_type.trim().is_empty() {
+                    events.push(MouseEvent::LeftSingle);
+                } else {
+                    for kind in click_type.split('+').map(str::trim) {
+                        match kind.to_ascii_lowercase().as_str() {
+                            "leftsingle" => events.push(MouseEvent::LeftSingle),
+                            "leftrelease" => events.push(MouseEvent::LeftRelease),
+                            "leftall" => {
+                                events.extend([MouseEvent::LeftSingle, MouseEvent::LeftRelease])
+                            }
+                            "wheelup" => events.push(MouseEvent::WheelUp),
+                            "wheeldown" => events.push(MouseEvent::WheelDown),
+                            "wheel" => events.extend([MouseEvent::WheelUp, MouseEvent::WheelDown]),
+                            _ => eprintln!("unsupported mouse event: {kind}"),
+                        }
+                    }
+                }
+                if events.is_empty() {
                     continue;
                 }
                 let source = if let Some(script) =
@@ -550,7 +622,11 @@ fn collect_mouse_areas(
                     continue;
                 };
                 if !source.trim().is_empty() {
-                    out.push((x, y, w, h, source));
+                    out.push(MouseAreaSource {
+                        bounds: (x, y, w, h),
+                        source,
+                        events,
+                    });
                 }
             }
             stack.push((child, x, y));
@@ -758,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_release_only_click_types() {
+    fn keeps_release_handlers_separate_from_presses() {
         let root = tempfile::tempdir().unwrap();
         let panel_path = root.path().join("panel");
         let module = panel_path.join("example");
@@ -788,7 +864,9 @@ mod tests {
         std::fs::write(module.join("bg.bmp"), data).unwrap();
         let panel = Panel::load(root.path(), None).unwrap().unwrap();
         let result = load_panel(&panel, "$screen").unwrap().unwrap();
-        assert_eq!(result.mouse_areas.len(), 1);
+        assert_eq!(result.mouse_areas.len(), 2);
+        assert_eq!(result.mouse_areas[0].events, [MouseEvent::LeftRelease]);
+        assert_eq!(result.mouse_areas[1].events, [MouseEvent::LeftSingle]);
         // Script writes to K:, so use a permissive host.
         struct SinkHost;
         impl Host for SinkHost {
@@ -820,12 +898,13 @@ mod tests {
             omitted_elements: 0,
             mouse_areas: raw
                 .into_iter()
-                .map(|(x, y, w, h, source)| PanelMouseArea {
-                    x,
-                    y,
-                    w,
-                    h,
-                    script: Program::compile(&source).unwrap(),
+                .map(|raw| PanelMouseArea {
+                    x: raw.bounds.0,
+                    y: raw.bounds.1,
+                    w: raw.bounds.2,
+                    h: raw.bounds.3,
+                    script: Program::compile(&raw.source).unwrap(),
+                    events: raw.events,
                 })
                 .collect(),
             gauges: vec![],
@@ -856,6 +935,9 @@ mod tests {
         assert!(!panel.left_click(f64::NAN, 3.0, &mut host).unwrap());
         panel.mouse_areas[0].script = Program::compile("(A:MISSING,bool)").unwrap();
         assert!(panel.left_click(1.5, 2.5, &mut host).is_err());
+        host.0.clear();
+        assert!(panel.left_click(2.5, 3.5, &mut host).is_err());
+        assert_eq!(host.0, [("OTHER".into(), Value::Number(2.0))]);
     }
 
     #[test]
@@ -874,7 +956,7 @@ mod tests {
             let mut raw = Vec::new();
             collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
             assert_eq!(raw.len(), 1, "{data}");
-            assert_eq!(raw[0].4, "(>K:GOOD)");
+            assert_eq!(raw[0].source, "(>K:GOOD)");
         }
     }
 
@@ -882,5 +964,58 @@ mod tests {
     fn rejects_script_injection_in_key_names() {
         let gauge = Gauge::parse("<Gauge><MouseArea><MouseClick><KeyEvent>TEST) 1 (&gt;L:VALUE</KeyEvent></MouseClick></MouseArea></Gauge>").unwrap();
         assert!(collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn captured_release_and_wheel_use_their_event_context() {
+        #[derive(Default)]
+        struct Values(std::collections::HashMap<String, Value>);
+        impl Host for Values {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                Ok(self
+                    .0
+                    .get(&reference.name)
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0)))
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                self.0.insert(reference.name.clone(), value);
+                Ok(())
+            }
+        }
+        let panel = PanelImage {
+            image: RgbaImage::new(8, 8),
+            omitted_gauges: 0, omitted_elements: 0,
+            mouse_areas: vec![PanelMouseArea {
+                x: 1.0, y: 1.0, w: 2.0, h: 2.0,
+                script: Program::compile("(M:Event) 'LeftSingle' scmp 0 == if{ 1 (>L:PRESSED) } (M:Event) 'LeftRelease' scmp 0 == if{ 0 (>L:PRESSED) } (M:Event) 'WheelUp' scmp 0 == if{ 1 (>L:WHEEL) } (M:Event) 'WheelDown' scmp 0 == if{ -1 (>L:WHEEL) }").unwrap(),
+                events: vec![MouseEvent::LeftSingle, MouseEvent::LeftRelease, MouseEvent::WheelUp, MouseEvent::WheelDown],
+            }],
+            gauges: vec![], conditions: vec![], background: Rgba([0; 4]),
+        };
+        let captured = panel.mouse_areas_at(2.0, 2.0);
+        let mut host = Values::default();
+        panel
+            .mouse_event(MouseEvent::LeftSingle, &captured, &mut host)
+            .unwrap();
+        assert_eq!(host.0["PRESSED"], Value::Number(1.0));
+        assert!(panel.mouse_areas_at(5.0, 5.0).is_empty());
+        panel
+            .mouse_event(MouseEvent::LeftRelease, &captured, &mut host)
+            .unwrap();
+        assert_eq!(host.0["PRESSED"], Value::Number(0.0));
+        panel
+            .mouse_event(MouseEvent::WheelUp, &captured, &mut host)
+            .unwrap();
+        assert_eq!(host.0["WHEEL"], Value::Number(1.0));
+        panel
+            .mouse_event(MouseEvent::WheelDown, &captured, &mut host)
+            .unwrap();
+        assert_eq!(host.0["WHEEL"], Value::Number(-1.0));
+        assert!(
+            panel
+                .mouse_event(MouseEvent::WheelUp, &[usize::MAX], &mut host)
+                .is_err()
+        );
     }
 }
