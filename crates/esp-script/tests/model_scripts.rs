@@ -1,6 +1,9 @@
 use esp_formats::mdl::{Model, visibility::Condition};
 use esp_script::{Error, Host, Program, Reference, Value};
 
+#[path = "../../../tests/support/models.rs"]
+mod models;
+
 struct TestHost;
 impl Host for TestHost {
     fn read(&mut self, _: &Reference) -> Result<Value, Error> {
@@ -12,11 +15,10 @@ impl Host for TestHost {
 }
 
 #[test]
-#[ignore = "requires ESP_FORMATS_MDL_FILES containing external aircraft models"]
+#[ignore = "requires ESP_FORMATS_MDL_FILES, OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn compiles_external_animation_and_visibility_scripts() {
-    let paths = std::env::var_os("ESP_FORMATS_MDL_FILES").expect("set ESP_FORMATS_MDL_FILES");
     let mut count = 0;
-    for path in std::env::split_paths(&paths) {
+    for path in models::model_paths() {
         let bytes = std::fs::read(&path).unwrap();
         let model = Model::parse(&bytes).unwrap().decode().unwrap();
         let data = model.exterior.unwrap();

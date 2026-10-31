@@ -4,6 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../../../tests/support/content.rs"]
+mod content;
+
 fn capture(aircraft: &Path, cockpit: bool, output: &Path) -> image::RgbaImage {
     let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
     command
@@ -39,11 +42,10 @@ fn capture(aircraft: &Path, cockpit: bool, output: &Path) -> image::RgbaImage {
 }
 
 #[test]
-#[ignore = "requires a GPU, desktop and OPENESP_AIRCRAFT_PATHS containing external aircraft directories"]
+#[ignore = "requires a GPU, desktop and OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn renders_external_aircraft_and_cockpits() {
-    let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").expect("set OPENESP_AIRCRAFT_PATHS");
     let temp = tempfile::tempdir().unwrap();
-    for path in std::env::split_paths(&paths) {
+    for path in content::aircraft_paths() {
         let exterior = capture(&path, false, &temp.path().join("exterior.png"));
         let interior = capture(&path, true, &temp.path().join("interior.png"));
         assert_eq!(exterior.dimensions(), interior.dimensions());

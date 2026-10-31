@@ -1,11 +1,13 @@
 use esp_formats::mdl::Model;
 
+#[path = "../../../tests/support/models.rs"]
+mod models;
+
 #[test]
-#[ignore = "requires ESP_FORMATS_MDL_FILES containing paths to external MDLX files"]
+#[ignore = "requires ESP_FORMATS_MDL_FILES, OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn decodes_external_models() {
-    let paths = std::env::var_os("ESP_FORMATS_MDL_FILES").expect("set ESP_FORMATS_MDL_FILES");
     let mut parts = 0;
-    for path in std::env::split_paths(&paths) {
+    for path in models::model_paths() {
         let bytes =
             std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         let model =

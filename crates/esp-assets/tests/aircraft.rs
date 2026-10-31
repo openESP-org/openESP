@@ -1,10 +1,12 @@
 use esp_assets::Aircraft;
 
+#[path = "../../../tests/support/content.rs"]
+mod content;
+
 #[test]
-#[ignore = "requires OPENESP_AIRCRAFT_PATHS containing external aircraft directories"]
+#[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn loads_external_aircraft() {
-    let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").expect("set OPENESP_AIRCRAFT_PATHS");
-    for path in std::env::split_paths(&paths) {
+    for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();
         let mut textures = 0;
         let mut missing = std::collections::BTreeSet::new();
