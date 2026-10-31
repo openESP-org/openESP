@@ -23,6 +23,7 @@ pub struct PanelImage {
 pub enum MouseEvent {
     LeftSingle,
     LeftRelease,
+    LeftDrag,
     WheelUp,
     WheelDown,
 }
@@ -32,6 +33,7 @@ impl MouseEvent {
         match self {
             Self::LeftSingle => "LeftSingle",
             Self::LeftRelease => "LeftRelease",
+            Self::LeftDrag => "LeftDrag",
             Self::WheelUp => "WheelUp",
             Self::WheelDown => "WheelDown",
         }
@@ -45,6 +47,8 @@ pub struct PanelMouseArea {
     pub h: f64,
     pub script: Program,
     pub events: Vec<MouseEvent>,
+    gauge_origin: (f64, f64),
+    gauge_scale: (f64, f64),
 }
 
 struct MouseAreaSource {
@@ -84,7 +88,7 @@ enum Requirement {
 impl PanelImage {
     pub fn left_click(&self, x: f64, y: f64, host: &mut impl Host) -> Result<bool> {
         let areas = self.mouse_areas_at(x, y);
-        self.mouse_event(MouseEvent::LeftSingle, &areas, host)
+        self.mouse_event(MouseEvent::LeftSingle, &areas, [x, y], host)
     }
 
     pub fn mouse_areas_at(&self, x: f64, y: f64) -> Vec<usize> {
@@ -102,16 +106,26 @@ impl PanelImage {
         &self,
         event: MouseEvent,
         areas: &[usize],
+        position: [f64; 2],
         host: &mut impl Host,
     ) -> Result<bool> {
-        struct MouseHost<'a, H>(&'a mut H, MouseEvent);
+        anyhow::ensure!(
+            position.iter().all(|v| v.is_finite()),
+            "invalid mouse position"
+        );
+        struct MouseHost<'a, H>(&'a mut H, MouseEvent, [f64; 2]);
         impl<H: Host> Host for MouseHost<'_, H> {
             fn read(
                 &mut self,
                 reference: &esp_script::Reference,
             ) -> std::result::Result<esp_script::Value, esp_script::Error> {
-                if reference.category == 'M' && reference.name == "EVENT" {
-                    Ok(esp_script::Value::Text(self.1.name().into()))
+                if reference.category == 'M' {
+                    match reference.name.as_str() {
+                        "EVENT" => Ok(esp_script::Value::Text(self.1.name().into())),
+                        "X" => Ok(esp_script::Value::Number(self.2[0])),
+                        "Y" => Ok(esp_script::Value::Number(self.2[1])),
+                        _ => self.0.read(reference),
+                    }
                 } else {
                     self.0.read(reference)
                 }
@@ -124,7 +138,6 @@ impl PanelImage {
                 self.0.write(reference, value)
             }
         }
-        let mut host = MouseHost(host, event);
         let mut handled = false;
         let mut failure = None;
         for &index in areas {
@@ -133,6 +146,11 @@ impl PanelImage {
                 .get(index)
                 .context("invalid mouse area index")?;
             if area.events.contains(&event) {
+                let position = [
+                    (position[0] - area.gauge_origin.0) / area.gauge_scale.0,
+                    (position[1] - area.gauge_origin.1) / area.gauge_scale.1,
+                ];
+                let mut host = MouseHost(host, event, position);
                 if let Err(error) = area.script.evaluate(&mut host) {
                     failure.get_or_insert(error);
                 }
@@ -489,6 +507,8 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     h: ah * sy,
                     script,
                     events: raw.events,
+                    gauge_origin: (cx, cy),
+                    gauge_scale: (sx, sy),
                 }),
                 Err(error) => eprintln!("mouse script: {error}"),
             }
@@ -592,9 +612,12 @@ fn collect_mouse_areas(
                         match kind.to_ascii_lowercase().as_str() {
                             "leftsingle" => events.push(MouseEvent::LeftSingle),
                             "leftrelease" => events.push(MouseEvent::LeftRelease),
-                            "leftall" => {
-                                events.extend([MouseEvent::LeftSingle, MouseEvent::LeftRelease])
-                            }
+                            "leftdrag" => events.push(MouseEvent::LeftDrag),
+                            "leftall" => events.extend([
+                                MouseEvent::LeftSingle,
+                                MouseEvent::LeftRelease,
+                                MouseEvent::LeftDrag,
+                            ]),
                             "wheelup" => events.push(MouseEvent::WheelUp),
                             "wheeldown" => events.push(MouseEvent::WheelDown),
                             "wheel" => events.extend([MouseEvent::WheelUp, MouseEvent::WheelDown]),
@@ -802,7 +825,7 @@ mod tests {
         std::fs::create_dir_all(&module).unwrap();
         std::fs::write(
             panel_path.join("panel.cfg"),
-            "[VCockpit01]\nsize_mm=4,4\npixel_size=4,4\ntexture=$screen\ngauge00=example!dial,1,1,2,2",
+            "[VCockpit01]\nsize_mm=4,4\npixel_size=8,8\ntexture=$screen\ngauge00=example!dial,1,1,2,2",
         )
         .unwrap();
         std::fs::write(
@@ -811,8 +834,8 @@ mod tests {
             <Image Name="bg.bmp"/>
             <MouseArea id="Outer"><FloatPosition>0,0</FloatPosition><Size>2,2</Size>
                 <MouseArea id="Inner"><FloatPosition>1,0</FloatPosition><Size>1,1</Size>
-                    <MouseClick id="MouseClick"><ClickType>LeftSingle</ClickType>
-                    <Script>1 (&gt;K:TEST_EVENT)</Script></MouseClick>
+                    <MouseClick id="MouseClick"><ClickType>LeftSingle+LeftDrag</ClickType>
+                    <Script>(M:X) (&gt;K:X) (M:Y) (&gt;K:Y)</Script></MouseClick>
                 </MouseArea>
             </MouseArea></SimGauge.Gauge></SimBase.Document>"#,
         )
@@ -827,10 +850,24 @@ mod tests {
         // The nested area is scaled into panel pixel coordinates.
         assert_eq!(result.mouse_areas.len(), 1);
         let area = &result.mouse_areas[0];
-        assert!((area.x - 2.0).abs() < 1e-9);
-        assert!((area.y - 1.0).abs() < 1e-9);
-        assert!((area.w - 1.0).abs() < 1e-9);
-        assert!((area.h - 1.0).abs() < 1e-9);
+        assert_eq!((area.x, area.y, area.w, area.h), (4.0, 2.0, 2.0, 2.0));
+        struct Coordinates(Vec<f64>);
+        impl Host for Coordinates {
+            fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+                Err(Error::Type)
+            }
+            fn write(&mut self, _: &Reference, value: Value) -> Result<(), Error> {
+                self.0.push(value.number()?);
+                Ok(())
+            }
+        }
+        let mut host = Coordinates(Vec::new());
+        result.left_click(5.0, 3.0, &mut host).unwrap();
+        assert_eq!(host.0, [1.5, 0.5]);
+        result
+            .mouse_event(MouseEvent::LeftDrag, &[0], [7.0, 5.0], &mut host)
+            .unwrap();
+        assert_eq!(host.0, [1.5, 0.5, 2.5, 1.5]);
     }
 
     #[test]
@@ -905,6 +942,8 @@ mod tests {
                     h: raw.bounds.3,
                     script: Program::compile(&raw.source).unwrap(),
                     events: raw.events,
+                    gauge_origin: (0.0, 0.0),
+                    gauge_scale: (1.0, 1.0),
                 })
                 .collect(),
             gauges: vec![],
@@ -932,7 +971,7 @@ mod tests {
             ]
         );
         assert!(!panel.left_click(5.0, 6.0, &mut host).unwrap());
-        assert!(!panel.left_click(f64::NAN, 3.0, &mut host).unwrap());
+        assert!(panel.left_click(f64::NAN, 3.0, &mut host).is_err());
         panel.mouse_areas[0].script = Program::compile("(A:MISSING,bool)").unwrap();
         assert!(panel.left_click(1.5, 2.5, &mut host).is_err());
         host.0.clear();
@@ -990,31 +1029,33 @@ mod tests {
                 x: 1.0, y: 1.0, w: 2.0, h: 2.0,
                 script: Program::compile("(M:Event) 'LeftSingle' scmp 0 == if{ 1 (>L:PRESSED) } (M:Event) 'LeftRelease' scmp 0 == if{ 0 (>L:PRESSED) } (M:Event) 'WheelUp' scmp 0 == if{ 1 (>L:WHEEL) } (M:Event) 'WheelDown' scmp 0 == if{ -1 (>L:WHEEL) }").unwrap(),
                 events: vec![MouseEvent::LeftSingle, MouseEvent::LeftRelease, MouseEvent::WheelUp, MouseEvent::WheelDown],
+                gauge_origin: (0.0, 0.0),
+                gauge_scale: (1.0, 1.0),
             }],
             gauges: vec![], conditions: vec![], background: Rgba([0; 4]),
         };
         let captured = panel.mouse_areas_at(2.0, 2.0);
         let mut host = Values::default();
         panel
-            .mouse_event(MouseEvent::LeftSingle, &captured, &mut host)
+            .mouse_event(MouseEvent::LeftSingle, &captured, [2.0, 2.0], &mut host)
             .unwrap();
         assert_eq!(host.0["PRESSED"], Value::Number(1.0));
         assert!(panel.mouse_areas_at(5.0, 5.0).is_empty());
         panel
-            .mouse_event(MouseEvent::LeftRelease, &captured, &mut host)
+            .mouse_event(MouseEvent::LeftRelease, &captured, [5.0, 5.0], &mut host)
             .unwrap();
         assert_eq!(host.0["PRESSED"], Value::Number(0.0));
         panel
-            .mouse_event(MouseEvent::WheelUp, &captured, &mut host)
+            .mouse_event(MouseEvent::WheelUp, &captured, [2.0, 2.0], &mut host)
             .unwrap();
         assert_eq!(host.0["WHEEL"], Value::Number(1.0));
         panel
-            .mouse_event(MouseEvent::WheelDown, &captured, &mut host)
+            .mouse_event(MouseEvent::WheelDown, &captured, [2.0, 2.0], &mut host)
             .unwrap();
         assert_eq!(host.0["WHEEL"], Value::Number(-1.0));
         assert!(
             panel
-                .mouse_event(MouseEvent::WheelUp, &[usize::MAX], &mut host)
+                .mouse_event(MouseEvent::WheelUp, &[usize::MAX], [2.0, 2.0], &mut host)
                 .is_err()
         );
     }

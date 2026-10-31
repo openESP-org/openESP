@@ -85,7 +85,7 @@ struct App {
     keys: HashSet<KeyCode>,
     mouse_look: bool,
     cursor: Option<(f64, f64)>,
-    pressed_panel: Option<(String, Vec<usize>)>,
+    pressed_panel: Option<(String, Vec<usize>, [f64; 2])>,
     last_frame: Instant,
     frames: u64,
     error: Option<anyhow::Error>,
@@ -143,17 +143,29 @@ impl App {
     fn cockpit_mouse(&mut self, event: MouseEvent) -> Result<()> {
         let target = if event == MouseEvent::LeftRelease {
             self.pressed_panel.take()
+        } else if event == MouseEvent::LeftDrag {
+            let Some((name, x, y)) = self.cockpit_target() else {
+                return Ok(());
+            };
+            let Some((captured, areas, position)) = &mut self.pressed_panel else {
+                return Ok(());
+            };
+            if *captured != name {
+                return Ok(());
+            }
+            *position = [x, y];
+            Some((name, areas.clone(), *position))
         } else {
             self.cockpit_target().and_then(|(name, x, y)| {
                 let panel = self.aircraft.as_ref()?.panel_images.get(&name)?;
-                Some((name, panel.mouse_areas_at(x, y)))
+                Some((name, panel.mouse_areas_at(x, y), [x, y]))
             })
         };
-        let Some((name, areas)) = target else {
+        let Some((name, areas, position)) = target else {
             return Ok(());
         };
         if event == MouseEvent::LeftSingle {
-            self.pressed_panel = Some((name.clone(), areas.clone()));
+            self.pressed_panel = Some((name.clone(), areas.clone(), position));
         }
         let panel = self
             .aircraft
@@ -162,7 +174,7 @@ impl App {
             .panel_images
             .get(&name)
             .context("captured panel is absent")?;
-        let result = panel.mouse_event(event, &areas, &mut self.variables);
+        let result = panel.mouse_event(event, &areas, position, &mut self.variables);
         for error in self.variables.dispatch_events() {
             eprintln!("cockpit event: {error}");
         }
@@ -329,6 +341,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some((position.x, position.y));
+                if self.pressed_panel.is_some()
+                    && !self.mouse_look
+                    && let Err(error) = self.cockpit_mouse(MouseEvent::LeftDrag)
+                {
+                    eprintln!("cockpit drag: {error}");
+                }
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput {
@@ -517,7 +535,7 @@ mod tests {
         let areas = image.mouse_areas_at(0.5, 0.5);
         let mut variables = Variables::default();
         image
-            .mouse_event(MouseEvent::LeftSingle, &areas, &mut variables)
+            .mouse_event(MouseEvent::LeftSingle, &areas, [0.5, 0.5], &mut variables)
             .unwrap();
         let empty_model = || esp_assets::Model {
             nodes: vec![],
@@ -550,7 +568,7 @@ mod tests {
             keys: HashSet::new(),
             mouse_look: true,
             cursor: None,
-            pressed_panel: Some(("$TEST".into(), areas)),
+            pressed_panel: Some(("$TEST".into(), areas, [0.5, 0.5])),
             last_frame: Instant::now(),
             frames: 0,
             error: None,

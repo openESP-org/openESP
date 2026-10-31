@@ -12,3 +12,4 @@ petgraph = "0.8"
 
 [dev-dependencies]
 esp-formats = { path = "../esp-formats" }
+tempfile = "3"

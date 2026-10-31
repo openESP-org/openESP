@@ -35,7 +35,7 @@ impl Variables {
     }
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
-        value.number()?;
+        let value = value.number()?;
         match name {
             "TOGGLE_FLIGHT_DIRECTOR" => {
                 let reference =
@@ -48,6 +48,14 @@ impl Variables {
                     .unwrap_or(0.0);
                 self.values
                     .insert(reference, Value::Number(f64::from(active == 0.0)));
+                Ok(())
+            }
+            "SPOILERS_SET" => {
+                self.set_number(
+                    "SPOILERS HANDLE POSITION",
+                    "percent",
+                    value.clamp(0.0, 16383.0) * 100.0 / 16383.0,
+                );
                 Ok(())
             }
             _ => Err(Error::Unsupported(format!("event {name}"))),
@@ -185,5 +193,29 @@ mod tests {
             Value::Number(1.0)
         );
         assert!(variables.dispatch_events().is_empty());
+    }
+
+    #[test]
+    fn spoiler_handle_events_are_bounded_and_finite() {
+        let mut variables = Variables::default();
+        let reference = Reference::new('A', "SPOILERS HANDLE POSITION", Some("percent"));
+        for (input, expected) in [
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (8191.5, 50.0),
+            (16383.0, 100.0),
+            (16384.0, 100.0),
+        ] {
+            variables
+                .dispatch_event("SPOILERS_SET", Value::Number(input))
+                .unwrap();
+            assert_eq!(variables.read(&reference).unwrap(), Value::Number(expected));
+        }
+        assert!(
+            variables
+                .dispatch_event("SPOILERS_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(100.0));
     }
 }

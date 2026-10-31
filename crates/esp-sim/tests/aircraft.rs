@@ -202,7 +202,12 @@ fn original_clock_button_responds_to_press_and_release() {
                 }
                 let mut variables = Variables::default();
                 if panel
-                    .mouse_event(MouseEvent::LeftSingle, &[index], &mut variables)
+                    .mouse_event(
+                        MouseEvent::LeftSingle,
+                        &[index],
+                        [area.x, area.y],
+                        &mut variables,
+                    )
                     .is_err()
                 {
                     continue;
@@ -212,7 +217,12 @@ fn original_clock_button_responds_to_press_and_release() {
                 }
                 let captured = panel.mouse_areas_at(area.x + area.w * 0.5, area.y + area.h * 0.5);
                 panel
-                    .mouse_event(MouseEvent::LeftRelease, &captured, &mut variables)
+                    .mouse_event(
+                        MouseEvent::LeftRelease,
+                        &captured,
+                        [area.x, area.y],
+                        &mut variables,
+                    )
                     .unwrap();
                 assert_eq!(variables.read(&depressed).unwrap(), Value::Number(0.0));
                 assert_eq!(variables.read(&function).unwrap(), Value::Number(1.0));
@@ -222,4 +232,91 @@ fn original_clock_button_responds_to_press_and_release() {
         }
     }
     assert!(verified > 0, "no original XML clock button verified");
+}
+
+#[test]
+#[ignore = "requires original XML speed brake gauges and OPENESP_AIRCRAFT_PATHS"]
+fn original_speed_brake_drag_uses_scaled_gauge_coordinates() {
+    use esp_assets::{gauge::MouseEvent, panel::Panel};
+    use esp_formats::gauge::Gauge;
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        let Some(panel) = &aircraft.panel else {
+            continue;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for gauge in panel
+            .layout()
+            .unwrap()
+            .windows
+            .iter()
+            .flat_map(|window| &window.gauges)
+        {
+            if !seen.insert(gauge.reference) {
+                continue;
+            }
+            let Some(xml) = panel
+                .read_xml_gauge(gauge.reference, 8 * 1024 * 1024)
+                .unwrap()
+            else {
+                continue;
+            };
+            let text = std::str::from_utf8(&xml).unwrap();
+            if !text.contains("SPOILERS_SET") || !text.contains("LeftDrag") {
+                continue;
+            }
+            let size = Gauge::parse(text).unwrap().size().unwrap().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("panel");
+            std::fs::create_dir_all(directory.join("sample")).unwrap();
+            std::fs::write(directory.join("sample/control.xml"), &xml).unwrap();
+            let (w, h) = (size[0], size[1]);
+            std::fs::write(directory.join("panel.cfg"), format!("[VCockpit01]\nsize_mm={},{}\npixel_size={},{}\ntexture=$test\ngauge00=sample!control,10,20,{w},{h}", w + 20, h + 40, (w + 20) * 2, (h + 40) * 2)).unwrap();
+            let loaded = Panel::load(root.path(), None).unwrap().unwrap();
+            let image = esp_assets::gauge::load_panel(&loaded, "$test")
+                .unwrap()
+                .unwrap();
+            for (index, area) in image.mouse_areas.iter().enumerate() {
+                if !area.events.contains(&MouseEvent::LeftDrag) {
+                    continue;
+                }
+                let mut variables = Variables::default();
+                let position = [area.x + area.w * 0.5, area.y + area.h * 0.25];
+                if image
+                    .mouse_event(MouseEvent::LeftSingle, &[index], position, &mut variables)
+                    .is_err()
+                {
+                    continue;
+                }
+                if !variables
+                    .drain_events()
+                    .any(|(name, _)| name == "SPOILERS_SET")
+                {
+                    continue;
+                }
+                for fraction in [0.0, 0.5, 1.0, 1.5] {
+                    let position = [area.x + area.w * 0.5, area.y + area.h * fraction];
+                    image
+                        .mouse_event(MouseEvent::LeftDrag, &[index], position, &mut variables)
+                        .unwrap();
+                    assert!(variables.dispatch_events().is_empty());
+                    let actual = variables
+                        .read(&Reference::new(
+                            'A',
+                            "SPOILERS HANDLE POSITION",
+                            Some("percent"),
+                        ))
+                        .unwrap()
+                        .number()
+                        .unwrap();
+                    let expected = (fraction * 16384.0 / 16383.0 * 100.0).clamp(0.0, 100.0);
+                    assert!((actual - expected).abs() < 1e-9);
+                }
+                verified += 1;
+            }
+        }
+    }
+    assert!(verified > 0, "no original speed brake drag verified");
 }
