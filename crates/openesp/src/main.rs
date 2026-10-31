@@ -23,6 +23,8 @@ use winit::{
 struct Arguments {
     #[arg(long)]
     aircraft: PathBuf,
+    #[arg(long)]
+    fsx_root: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     variant: u32,
     #[arg(long)]
@@ -328,11 +330,16 @@ fn main() -> Result<()> {
     let arguments = Arguments::parse();
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;
+    let fsx_root = arguments.fsx_root.clone();
     let (sender, loaded) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("aircraft loader".into())
         .spawn(move || {
-            let _ = sender.send(Aircraft::load(&path, variant));
+            let _ = sender.send(Aircraft::load_with_root(
+                &path,
+                variant,
+                fsx_root.as_deref(),
+            ));
         })?;
     let mut app = App {
         arguments,

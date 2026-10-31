@@ -107,6 +107,10 @@ fn variant_directory(root: &Path, kind: &str, suffix: Option<&str>) -> Result<Pa
 
 impl Aircraft {
     pub fn load(root: &Path, variant: u32) -> Result<Self> {
+        Self::load_with_root(root, variant, None)
+    }
+
+    pub fn load_with_root(root: &Path, variant: u32, fsx_root: Option<&Path>) -> Result<Self> {
         let aircraft = config(&resolve_path(root, "aircraft.cfg")?)?;
         let variants = cfg::aircraft::configurations(&aircraft)?;
         let variant = variants
@@ -122,7 +126,7 @@ impl Aircraft {
         let load = |name: &str| Model::load(&resolve_path(&directory, &format!("{name}.mdl"))?);
         let exterior = load(models.normal.context("model.cfg has no exterior model")?)?;
         let interior = models.interior.map(load).transpose()?;
-        let panel = panel::Panel::load(root, variant.panel)?;
+        let panel = panel::Panel::load_with_root(root, variant.panel, fsx_root)?;
         let mut panel_images = HashMap::new();
         if let (Some(panel), Some(interior)) = (&panel, &interior) {
             for name in interior
