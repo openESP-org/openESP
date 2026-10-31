@@ -280,23 +280,25 @@ impl App {
             );
         }
         if let Some(aircraft) = &mut self.aircraft {
+            for (name, panel) in &mut aircraft.panel_images {
+                let changed = panel.advance(dt, &mut self.variables)?;
+                if changed && let Some(renderer) = &self.renderer {
+                    renderer.update_panel(
+                        name,
+                        panel.image.width(),
+                        panel.image.height(),
+                        panel.image.as_raw(),
+                    )?;
+                }
+            }
+            for error in self.variables.dispatch_events() {
+                eprintln!("gauge event: {error}");
+            }
             if let Some(state) = &mut self.exterior_state {
                 state.update(&aircraft.exterior, &mut self.variables, dt)?;
             }
             if let (Some(model), Some(state)) = (&aircraft.interior, &mut self.interior_state) {
                 state.update(model, &mut self.variables, dt)?;
-            }
-            if let Some(renderer) = &self.renderer {
-                for (name, panel) in &mut aircraft.panel_images {
-                    if panel.update(&mut self.variables) {
-                        renderer.update_panel(
-                            name,
-                            panel.image.width(),
-                            panel.image.height(),
-                            panel.image.as_raw(),
-                        )?;
-                    }
-                }
             }
         }
         for state in [&mut self.exterior_state, &mut self.interior_state]

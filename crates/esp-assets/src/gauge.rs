@@ -17,6 +17,7 @@ pub struct PanelImage {
     pub mouse_areas: Vec<PanelMouseArea>,
     gauges: Vec<Canvas>,
     conditions: Vec<Condition>,
+    updates: Vec<Update>,
     background: Rgba<u8>,
 }
 
@@ -97,6 +98,14 @@ struct Condition {
     value: Option<f64>,
     minimum: Option<f64>,
     maximum: Option<f64>,
+    reported: bool,
+}
+
+struct Update {
+    program: Program,
+    interval: Option<f64>,
+    elapsed: f64,
+    initialized: bool,
     reported: bool,
 }
 
@@ -212,6 +221,38 @@ impl PanelImage {
         }
     }
 
+    pub fn advance(&mut self, dt: f64, host: &mut impl Host) -> Result<bool> {
+        anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid gauge timestep");
+        for update in &mut self.updates {
+            let elapsed = update
+                .interval
+                .map(|interval| update.elapsed + dt % interval);
+            let due = !update.initialized
+                || update
+                    .interval
+                    .zip(elapsed)
+                    .is_none_or(|(interval, elapsed)| dt >= interval || elapsed >= interval);
+            if !due {
+                update.elapsed = elapsed.unwrap_or(0.0);
+                continue;
+            }
+            update.initialized = true;
+            if let Some(interval) = update.interval {
+                // Missed updates are coalesced so slow frames cannot trigger an unbounded script burst.
+                update.elapsed = elapsed.unwrap_or(0.0) % interval;
+            } else {
+                update.elapsed = 0.0;
+            }
+            if let Err(error) = update.program.evaluate(host)
+                && !update.reported
+            {
+                eprintln!("gauge update: {error}");
+                update.reported = true;
+            }
+        }
+        Ok(self.update(host))
+    }
+
     pub fn update(&mut self, host: &mut impl Host) -> bool {
         for condition in &mut self.conditions {
             let result = condition
@@ -315,6 +356,40 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             };
             let text = std::str::from_utf8(&xml)?;
             let document = Gauge::parse(text)?;
+            let mut updates = Vec::new();
+            for node in document
+                .root()
+                .children()
+                .filter(|node| node.has_tag_name("Update"))
+            {
+                let frequency = node.attribute("Frequency").map(str::to_owned).or_else(|| {
+                    node.children()
+                        .find(|node| node.has_tag_name("Frequency"))
+                        .map(esp_formats::gauge::text_content)
+                });
+                let frequency = frequency
+                    .map(|text| text.trim().parse::<u32>())
+                    .transpose()?;
+                anyhow::ensure!(frequency != Some(0), "zero gauge update frequency");
+                let source = node
+                    .children()
+                    .find(|node| node.has_tag_name("Script"))
+                    .map(esp_formats::gauge::text_content)
+                    .unwrap_or_else(|| esp_formats::gauge::text_content(node));
+                match Program::compile(source.trim()) {
+                    Ok(program) if !source.trim().is_empty() => updates.push(Update {
+                        program,
+                        interval: frequency.map(|frequency| 1.0 / f64::from(frequency)),
+                        elapsed: 0.0,
+                        initialized: false,
+                        reported: false,
+                    }),
+                    _ => {
+                        eprintln!("unsupported gauge update {}: {source}", gauge.reference);
+                        omitted_elements += 1;
+                    }
+                }
+            }
             let module = gauge
                 .reference
                 .split_once('!')
@@ -518,16 +593,25 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             };
             let mut raw_areas = Vec::new();
             collect_mouse_areas(document.root(), 0.0, 0.0, &mut raw_areas)?;
-            Ok(Some((canvas, conditions, omitted_elements, raw_areas)))
+            Ok(Some((
+                canvas,
+                conditions,
+                omitted_elements,
+                raw_areas,
+                updates,
+            )))
         })
         .collect();
     let mut gauges = Vec::new();
     let mut conditions = Vec::new();
     let mut mouse_areas = Vec::new();
+    let mut updates = Vec::new();
     let mut omitted_gauges = 0;
     let mut omitted_elements = 0;
     for loaded in loaded {
-        let Some((mut canvas, mut gauge_conditions, omitted, raw_areas)) = loaded? else {
+        let Some((mut canvas, mut gauge_conditions, omitted, raw_areas, mut gauge_updates)) =
+            loaded?
+        else {
             omitted_gauges += 1;
             continue;
         };
@@ -541,6 +625,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             }
         }
         conditions.append(&mut gauge_conditions);
+        updates.append(&mut gauge_updates);
         omitted_elements += omitted;
         let sx = f64::from(canvas.target.0) / f64::from(canvas.size.0);
         let sy = f64::from(canvas.target.1) / f64::from(canvas.size.1);
@@ -573,6 +658,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
         mouse_areas,
         gauges,
         conditions,
+        updates,
         background,
     };
     result.compose();
@@ -1030,6 +1116,7 @@ mod tests {
                 .collect(),
             gauges: vec![],
             conditions: vec![],
+            updates: vec![],
             background: Rgba([0; 4]),
         };
         #[derive(Default)]
@@ -1117,6 +1204,7 @@ mod tests {
                 visibility: vec![],
             }],
             gauges: vec![], conditions: vec![], background: Rgba([0; 4]),
+            updates: vec![],
         };
         let captured = panel.mouse_areas_at(2.0, 2.0);
         let mut host = Values::default();
@@ -1185,6 +1273,7 @@ mod tests {
                 .collect(),
             gauges: vec![],
             conditions: vec![],
+            updates: vec![],
             background: Rgba([0; 4]),
         };
         let mut host = Writes(Vec::new());
@@ -1233,6 +1322,7 @@ mod tests {
                 .collect(),
             gauges: vec![],
             conditions: vec![],
+            updates: vec![],
             background: Rgba([0; 4]),
         };
         struct State {
@@ -1311,5 +1401,126 @@ mod tests {
         collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].source, "(>K:GOOD)");
+    }
+
+    #[test]
+    fn runs_xml_updates_before_artwork_and_respects_frequency() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=1,1\npixel_size=1,1\ntexture=$test\ngauge00=example!update,0,0,1,1").unwrap();
+        std::fs::write(
+            module.join("update.xml"),
+            r#"<Gauge><Size X="1" Y="1"/>
+            <Update Frequency="2">(L:Ticks) ++ (&gt;L:Ticks) 1 (&gt;L:Visible)</Update>
+            <Update>(L:Frames) ++ (&gt;L:Frames)</Update>
+            <Element><Visibility>(L:Visible)</Visibility><Image Name="lamp.bmp"/></Element>
+            </Gauge>"#,
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("lamp.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$test").unwrap().unwrap();
+        #[derive(Default)]
+        struct Values(std::collections::HashMap<String, Value>);
+        impl Host for Values {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                Ok(self
+                    .0
+                    .get(&reference.name)
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0)))
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                self.0.insert(reference.name.clone(), value);
+                Ok(())
+            }
+        }
+        let mut host = Values::default();
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert!(image.advance(0.0, &mut host).unwrap());
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(host.0["TICKS"], Value::Number(1.0));
+        image.advance(0.25, &mut host).unwrap();
+        assert_eq!(host.0["TICKS"], Value::Number(1.0));
+        image.advance(0.25, &mut host).unwrap();
+        assert_eq!(host.0["TICKS"], Value::Number(2.0));
+        assert_eq!(host.0["FRAMES"], Value::Number(3.0));
+        image.advance(10.0, &mut host).unwrap();
+        assert_eq!(host.0["TICKS"], Value::Number(3.0));
+        for dt in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(image.advance(dt, &mut host).is_err());
+            assert_eq!(host.0["FRAMES"], Value::Number(4.0));
+        }
+        image.advance(f64::MAX, &mut host).unwrap();
+        image.advance(f64::MAX, &mut host).unwrap();
+        assert!(
+            image
+                .updates
+                .iter()
+                .all(|update| update.elapsed.is_finite())
+        );
+    }
+
+    #[test]
+    fn failed_updates_do_not_stop_other_scripts() {
+        let mut panel = PanelImage {
+            image: RgbaImage::new(1, 1),
+            omitted_gauges: 0,
+            omitted_elements: 0,
+            mouse_areas: vec![],
+            gauges: vec![],
+            conditions: vec![],
+            background: Rgba([0; 4]),
+            updates: ["(A:MISSING,bool)", "(>K:TEST)"]
+                .into_iter()
+                .map(|source| Update {
+                    program: Program::compile(source).unwrap(),
+                    interval: None,
+                    elapsed: 0.0,
+                    initialized: false,
+                    reported: false,
+                })
+                .collect(),
+        };
+        struct Events(usize);
+        impl Host for Events {
+            fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+                Err(Error::Type)
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+        let mut host = Events(0);
+        panel.advance(0.0, &mut host).unwrap();
+        assert_eq!(host.0, 1);
+        assert!(panel.updates[0].reported);
+        panel.advance(0.1, &mut host).unwrap();
+        assert_eq!(host.0, 2);
+    }
+
+    #[test]
+    fn reads_ace_update_frequency_and_rejects_invalid_values() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=1,1\npixel_size=1,1\ntexture=$test\ngauge00=example!update,0,0,1,1").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        for frequency in ["0", "-1", "NaN", "1.5", "4294967296"] {
+            std::fs::write(module.join("update.xml"), format!("<SimBase.Document Type='AceXML'><SimGauge.Gauge><Size>1,1</Size><Update><Frequency>{frequency}</Frequency><Script>1 (&gt;L:VALUE)</Script></Update></SimGauge.Gauge></SimBase.Document>")).unwrap();
+            assert!(load_panel(&panel, "$test").is_err(), "{frequency}");
+        }
+        std::fs::write(module.join("update.xml"), "<SimBase.Document Type='AceXML'><SimGauge.Gauge><Size>1,1</Size><Update><Frequency>2</Frequency><Script>1 (&gt;L:VALUE)</Script></Update></SimGauge.Gauge></SimBase.Document>").unwrap();
+        let image = load_panel(&panel, "$test").unwrap().unwrap();
+        assert_eq!(image.updates.len(), 1);
+        assert_eq!(image.updates[0].interval, Some(0.5));
     }
 }

@@ -379,3 +379,53 @@ fn original_heading_knob_repeats_its_script() {
     }
     assert!(verified > 0, "no original repeating heading knob verified");
 }
+
+#[test]
+#[ignore = "requires original XML EFIS gauges and OPENESP_AIRCRAFT_PATHS"]
+fn original_efis_update_initializes_once() {
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut aircraft = Aircraft::load(&path, 0).unwrap();
+        let mut variables = Variables::default();
+        for panel in aircraft.panel_images.values_mut() {
+            panel.advance(0.0, &mut variables).unwrap();
+        }
+        let init = Reference::new('L', "Init", None);
+        if variables.read(&init).unwrap() != Value::Number(1.0) {
+            continue;
+        }
+        for (name, expected) in [
+            ("Display Scale", 1.0),
+            ("MapItem Shown", 1.0),
+            ("EFIS Mode", 2.0),
+        ] {
+            assert_eq!(
+                variables.read(&Reference::new('L', name, None)).unwrap(),
+                Value::Number(expected)
+            );
+        }
+        variables.set('L', "EFIS Mode", None, Value::Number(3.0));
+        variables.set('L', "Display Scale", None, Value::Number(5.0));
+        for panel in aircraft.panel_images.values_mut() {
+            panel.advance(1.0, &mut variables).unwrap();
+        }
+        assert_eq!(
+            variables
+                .read(&Reference::new('L', "EFIS Mode", None))
+                .unwrap(),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            variables
+                .read(&Reference::new('L', "Display Scale", None))
+                .unwrap(),
+            Value::Number(5.0)
+        );
+        verified += 1;
+    }
+    assert!(
+        verified > 0,
+        "no original EFIS initialization update verified"
+    );
+}
