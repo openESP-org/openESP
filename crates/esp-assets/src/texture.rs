@@ -23,6 +23,24 @@ pub struct Texture {
     pub flip_v: bool,
 }
 
+pub fn gauge_bitmap(bytes: &[u8], alpha: bool, transparent: bool) -> Result<image::RgbaImage> {
+    let bitmap = bmp::Bitmap::parse(bytes)?;
+    let mut image = if alpha {
+        bitmap.decode_alpha(image::Limits::default())?
+    } else {
+        bitmap.decode(image::Limits::default())?
+    }
+    .into_rgba8();
+    if transparent {
+        for pixel in image.pixels_mut() {
+            if pixel.0[..3] == [0, 0, 0] {
+                pixel.0[3] = 0;
+            }
+        }
+    }
+    Ok(image)
+}
+
 impl Texture {
     pub fn load(path: &Path, compressed: bool) -> Result<Self> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -149,6 +167,22 @@ mod tests {
         for end in 0..bytes.len() {
             assert!(Texture::from_bytes(&bytes[..end], true).is_err());
         }
+    }
+
+    #[test]
+    fn gauge_black_key_and_alpha_are_explicit() {
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::bmp::BmpEncoder::new(&mut bytes);
+        encoder
+            .encode(&[0, 0, 0, 1, 1, 1], 2, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let ordinary = gauge_bitmap(&bytes, false, false).unwrap();
+        assert_eq!(ordinary.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        let transparent = gauge_bitmap(&bytes, false, true).unwrap();
+        assert_eq!(transparent.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(transparent.get_pixel(1, 0).0, [1, 1, 1, 255]);
+        assert!(gauge_bitmap(&bytes, true, false).is_err());
+        assert!(gauge_bitmap(b"invalid", false, true).is_err());
     }
     #[test]
     fn retains_bc_blocks_or_decodes_them_on_request() {
