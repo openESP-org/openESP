@@ -2,11 +2,12 @@ use anyhow::{Context, Result, bail};
 use esp_formats::{cfg, mdl};
 use glam::{Mat4, Vec3};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
 };
 
 pub mod animation;
+pub mod gauge;
 pub mod panel;
 pub mod texture;
 
@@ -15,6 +16,7 @@ pub struct Aircraft {
     pub exterior: Model,
     pub interior: Option<Model>,
     pub panel: Option<panel::Panel>,
+    pub panel_images: HashMap<String, gauge::PanelImage>,
     pub eyepoint: Option<Vec3>,
     pub texture_directories: Vec<PathBuf>,
 }
@@ -121,6 +123,26 @@ impl Aircraft {
         let exterior = load(models.normal.context("model.cfg has no exterior model")?)?;
         let interior = models.interior.map(load).transpose()?;
         let panel = panel::Panel::load(root, variant.panel)?;
+        let mut panel_images = HashMap::new();
+        if let (Some(panel), Some(interior)) = (&panel, &interior) {
+            for name in interior
+                .materials
+                .iter()
+                .filter_map(|material| material.diffuse_texture.as_ref())
+                .filter(|name| name.starts_with('$'))
+            {
+                let key = name.to_ascii_uppercase();
+                if let std::collections::hash_map::Entry::Vacant(entry) = panel_images.entry(key) {
+                    match gauge::static_panel(panel, name) {
+                        Ok(Some(image)) => {
+                            entry.insert(image);
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!("panel {name}: {error:#}"),
+                    }
+                }
+            }
+        }
         let texture_directory = variant_directory(root, "texture", variant.texture)?;
         let mut texture_directories = vec![texture_directory.clone()];
         if let Ok(path) = resolve_path(&texture_directory, "texture.cfg") {
@@ -150,6 +172,7 @@ impl Aircraft {
             exterior,
             interior,
             panel,
+            panel_images,
             eyepoint,
             texture_directories,
         })

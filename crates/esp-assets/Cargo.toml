@@ -11,6 +11,7 @@ dds-codec = { package = "dds", version = "0.2", default-features = false }
 esp-formats = { path = "../esp-formats" }
 glam = "0.30"
 image = { version = "0.25", default-features = false, features = ["bmp"] }
+roxmltree = "0.21"
 
 [dev-dependencies]
 tempfile = "3"

@@ -28,6 +28,18 @@ impl Panel {
         Ok(cfg::panel::Panel::from_config(&self.config)?)
     }
 
+    pub fn background(&self, section: &str) -> Result<[u8; 4]> {
+        let Some(value) = self.config.value(section, "background_color")? else {
+            return Ok([0, 0, 0, 255]);
+        };
+        let components = value
+            .split(',')
+            .map(|part| part.trim().parse::<u8>())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        anyhow::ensure!(components.len() == 3, "invalid panel background color");
+        Ok([components[0], components[1], components[2], 255])
+    }
+
     pub fn read_xml_gauge(&self, reference: &str, limit: usize) -> Result<Option<Vec<u8>>> {
         let (module, gauge) = reference
             .split_once('!')
@@ -41,9 +53,20 @@ impl Panel {
             "invalid gauge reference"
         );
         let name = format!("{gauge}.xml");
+        self.read_resource(module, &name, limit)
+    }
+
+    pub fn read_resource(&self, module: &str, name: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        anyhow::ensure!(
+            !module.is_empty()
+                && !name.is_empty()
+                && !module.contains(['/', '\\'])
+                && !name.contains(['/', '\\']),
+            "invalid gauge resource name"
+        );
         if let Some(directory) = child(&self.directory, module)?
             && directory.is_dir()
-            && let Some(path) = child(&directory, &name)?
+            && let Some(path) = child(&directory, name)?
         {
             let size = std::fs::metadata(&path)?.len();
             anyhow::ensure!(size <= limit as u64, "gauge XML exceeds size limit");
@@ -57,8 +80,8 @@ impl Panel {
         if let Some(path) = child(&self.directory, &format!("{module}.cab"))? {
             let mut cabinet = Cabinet::new(std::fs::File::open(&path)?)
                 .with_context(|| format!("opening {}", path.display()))?;
-            if cabinet.entry(&name).is_some() {
-                return Ok(Some(cabinet.read_file_bytes(&name, limit)?));
+            if cabinet.entry(name).is_some() {
+                return Ok(Some(cabinet.read_file_bytes(name, limit)?));
             }
         }
         Ok(None)

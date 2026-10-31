@@ -254,7 +254,25 @@ impl Renderer {
                     } else {
                         let texture = match aircraft.texture_path(name) {
                             Ok(Some(path)) => texture::Texture::load(&path, compressed)?,
-                            Ok(None) => texture::Texture::rgba(1, 1, vec![0, 0, 0, 255], false),
+                            Ok(None) => {
+                                if let Some(panel) =
+                                    aircraft.panel_images.get(&name.to_ascii_uppercase())
+                                {
+                                    eprintln!(
+                                        "{name}: static gauge images only ({} missing gauges, {} omitted elements)",
+                                        panel.omitted_gauges, panel.omitted_elements
+                                    );
+                                    texture::Texture::rgba(
+                                        panel.image.width(),
+                                        panel.image.height(),
+                                        panel.image.as_raw().clone(),
+                                        false,
+                                    )
+                                } else {
+                                    eprintln!("missing cockpit panel texture {name}");
+                                    texture::Texture::rgba(1, 1, vec![0, 0, 0, 255], false)
+                                }
+                            }
                             Err(error) => {
                                 eprintln!("{error}");
                                 texture::Texture::rgba(1, 1, vec![255, 0, 255, 255], false)

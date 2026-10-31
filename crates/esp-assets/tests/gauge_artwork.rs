@@ -70,3 +70,36 @@ fn resolves_configured_xml_gauges() {
     assert!(count > 0, "no configured local XML gauges found");
     eprintln!("resolved {count} configured XML gauges");
 }
+
+#[test]
+#[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS with local XML gauges"]
+fn composes_external_cockpit_artwork() {
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = esp_assets::Aircraft::load(&path, 0).unwrap();
+        let Some(panel) = &aircraft.panel else {
+            continue;
+        };
+        for window in panel
+            .layout()
+            .unwrap()
+            .windows
+            .iter()
+            .filter(|w| w.kind == esp_formats::cfg::panel::WindowKind::VirtualCockpit)
+        {
+            let Some(name) = window.texture else { continue };
+            let image = esp_assets::gauge::static_panel(panel, name)
+                .unwrap()
+                .unwrap();
+            eprintln!(
+                "{} {name}: {} omitted gauges, {} dynamic elements",
+                aircraft.title, image.omitted_gauges, image.omitted_elements
+            );
+            assert!(image.image.width() > 0 && image.image.height() > 0);
+            if image.omitted_gauges < window.gauges.len() {
+                count += 1;
+            }
+        }
+    }
+    assert!(count > 0, "no local gauges composed");
+}
