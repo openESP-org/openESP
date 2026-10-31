@@ -37,6 +37,17 @@ impl Camera {
         self.position += direction.as_dvec3() * distance;
     }
 
+    pub fn ray(&self, x: f32, y: f32, aspect: f32) -> Option<(Vec3, Vec3)> {
+        if !x.is_finite() || !y.is_finite() || !aspect.is_finite() || aspect <= 0.0 {
+            return None;
+        }
+        let point = self
+            .view_projection(aspect)
+            .inverse()
+            .project_point3(Vec3::new(x, y, 1.0));
+        Some((point, point.try_normalize()?))
+    }
+
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
         Mat4::perspective_infinite_reverse_lh(60f32.to_radians(), aspect, 0.05)
             * Mat4::look_to_lh(Vec3::ZERO, self.forward(), Vec3::Y)
@@ -54,5 +65,34 @@ mod tests {
         assert!(((camera.position - origin).length() - 0.001).abs() < 1e-8);
         camera.look(0.0, 1e6);
         assert!(camera.view_projection(1.0).is_finite());
+    }
+
+    #[test]
+    fn rays_match_projection_after_camera_rotation() {
+        for (yaw, pitch, aspect) in [(0.0, 0.0, 1.6), (0.6, -0.3, 0.8)] {
+            let camera = Camera {
+                position: DVec3::splat(6_378_137.0),
+                yaw,
+                pitch,
+            };
+            assert!(
+                camera
+                    .ray(0.0, 0.0, aspect)
+                    .unwrap()
+                    .1
+                    .abs_diff_eq(camera.forward(), 1e-6)
+            );
+            for (x, y) in [(-0.8, 0.6), (0.7, -0.4)] {
+                let (origin, ray) = camera.ray(x, y, aspect).unwrap();
+                let near = camera.view_projection(aspect).project_point3(origin);
+                assert!((near.z - 1.0).abs() < 1e-6);
+                assert!((origin.dot(camera.forward()) - 0.05).abs() < 1e-6);
+                let projected = camera.view_projection(aspect).project_point3(ray * 2.0);
+                assert!((projected.x - x).abs() < 1e-6);
+                assert!((projected.y - y).abs() < 1e-6);
+            }
+            assert!(camera.ray(f32::NAN, 0.0, aspect).is_none());
+            assert!(camera.ray(0.0, 0.0, 0.0).is_none());
+        }
     }
 }

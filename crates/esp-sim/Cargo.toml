@@ -9,3 +9,6 @@ esp-assets = { path = "../esp-assets" }
 esp-script = { path = "../esp-script" }
 glam = "0.30"
 petgraph = "0.8"
+
+[dev-dependencies]
+esp-formats = { path = "../esp-formats" }

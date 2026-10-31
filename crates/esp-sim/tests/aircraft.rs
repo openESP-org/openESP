@@ -51,3 +51,66 @@ fn animates_external_aircraft_hierarchies() {
     assert!(changed > 0, "door parameter did not animate any nodes");
     eprintln!("{changed} node transforms changed with door input");
 }
+
+#[test]
+#[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
+fn picks_external_cockpit_panel_surfaces() {
+    use esp_sim::picking::pick;
+    use glam::Vec3;
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        let model = aircraft.interior.as_ref().expect("cockpit model");
+        let mut state = ModelState::new(model).unwrap();
+        state
+            .update(model, &mut PoseHost { door: 0.0 }, 0.0)
+            .unwrap();
+        assert!(state.diagnostics.is_empty(), "{:?}", state.diagnostics);
+        let eye = aircraft.eyepoint.expect("cockpit eyepoint");
+        let lod = model.lods.first().unwrap();
+        let mut hits = std::collections::HashSet::new();
+        for mesh in &lod.meshes {
+            if !model.materials[mesh.material]
+                .diffuse_texture
+                .as_ref()
+                .is_some_and(|name| name.starts_with('$'))
+            {
+                continue;
+            }
+            for indices in mesh.indices.as_chunks::<3>().0 {
+                let target = indices
+                    .iter()
+                    .map(|&index| {
+                        state.transforms[mesh.node].transform_point3(Vec3::from_array(
+                            mesh.vertices[index as usize].position,
+                        ))
+                    })
+                    .sum::<Vec3>()
+                    / 3.0;
+                let Some(direction) = (target - eye).try_normalize() else {
+                    continue;
+                };
+                let Some(hit) = pick(model, &state, -eye, Vec3::ZERO, direction) else {
+                    continue;
+                };
+                let texture = model.materials[lod.meshes[hit.mesh].material]
+                    .diffuse_texture
+                    .as_ref();
+                if texture.is_some_and(|name| name.starts_with('$')) {
+                    assert!(hit.uv.iter().all(|value| value.is_finite()));
+                    hits.insert(hit.mesh);
+                    break;
+                }
+            }
+        }
+        assert!(
+            !hits.is_empty(),
+            "no panel surface visible from {} eyepoint",
+            aircraft.title
+        );
+        eprintln!(
+            "{}: {} distinct panel surfaces picked",
+            aircraft.title,
+            hits.len()
+        );
+    }
+}

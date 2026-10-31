@@ -724,6 +724,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "esp-assets",
+ "esp-formats",
  "esp-script",
  "glam 0.30.10",
  "petgraph",
