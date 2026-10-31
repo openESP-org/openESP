@@ -12,6 +12,7 @@ esp-formats = { path = "../esp-formats" }
 esp-script = { path = "../esp-script" }
 glam = "0.30"
 image = { version = "0.25", default-features = false, features = ["bmp"] }
+rayon = "1"
 roxmltree = "0.21"
 
 [dev-dependencies]

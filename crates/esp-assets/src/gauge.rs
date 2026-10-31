@@ -5,6 +5,7 @@ use image::{
     Rgba, RgbaImage,
     imageops::{FilterType, overlay, resize},
 };
+use rayon::prelude::*;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
 
@@ -138,216 +139,242 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
     );
     let background = Rgba(panel.background(window.section)?);
     let output = RgbaImage::from_pixel(width, height, background);
-    let mut gauges = Vec::new();
-    let mut conditions = Vec::new();
-    let mut omitted_gauges = 0;
-    let mut omitted_elements = 0;
-    for gauge in &window.gauges {
-        let Some(xml) = panel.read_xml_gauge(gauge.reference, 8 * 1024 * 1024)? else {
-            omitted_gauges += 1;
-            continue;
-        };
-        let text = std::str::from_utf8(&xml)?;
-        let document = Gauge::parse(text)?;
-        let module = gauge
-            .reference
-            .split_once('!')
-            .context("invalid gauge reference")?
-            .0;
-        let size = match document.size()? {
-            Some(size) => Some(size),
-            None => {
-                let image = document.root().children().find(|n| n.has_tag_name("Image"));
-                if let Some(name) = image
-                    .filter(|n| n.attribute("ImageSizes").is_none())
-                    .and_then(|n| n.attribute("Name"))
+    let loaded: Vec<Result<_>> = window
+        .gauges
+        .par_iter()
+        .map(|gauge| {
+            let mut conditions = Vec::new();
+            let mut omitted_elements = 0;
+            let Some(xml) = panel.read_xml_gauge(gauge.reference, 8 * 1024 * 1024)? else {
+                return Ok(None);
+            };
+            let text = std::str::from_utf8(&xml)?;
+            let document = Gauge::parse(text)?;
+            let module = gauge
+                .reference
+                .split_once('!')
+                .context("invalid gauge reference")?
+                .0;
+            let size = match document.size()? {
+                Some(size) => Some(size),
+                None => {
+                    let image = document.root().children().find(|n| n.has_tag_name("Image"));
+                    if let Some(name) = image
+                        .filter(|n| n.attribute("ImageSizes").is_none())
+                        .and_then(|n| n.attribute("Name"))
+                    {
+                        panel
+                            .read_resource(module, name, 64 * 1024 * 1024)?
+                            .map(|data| gauge_bitmap(&data, false, false))
+                            .transpose()?
+                            .map(|image| [image.width(), image.height()])
+                    } else {
+                        None
+                    }
+                }
+            };
+            let Some([w, h]) = size else {
+                return Ok(None);
+            };
+            if w == 0 || h == 0 || w > 8192 || h > 8192 {
+                anyhow::bail!("invalid gauge size {w}x{h}");
+            }
+            let mut layers = Vec::new();
+            let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new())];
+            while let Some((node, x, y, mut parents)) = stack.pop() {
+                if node.has_tag_name("Element")
+                    && node.children().any(|child| {
+                        child.is_element()
+                            && matches!(
+                                child.tag_name().name(),
+                                "Rotate"
+                                    | "Rotation"
+                                    | "Shift"
+                                    | "MaskImage"
+                                    | "LeftScript"
+                                    | "TopScript"
+                                    | "ClipRect"
+                            )
+                    })
                 {
-                    panel
-                        .read_resource(module, name, 64 * 1024 * 1024)?
-                        .map(|data| gauge_bitmap(&data, false, false))
-                        .transpose()?
-                        .map(|image| [image.width(), image.height()])
-                } else {
-                    None
+                    omitted_elements += 1;
+                    continue;
                 }
-            }
-        };
-        let Some([w, h]) = size else {
-            omitted_gauges += 1;
-            continue;
-        };
-        if w == 0 || h == 0 || w > 8192 || h > 8192 {
-            anyhow::bail!("invalid gauge size {w}x{h}");
-        }
-        let mut layers = Vec::new();
-        let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new())];
-        while let Some((node, x, y, mut parents)) = stack.pop() {
-            if node.has_tag_name("Element")
-                && node.children().any(|child| {
-                    child.is_element()
-                        && matches!(
-                            child.tag_name().name(),
-                            "Rotate"
-                                | "Rotation"
-                                | "Shift"
-                                | "MaskImage"
-                                | "LeftScript"
-                                | "TopScript"
-                                | "ClipRect"
-                        )
-                })
-            {
-                omitted_elements += 1;
-                continue;
-            }
-            if node.has_tag_name("Element")
-                && let Some(visibility) = node.children().find(|c| c.has_tag_name("Visibility"))
-            {
-                let source = visibility.text().unwrap_or("").trim();
-                match Program::compile(source) {
-                    Ok(program) if !source.is_empty() => {
-                        parents.push(Requirement::Visible(conditions.len()));
-                        conditions.push(Condition {
-                            program,
-                            value: None,
-                            minimum: None,
-                            maximum: None,
-                            reported: false,
-                        });
-                    }
-                    _ => {
-                        omitted_elements += 1;
-                        continue;
+                if node.has_tag_name("Element")
+                    && let Some(visibility) = node.children().find(|c| c.has_tag_name("Visibility"))
+                {
+                    let source = visibility.text().unwrap_or("").trim();
+                    match Program::compile(source) {
+                        Ok(program) if !source.is_empty() => {
+                            parents.push(Requirement::Visible(conditions.len()));
+                            conditions.push(Condition {
+                                program,
+                                value: None,
+                                minimum: None,
+                                maximum: None,
+                                reported: false,
+                            });
+                        }
+                        _ => {
+                            omitted_elements += 1;
+                            continue;
+                        }
                     }
                 }
-            }
-            if node.has_tag_name("Select") {
-                let Some(expression) = node.children().find(|c| c.has_tag_name("Expression"))
-                else {
-                    omitted_elements += 1;
-                    continue;
-                };
-                let Some(source) = expression
-                    .children()
-                    .find(|c| c.has_tag_name("Script"))
-                    .and_then(|c| c.text())
-                    .filter(|source| !source.trim().is_empty())
-                else {
-                    omitted_elements += 1;
-                    continue;
-                };
-                let Ok(program) = Program::compile(source.trim()) else {
-                    omitted_elements += 1;
-                    continue;
-                };
-                let bound = |name| -> Result<Option<f64>> {
-                    let value = expression
-                        .children()
-                        .find(|c| c.has_tag_name(name))
-                        .and_then(|c| c.text())
-                        .map(|v| v.trim().parse::<f64>())
-                        .transpose()?;
-                    anyhow::ensure!(value.is_none_or(f64::is_finite), "invalid select bound");
-                    Ok(value.filter(|value| *value != -9_999_999.0))
-                };
-                let minimum = bound("Minimum")?;
-                let maximum = bound("Maximum")?;
-                anyhow::ensure!(
-                    minimum.zip(maximum).is_none_or(|(min, max)| min <= max),
-                    "invalid select bounds"
-                );
-                let index = conditions.len();
-                conditions.push(Condition {
-                    program,
-                    value: None,
-                    minimum,
-                    maximum,
-                    reported: false,
-                });
-                for case in node.children().filter(|c| c.has_tag_name("Case")).rev() {
-                    let Some(value) = case
-                        .children()
-                        .find(|c| c.has_tag_name("ExpressionResult"))
-                        .and_then(|c| c.text())
-                        .and_then(|text| text.trim().parse::<f64>().ok())
-                        .filter(|value| value.is_finite())
+                if node.has_tag_name("Select") {
+                    let Some(expression) = node.children().find(|c| c.has_tag_name("Expression"))
                     else {
                         omitted_elements += 1;
                         continue;
                     };
-                    let mut requirements = parents.clone();
-                    requirements.push(Requirement::Case(index, value));
-                    stack.push((case, x, y, requirements));
-                }
-                continue;
-            }
-            let (x, y) = if node.has_tag_name("Element") {
-                let (px, py) = position(node)?;
-                (x + px, y + py)
-            } else {
-                (x, y)
-            };
-            if node.has_tag_name("Image") {
-                let name = node.attribute("Name").context("image missing name")?;
-                let flag = |key| {
-                    node.attribute(key)
-                        .or_else(|| {
-                            node.children()
-                                .find(|c| c.has_tag_name(key))
-                                .and_then(|c| c.text())
-                        })
-                        .is_some_and(|v| {
-                            v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-                        })
-                };
-                let Some(bytes) = panel.read_resource(module, name, 64 * 1024 * 1024)? else {
-                    omitted_elements += 1;
-                    continue;
-                };
-                let bitmap = match gauge_bitmap(&bytes, flag("Alpha"), flag("Transparent")) {
-                    Ok(bitmap) => bitmap,
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref::<esp_formats::texture::bmp::Error>(),
-                            Some(esp_formats::texture::bmp::Error::AlphaFormat)
-                        ) =>
-                    {
+                    let Some(source) = expression
+                        .children()
+                        .find(|c| c.has_tag_name("Script"))
+                        .and_then(|c| c.text())
+                        .filter(|source| !source.trim().is_empty())
+                    else {
                         omitted_elements += 1;
                         continue;
+                    };
+                    let Ok(program) = Program::compile(source.trim()) else {
+                        omitted_elements += 1;
+                        continue;
+                    };
+                    let bound = |name| -> Result<Option<f64>> {
+                        let value = expression
+                            .children()
+                            .find(|c| c.has_tag_name(name))
+                            .and_then(|c| c.text())
+                            .map(|v| v.trim().parse::<f64>())
+                            .transpose()?;
+                        anyhow::ensure!(value.is_none_or(f64::is_finite), "invalid select bound");
+                        Ok(value.filter(|value| *value != -9_999_999.0))
+                    };
+                    let minimum = bound("Minimum")?;
+                    let maximum = bound("Maximum")?;
+                    anyhow::ensure!(
+                        minimum.zip(maximum).is_none_or(|(min, max)| min <= max),
+                        "invalid select bounds"
+                    );
+                    let index = conditions.len();
+                    conditions.push(Condition {
+                        program,
+                        value: None,
+                        minimum,
+                        maximum,
+                        reported: false,
+                    });
+                    for case in node.children().filter(|c| c.has_tag_name("Case")).rev() {
+                        let Some(value) = case
+                            .children()
+                            .find(|c| c.has_tag_name("ExpressionResult"))
+                            .and_then(|c| c.text())
+                            .and_then(|text| text.trim().parse::<f64>().ok())
+                            .filter(|value| value.is_finite())
+                        else {
+                            omitted_elements += 1;
+                            continue;
+                        };
+                        let mut requirements = parents.clone();
+                        requirements.push(Requirement::Case(index, value));
+                        stack.push((case, x, y, requirements));
                     }
-                    Err(error) => {
-                        return Err(error).with_context(|| format!("{}: {name}", gauge.reference));
-                    }
+                    continue;
+                }
+                let (x, y) = if node.has_tag_name("Element") {
+                    let (px, py) = position(node)?;
+                    (x + px, y + py)
+                } else {
+                    (x, y)
                 };
-                layers.push(Layer {
-                    image: bitmap,
-                    position: (x.round() as i64, y.round() as i64),
-                    visible: parents.is_empty(),
-                    conditions: parents.clone(),
-                });
+                if node.has_tag_name("Image") {
+                    let name = node.attribute("Name").context("image missing name")?;
+                    let flag = |key| {
+                        node.attribute(key)
+                            .or_else(|| {
+                                node.children()
+                                    .find(|c| c.has_tag_name(key))
+                                    .and_then(|c| c.text())
+                            })
+                            .is_some_and(|v| {
+                                v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+                            })
+                    };
+                    let Some(bytes) = panel.read_resource(module, name, 64 * 1024 * 1024)? else {
+                        omitted_elements += 1;
+                        continue;
+                    };
+                    let bitmap = match gauge_bitmap(&bytes, flag("Alpha"), flag("Transparent")) {
+                        Ok(bitmap) => bitmap,
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<esp_formats::texture::bmp::Error>(),
+                                Some(esp_formats::texture::bmp::Error::AlphaFormat)
+                            ) =>
+                        {
+                            omitted_elements += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("{}: {name}", gauge.reference));
+                        }
+                    };
+                    layers.push(Layer {
+                        image: bitmap,
+                        position: (x.round() as i64, y.round() as i64),
+                        visible: parents.is_empty(),
+                        conditions: parents.clone(),
+                    });
+                }
+                for child in node.children().filter(|c| c.is_element()).rev() {
+                    if child.has_tag_name("Element")
+                        || child.has_tag_name("Image")
+                        || child.has_tag_name("Select")
+                    {
+                        stack.push((child, x, y, parents.clone()));
+                    }
+                }
             }
-            for child in node.children().filter(|c| c.is_element()).rev() {
-                if child.has_tag_name("Element")
-                    || child.has_tag_name("Image")
-                    || child.has_tag_name("Select")
-                {
-                    stack.push((child, x, y, parents.clone()));
+            let target_width = dimension(
+                gauge.width.unwrap_or(f64::from(w)) * f64::from(width) / dimensions.width,
+            )?;
+            let target_height = dimension(
+                gauge.height.unwrap_or(f64::from(h)) * f64::from(height) / layout_height,
+            )?;
+            let canvas = Canvas {
+                size: (w, h),
+                target: (target_width, target_height),
+                position: (
+                    (gauge.x * f64::from(width) / dimensions.width).round() as i64,
+                    (gauge.y * f64::from(height) / layout_height).round() as i64,
+                ),
+                layers,
+            };
+            Ok(Some((canvas, conditions, omitted_elements)))
+        })
+        .collect();
+    let mut gauges = Vec::new();
+    let mut conditions = Vec::new();
+    let mut omitted_gauges = 0;
+    let mut omitted_elements = 0;
+    for loaded in loaded {
+        let Some((mut canvas, mut gauge_conditions, omitted)) = loaded? else {
+            omitted_gauges += 1;
+            continue;
+        };
+        for layer in &mut canvas.layers {
+            for requirement in &mut layer.conditions {
+                match requirement {
+                    Requirement::Visible(index) | Requirement::Case(index, _) => {
+                        *index += conditions.len()
+                    }
                 }
             }
         }
-        let target_width =
-            dimension(gauge.width.unwrap_or(f64::from(w)) * f64::from(width) / dimensions.width)?;
-        let target_height =
-            dimension(gauge.height.unwrap_or(f64::from(h)) * f64::from(height) / layout_height)?;
-        gauges.push(Canvas {
-            size: (w, h),
-            target: (target_width, target_height),
-            position: (
-                (gauge.x * f64::from(width) / dimensions.width).round() as i64,
-                (gauge.y * f64::from(height) / layout_height).round() as i64,
-            ),
-            layers,
-        });
+        conditions.append(&mut gauge_conditions);
+        omitted_elements += omitted;
+        gauges.push(canvas);
     }
     let mut result = PanelImage {
         image: output,
@@ -521,5 +548,30 @@ mod tests {
         host.0 = 2.0;
         assert!(!image.update(&mut host));
         assert_eq!(image.image.get_pixel(0, 0).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn retains_conditions_for_each_gauge() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(panel_path.join("panel.cfg"), "[VCockpit01]\nsize_mm=2,1\npixel_size=2,1\ntexture=$screen\ngauge00=example!first,0,0\ngauge01=example!second,1,0").unwrap();
+        std::fs::write(module.join("first.xml"), r#"<Gauge><Size X="1" Y="1"/><Element><Visibility>1</Visibility><Image Name="lamp.bmp"/></Element></Gauge>"#).unwrap();
+        std::fs::write(module.join("second.xml"), r#"<Gauge><Size X="1" Y="1"/><Element><Visibility>(L:POWER, bool)</Visibility><Image Name="lamp.bmp"/></Element></Gauge>"#).unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("lamp.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(0.0);
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(image.image.get_pixel(1, 0).0, [0, 0, 0, 255]);
+        host.0 = 1.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(1, 0).0, [255, 0, 0, 255]);
     }
 }
