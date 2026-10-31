@@ -24,6 +24,7 @@ pub enum MouseEvent {
     LeftSingle,
     LeftRelease,
     LeftDrag,
+    DownRepeat,
     WheelUp,
     WheelDown,
 }
@@ -34,6 +35,7 @@ impl MouseEvent {
             Self::LeftSingle => "LeftSingle",
             Self::LeftRelease => "LeftRelease",
             Self::LeftDrag => "LeftDrag",
+            Self::DownRepeat => "DownRepeat",
             Self::WheelUp => "WheelUp",
             Self::WheelDown => "WheelDown",
         }
@@ -47,6 +49,7 @@ pub struct PanelMouseArea {
     pub h: f64,
     pub script: Program,
     pub events: Vec<MouseEvent>,
+    pub repeat: bool,
     gauge_origin: (f64, f64),
     gauge_scale: (f64, f64),
 }
@@ -55,6 +58,7 @@ struct MouseAreaSource {
     bounds: (f64, f64, f64, f64),
     source: String,
     events: Vec<MouseEvent>,
+    repeat: bool,
 }
 
 struct Canvas {
@@ -145,7 +149,11 @@ impl PanelImage {
                 .mouse_areas
                 .get(index)
                 .context("invalid mouse area index")?;
-            if area.events.contains(&event) {
+            let accepts = area.events.contains(&event)
+                || (event == MouseEvent::DownRepeat
+                    && area.repeat
+                    && area.events.contains(&MouseEvent::LeftSingle));
+            if accepts {
                 let position = [
                     (position[0] - area.gauge_origin.0) / area.gauge_scale.0,
                     (position[1] - area.gauge_origin.1) / area.gauge_scale.1,
@@ -507,6 +515,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     h: ah * sy,
                     script,
                     events: raw.events,
+                    repeat: raw.repeat,
                     gauge_origin: (cx, cy),
                     gauge_scale: (sx, sy),
                 }),
@@ -628,6 +637,19 @@ fn collect_mouse_areas(
                 if events.is_empty() {
                     continue;
                 }
+                let repeat = click
+                    .children()
+                    .find(|child| child.has_tag_name("ClickRepeat"))
+                    .map(|node| {
+                        let text = esp_formats::gauge::text_content(node);
+                        match text.trim().to_ascii_lowercase().as_str() {
+                            "true" | "yes" => Ok(true),
+                            "false" | "no" => Ok(false),
+                            _ => anyhow::bail!("invalid ClickRepeat"),
+                        }
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
                 let source = if let Some(script) =
                     click.children().find(|c| c.has_tag_name("Script"))
                 {
@@ -649,6 +671,7 @@ fn collect_mouse_areas(
                         bounds: (x, y, w, h),
                         source,
                         events,
+                        repeat,
                     });
                 }
             }
@@ -942,6 +965,7 @@ mod tests {
                     h: raw.bounds.3,
                     script: Program::compile(&raw.source).unwrap(),
                     events: raw.events,
+                    repeat: raw.repeat,
                     gauge_origin: (0.0, 0.0),
                     gauge_scale: (1.0, 1.0),
                 })
@@ -1029,6 +1053,7 @@ mod tests {
                 x: 1.0, y: 1.0, w: 2.0, h: 2.0,
                 script: Program::compile("(M:Event) 'LeftSingle' scmp 0 == if{ 1 (>L:PRESSED) } (M:Event) 'LeftRelease' scmp 0 == if{ 0 (>L:PRESSED) } (M:Event) 'WheelUp' scmp 0 == if{ 1 (>L:WHEEL) } (M:Event) 'WheelDown' scmp 0 == if{ -1 (>L:WHEEL) }").unwrap(),
                 events: vec![MouseEvent::LeftSingle, MouseEvent::LeftRelease, MouseEvent::WheelUp, MouseEvent::WheelDown],
+                repeat: false,
                 gauge_origin: (0.0, 0.0),
                 gauge_scale: (1.0, 1.0),
             }],
@@ -1058,5 +1083,60 @@ mod tests {
                 .mouse_event(MouseEvent::WheelUp, &[usize::MAX], [2.0, 2.0], &mut host)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn only_repeat_enabled_presses_receive_down_repeat() {
+        let gauge = Gauge::parse(r#"<Gauge><MouseArea><Size X="2" Y="2"/>
+            <MouseClick><ClickRepeat>True</ClickRepeat><Script>(M:Event) (&gt;L:EVENT)</Script></MouseClick>
+            <MouseClick><ClickRepeat>False</ClickRepeat><KeyEvent>ONCE</KeyEvent></MouseClick>
+            </MouseArea></Gauge>"#).unwrap();
+        let mut raw = Vec::new();
+        collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
+        assert!(raw[0].repeat);
+        assert!(!raw[1].repeat);
+        struct Writes(Vec<(String, Value)>);
+        impl Host for Writes {
+            fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+                Err(Error::Type)
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                self.0.push((reference.name.clone(), value));
+                Ok(())
+            }
+        }
+        let panel = PanelImage {
+            image: RgbaImage::new(2, 2),
+            omitted_gauges: 0,
+            omitted_elements: 0,
+            mouse_areas: raw
+                .into_iter()
+                .map(|area| PanelMouseArea {
+                    x: area.bounds.0,
+                    y: area.bounds.1,
+                    w: area.bounds.2,
+                    h: area.bounds.3,
+                    script: Program::compile(&area.source).unwrap(),
+                    events: area.events,
+                    repeat: area.repeat,
+                    gauge_origin: (0.0, 0.0),
+                    gauge_scale: (1.0, 1.0),
+                })
+                .collect(),
+            gauges: vec![],
+            conditions: vec![],
+            background: Rgba([0; 4]),
+        };
+        let mut host = Writes(Vec::new());
+        panel
+            .mouse_event(MouseEvent::DownRepeat, &[0, 1], [1.0, 1.0], &mut host)
+            .unwrap();
+        assert_eq!(host.0, [("EVENT".into(), Value::Text("DownRepeat".into()))]);
+        assert!(
+            !panel
+                .mouse_event(MouseEvent::DownRepeat, &[1], [1.0, 1.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(host.0.len(), 1);
     }
 }

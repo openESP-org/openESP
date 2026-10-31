@@ -320,3 +320,50 @@ fn original_speed_brake_drag_uses_scaled_gauge_coordinates() {
     }
     assert!(verified > 0, "no original speed brake drag verified");
 }
+
+#[test]
+#[ignore = "requires original XML autopilot gauges and OPENESP_AIRCRAFT_PATHS"]
+fn original_heading_knob_repeats_its_script() {
+    use esp_assets::gauge::MouseEvent;
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        for panel in aircraft.panel_images.values() {
+            for (index, area) in panel.mouse_areas.iter().enumerate() {
+                if !area.repeat {
+                    continue;
+                }
+                let mut variables = Variables::default();
+                let position = [area.x + area.w * 0.5, area.y + area.h * 0.5];
+                if panel
+                    .mouse_event(MouseEvent::LeftSingle, &[index], position, &mut variables)
+                    .is_err()
+                {
+                    continue;
+                }
+                if !variables
+                    .drain_events()
+                    .any(|(name, _)| name == "HEADING_BUG_INC")
+                {
+                    continue;
+                }
+                for expected in [20.0, 30.0, 40.0] {
+                    panel
+                        .mouse_event(MouseEvent::DownRepeat, &[index], position, &mut variables)
+                        .unwrap();
+                    assert_eq!(
+                        variables.drain_events().collect::<Vec<_>>(),
+                        [("HEADING_BUG_INC".into(), Value::Number(1.0))]
+                    );
+                    assert_eq!(
+                        variables.read(&Reference::new('G', "Var3", None)).unwrap(),
+                        Value::Number(expected)
+                    );
+                }
+                verified += 1;
+            }
+        }
+    }
+    assert!(verified > 0, "no original repeating heading knob verified");
+}

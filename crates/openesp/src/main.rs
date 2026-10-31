@@ -86,6 +86,7 @@ struct App {
     mouse_look: bool,
     cursor: Option<(f64, f64)>,
     pressed_panel: Option<(String, Vec<usize>, [f64; 2])>,
+    repeat_at: Option<Instant>,
     last_frame: Instant,
     frames: u64,
     error: Option<anyhow::Error>,
@@ -142,8 +143,9 @@ impl App {
 
     fn cockpit_mouse(&mut self, event: MouseEvent) -> Result<()> {
         let target = if event == MouseEvent::LeftRelease {
+            self.repeat_at = None;
             self.pressed_panel.take()
-        } else if event == MouseEvent::LeftDrag {
+        } else if matches!(event, MouseEvent::LeftDrag | MouseEvent::DownRepeat) {
             let Some((name, x, y)) = self.cockpit_target() else {
                 return Ok(());
             };
@@ -154,7 +156,19 @@ impl App {
                 return Ok(());
             }
             *position = [x, y];
-            Some((name, areas.clone(), *position))
+            let mut areas = areas.clone();
+            if event == MouseEvent::DownRepeat {
+                let panel = self
+                    .aircraft
+                    .as_ref()
+                    .context("aircraft is absent")?
+                    .panel_images
+                    .get(&name)
+                    .context("captured panel is absent")?;
+                let under_cursor = panel.mouse_areas_at(x, y);
+                areas.retain(|index| under_cursor.contains(index));
+            }
+            Some((name, areas, *position))
         } else {
             self.cockpit_target().and_then(|(name, x, y)| {
                 let panel = self.aircraft.as_ref()?.panel_images.get(&name)?;
@@ -166,6 +180,8 @@ impl App {
         };
         if event == MouseEvent::LeftSingle {
             self.pressed_panel = Some((name.clone(), areas.clone(), position));
+            // shortcut: repeat timing is 400 ms then 100 ms, calibrate against original runtime behavior.
+            self.repeat_at = Some(Instant::now() + std::time::Duration::from_millis(400));
         }
         let panel = self
             .aircraft
@@ -212,6 +228,12 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
+        if self.repeat_at.is_some_and(|deadline| now >= deadline) {
+            self.repeat_at = Some(now + std::time::Duration::from_millis(100));
+            if let Err(error) = self.cockpit_mouse(MouseEvent::DownRepeat) {
+                eprintln!("cockpit repeat: {error}");
+            }
+        }
         let axis = |positive, negative| {
             f32::from(self.keys.contains(&positive)) - f32::from(self.keys.contains(&negative))
         };
@@ -503,6 +525,7 @@ fn main() -> Result<()> {
         mouse_look: false,
         cursor: None,
         pressed_panel: None,
+        repeat_at: None,
         last_frame: Instant::now(),
         frames: 0,
         error: None,
@@ -569,12 +592,14 @@ mod tests {
             mouse_look: true,
             cursor: None,
             pressed_panel: Some(("$TEST".into(), areas, [0.5, 0.5])),
+            repeat_at: Some(Instant::now()),
             last_frame: Instant::now(),
             frames: 0,
             error: None,
         };
         app.cockpit_mouse(MouseEvent::LeftRelease).unwrap();
         assert!(app.pressed_panel.is_none());
+        assert!(app.repeat_at.is_none());
         assert_eq!(
             app.variables
                 .read(&Reference::new('L', "Pressed", None))
