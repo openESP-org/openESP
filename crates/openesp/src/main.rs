@@ -3,7 +3,7 @@ use clap::Parser;
 use esp_assets::Aircraft;
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
-use esp_sim::{animation::ModelState, variables::Variables};
+use esp_sim::{animation::ModelState, picking, variables::Variables};
 use glam::{DVec3, Vec3};
 use std::{
     collections::HashSet,
@@ -84,6 +84,7 @@ struct App {
     camera: Camera,
     keys: HashSet<KeyCode>,
     mouse_look: bool,
+    cursor: Option<(f64, f64)>,
     last_frame: Instant,
     frames: u64,
     error: Option<anyhow::Error>,
@@ -105,6 +106,68 @@ impl App {
                 )
             };
         }
+    }
+
+    fn cockpit_click(&mut self) -> Result<()> {
+        let Some((cx, cy)) = self.cursor else {
+            return Ok(());
+        };
+        let Some(window) = &self.window else {
+            return Ok(());
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+        let Some(renderer) = &self.renderer else {
+            return Ok(());
+        };
+        let Some(aircraft) = &self.aircraft else {
+            return Ok(());
+        };
+        let Some(interior) = &aircraft.interior else {
+            return Ok(());
+        };
+        let Some(state) = &self.interior_state else {
+            return Ok(());
+        };
+
+        let aspect = size.width as f32 / size.height as f32;
+        let nx = (cx / size.width as f64 * 2.0 - 1.0) as f32;
+        let ny = (1.0 - cy / size.height as f64 * 2.0) as f32;
+        let Some((ray_origin, ray_dir)) = self.camera.ray(nx, ny, aspect) else {
+            return Ok(());
+        };
+        let aircraft_to_camera = (renderer.aircraft_origin - self.camera.position).as_vec3();
+
+        let Some(hit) = picking::pick(interior, state, aircraft_to_camera, ray_origin, ray_dir)
+        else {
+            return Ok(());
+        };
+
+        let mesh = &interior.lods[0].meshes[hit.mesh];
+        let Some(texture_name) = interior
+            .materials
+            .get(mesh.material)
+            .and_then(|m| m.diffuse_texture.as_ref())
+        else {
+            return Ok(());
+        };
+        let key = texture_name.to_ascii_uppercase();
+        let Some(panel_image) = aircraft.panel_images.get(&key) else {
+            return Ok(());
+        };
+
+        let px = hit.uv[0].rem_euclid(1.0) as f64 * panel_image.image.width() as f64;
+        let py = hit.uv[1].rem_euclid(1.0) as f64 * panel_image.image.height() as f64;
+
+        let result = panel_image.left_click(px, py, &mut self.variables);
+        for error in self.variables.dispatch_events() {
+            eprintln!("cockpit event: {error}");
+        }
+        result?;
+
+        Ok(())
     }
 
     fn frame(&mut self) -> Result<()> {
@@ -260,6 +323,21 @@ impl ApplicationHandler for App {
                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = Some((position.x, position.y));
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self.arguments.cockpit
+                    && !self.mouse_look
+                    && let Err(error) = self.cockpit_click()
+                {
+                    eprintln!("cockpit click: {error}");
+                }
+            }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Right,
@@ -353,6 +431,8 @@ fn main() -> Result<()> {
                 fsx_root.as_deref(),
             ));
         })?;
+    let mut variables = Variables::default();
+    variables.set_number("AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool", 0.0);
     let mut app = App {
         arguments,
         loaded,
@@ -361,12 +441,13 @@ fn main() -> Result<()> {
         aircraft: None,
         exterior_state: None,
         interior_state: None,
-        variables: Variables::default(),
+        variables,
         door_open: false,
         reported_diagnostics: HashSet::new(),
         camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
         keys: HashSet::new(),
         mouse_look: false,
+        cursor: None,
         last_frame: Instant::now(),
         frames: 0,
         error: None,

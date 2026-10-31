@@ -13,9 +13,18 @@ pub struct PanelImage {
     pub image: RgbaImage,
     pub omitted_gauges: usize,
     pub omitted_elements: usize,
+    pub mouse_areas: Vec<PanelMouseArea>,
     gauges: Vec<Canvas>,
     conditions: Vec<Condition>,
     background: Rgba<u8>,
+}
+
+pub struct PanelMouseArea {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub script: Program,
 }
 
 struct Canvas {
@@ -47,6 +56,38 @@ enum Requirement {
 }
 
 impl PanelImage {
+    pub fn left_click(&self, x: f64, y: f64, host: &mut impl Host) -> Result<bool> {
+        struct MouseHost<'a, H>(&'a mut H);
+        impl<H: Host> Host for MouseHost<'_, H> {
+            fn read(
+                &mut self,
+                reference: &esp_script::Reference,
+            ) -> std::result::Result<esp_script::Value, esp_script::Error> {
+                if reference.category == 'M' && reference.name == "EVENT" {
+                    Ok(esp_script::Value::Text("LeftSingle".into()))
+                } else {
+                    self.0.read(reference)
+                }
+            }
+            fn write(
+                &mut self,
+                reference: &esp_script::Reference,
+                value: esp_script::Value,
+            ) -> std::result::Result<(), esp_script::Error> {
+                self.0.write(reference, value)
+            }
+        }
+        let mut host = MouseHost(host);
+        let mut handled = false;
+        for area in &self.mouse_areas {
+            if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h {
+                area.script.evaluate(&mut host)?;
+                handled = true;
+            }
+        }
+        Ok(handled)
+    }
+
     pub fn update(&mut self, host: &mut impl Host) -> bool {
         for condition in &mut self.conditions {
             let result = condition
@@ -351,15 +392,18 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 ),
                 layers,
             };
-            Ok(Some((canvas, conditions, omitted_elements)))
+            let mut raw_areas = Vec::new();
+            collect_mouse_areas(document.root(), 0.0, 0.0, &mut raw_areas)?;
+            Ok(Some((canvas, conditions, omitted_elements, raw_areas)))
         })
         .collect();
     let mut gauges = Vec::new();
     let mut conditions = Vec::new();
+    let mut mouse_areas = Vec::new();
     let mut omitted_gauges = 0;
     let mut omitted_elements = 0;
     for loaded in loaded {
-        let Some((mut canvas, mut gauge_conditions, omitted)) = loaded? else {
+        let Some((mut canvas, mut gauge_conditions, omitted, raw_areas)) = loaded? else {
             omitted_gauges += 1;
             continue;
         };
@@ -374,12 +418,29 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
         }
         conditions.append(&mut gauge_conditions);
         omitted_elements += omitted;
+        let sx = f64::from(canvas.target.0) / f64::from(canvas.size.0);
+        let sy = f64::from(canvas.target.1) / f64::from(canvas.size.1);
+        let cx = canvas.position.0 as f64;
+        let cy = canvas.position.1 as f64;
+        for (ax, ay, aw, ah, source) in raw_areas {
+            match Program::compile(&source) {
+                Ok(script) => mouse_areas.push(PanelMouseArea {
+                    x: cx + ax * sx,
+                    y: cy + ay * sy,
+                    w: aw * sx,
+                    h: ah * sy,
+                    script,
+                }),
+                Err(error) => eprintln!("mouse script: {error}"),
+            }
+        }
         gauges.push(canvas);
     }
     let mut result = PanelImage {
         image: output,
         omitted_gauges,
         omitted_elements,
+        mouse_areas,
         gauges,
         conditions,
         background,
@@ -414,6 +475,88 @@ fn position(node: roxmltree::Node<'_, '_>) -> Result<(f64, f64)> {
 fn finite_position(x: f64, y: f64) -> Result<(f64, f64)> {
     anyhow::ensure!(x.is_finite() && y.is_finite(), "invalid gauge position");
     Ok((x, y))
+}
+
+fn area_size(node: roxmltree::Node<'_, '_>) -> Result<(f64, f64)> {
+    let Some(size) = node.children().find(|c| c.has_tag_name("Size")) else {
+        return Ok((0.0, 0.0));
+    };
+    let (w, h) = if let Some(w) = size.attribute("X") {
+        (
+            w.parse()?,
+            size.attribute("Y")
+                .context("missing mouse height")?
+                .parse()?,
+        )
+    } else {
+        let text = esp_formats::gauge::text_content(size);
+        let (w, h) = text.split_once(',').context("invalid mouse size")?;
+        (w.trim().parse()?, h.trim().parse()?)
+    };
+    let (w, h) = finite_position(w, h)?;
+    anyhow::ensure!(w >= 0.0 && h >= 0.0, "negative mouse size");
+    Ok((w, h))
+}
+
+fn collect_mouse_areas(
+    node: roxmltree::Node<'_, '_>,
+    offset_x: f64,
+    offset_y: f64,
+    out: &mut Vec<(f64, f64, f64, f64, String)>,
+) -> Result<()> {
+    let mut stack = vec![(node, offset_x, offset_y)];
+    while let Some((node, offset_x, offset_y)) = stack.pop() {
+        for child in node.children().filter(|c| c.has_tag_name("MouseArea")) {
+            let bounds = position(child).and_then(|(dx, dy)| {
+                let (x, y) = finite_position(offset_x + dx, offset_y + dy)?;
+                let (w, h) = area_size(child)?;
+                Ok((x, y, w, h))
+            });
+            let (x, y, w, h) = match bounds {
+                Ok(bounds) => bounds,
+                Err(error) => {
+                    eprintln!("mouse area {:?}: {error}", child.attribute("id"));
+                    continue;
+                }
+            };
+            for click in child.children().filter(|c| c.has_tag_name("MouseClick")) {
+                let click_type = click
+                    .children()
+                    .find(|c| c.has_tag_name("ClickType"))
+                    .map(esp_formats::gauge::text_content)
+                    .unwrap_or_default();
+                let left = click_type.trim().is_empty()
+                    || click_type.split('+').any(|kind| {
+                        kind.trim().eq_ignore_ascii_case("LeftSingle")
+                            || kind.trim().eq_ignore_ascii_case("LeftAll")
+                    });
+                if !left {
+                    continue;
+                }
+                let source = if let Some(script) =
+                    click.children().find(|c| c.has_tag_name("Script"))
+                {
+                    esp_formats::gauge::text_content(script)
+                } else if let Some(key) = click.children().find(|c| c.has_tag_name("KeyEvent")) {
+                    let key = esp_formats::gauge::text_content(key);
+                    let key = key.trim();
+                    anyhow::ensure!(
+                        !key.is_empty()
+                            && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                        "invalid mouse KeyEvent"
+                    );
+                    format!("(>K:{key})")
+                } else {
+                    continue;
+                };
+                if !source.trim().is_empty() {
+                    out.push((x, y, w, h, source));
+                }
+            }
+            stack.push((child, x, y));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -573,5 +716,171 @@ mod tests {
         host.0 = 1.0;
         assert!(image.update(&mut host));
         assert_eq!(image.image.get_pixel(1, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn collects_mouse_areas_with_panel_coordinates() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            panel_path.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=4,4\npixel_size=4,4\ntexture=$screen\ngauge00=example!dial,1,1,2,2",
+        )
+        .unwrap();
+        std::fs::write(
+            module.join("dial.xml"),
+            r#"<SimBase.Document Type="AceXML"><SimGauge.Gauge><Size>2,2</Size>
+            <Image Name="bg.bmp"/>
+            <MouseArea id="Outer"><FloatPosition>0,0</FloatPosition><Size>2,2</Size>
+                <MouseArea id="Inner"><FloatPosition>1,0</FloatPosition><Size>1,1</Size>
+                    <MouseClick id="MouseClick"><ClickType>LeftSingle</ClickType>
+                    <Script>1 (&gt;K:TEST_EVENT)</Script></MouseClick>
+                </MouseArea>
+            </MouseArea></SimGauge.Gauge></SimBase.Document>"#,
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(&[0, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("bg.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let result = load_panel(&panel, "$screen").unwrap().unwrap();
+        // The nested area is scaled into panel pixel coordinates.
+        assert_eq!(result.mouse_areas.len(), 1);
+        let area = &result.mouse_areas[0];
+        assert!((area.x - 2.0).abs() < 1e-9);
+        assert!((area.y - 1.0).abs() < 1e-9);
+        assert!((area.w - 1.0).abs() < 1e-9);
+        assert!((area.h - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn skips_release_only_click_types() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        let module = panel_path.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            panel_path.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=2,2\npixel_size=2,2\ntexture=$screen\ngauge00=example!dial,0,0,2,2",
+        )
+        .unwrap();
+        std::fs::write(
+            module.join("dial.xml"),
+            r#"<SimBase.Document Type="AceXML"><SimGauge.Gauge><Size>2,2</Size>
+            <Image Name="bg.bmp"/>
+            <MouseArea><FloatPosition>0,0</FloatPosition><Size>2,2</Size>
+                <MouseClick><ClickType>LeftRelease</ClickType><Script>1 (&gt;K:REL)</Script></MouseClick>
+            </MouseArea>
+            <MouseArea><FloatPosition>0,0</FloatPosition><Size>2,2</Size>
+                <MouseClick><ClickType>LeftSingle</ClickType><Script>1 (&gt;K:PRESS)</Script></MouseClick>
+            </MouseArea>
+            </SimGauge.Gauge></SimBase.Document>"#,
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut data)
+            .encode(&[0, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("bg.bmp"), data).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let result = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(result.mouse_areas.len(), 1);
+        // Script writes to K:, so use a permissive host.
+        struct SinkHost;
+        impl Host for SinkHost {
+            fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+                Ok(Value::Number(0.0))
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+        result.mouse_areas[0]
+            .script
+            .evaluate(&mut SinkHost)
+            .unwrap();
+    }
+
+    #[test]
+    fn key_events_and_scripts_follow_mouse_bounds() {
+        let gauge = Gauge::parse(r#"<Gauge><MouseArea><Position X="1" Y="2"/><Size X="4" Y="4"/>
+            <MouseClick><KeyEvent>TEST</KeyEvent></MouseClick>
+            <MouseArea><Position X="1" Y="1"/><Size X="2" Y="2"/>
+            <MouseClick><KeyEvent>IGNORED</KeyEvent><Script>(M:Event) 'LeftSingle' scmp 0 == if{ 2 (&gt;K:OTHER) }<!-- comment --></Script></MouseClick>
+            </MouseArea></MouseArea></Gauge>"#).unwrap();
+        let mut raw = Vec::new();
+        collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
+        let mut panel = PanelImage {
+            image: RgbaImage::new(8, 8),
+            omitted_gauges: 0,
+            omitted_elements: 0,
+            mouse_areas: raw
+                .into_iter()
+                .map(|(x, y, w, h, source)| PanelMouseArea {
+                    x,
+                    y,
+                    w,
+                    h,
+                    script: Program::compile(&source).unwrap(),
+                })
+                .collect(),
+            gauges: vec![],
+            conditions: vec![],
+            background: Rgba([0; 4]),
+        };
+        #[derive(Default)]
+        struct Events(Vec<(String, Value)>);
+        impl Host for Events {
+            fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+                Err(Error::Type)
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                self.0.push((reference.name.clone(), value));
+                Ok(())
+            }
+        }
+        let mut host = Events::default();
+        assert!(panel.left_click(2.5, 3.5, &mut host).unwrap());
+        assert_eq!(
+            host.0,
+            [
+                ("TEST".into(), Value::Number(0.0)),
+                ("OTHER".into(), Value::Number(2.0))
+            ]
+        );
+        assert!(!panel.left_click(5.0, 6.0, &mut host).unwrap());
+        assert!(!panel.left_click(f64::NAN, 3.0, &mut host).unwrap());
+        panel.mouse_areas[0].script = Program::compile("(A:MISSING,bool)").unwrap();
+        assert!(panel.left_click(1.5, 2.5, &mut host).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_mouse_geometry_without_discarding_valid_controls() {
+        for data in [
+            "<FloatPosition>NaN,0</FloatPosition>",
+            "<FloatPosition>bad</FloatPosition>",
+            "<Size>-1,2</Size>",
+            "<Size>1,NaN</Size>",
+            "<Size X='1'/>",
+        ] {
+            let source = format!(
+                "<Gauge><MouseArea>{data}<MouseClick><KeyEvent>BAD</KeyEvent></MouseClick></MouseArea><MouseArea><Size>1,1</Size><MouseClick><KeyEvent>GOOD</KeyEvent></MouseClick></MouseArea></Gauge>"
+            );
+            let gauge = Gauge::parse(&source).unwrap();
+            let mut raw = Vec::new();
+            collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut raw).unwrap();
+            assert_eq!(raw.len(), 1, "{data}");
+            assert_eq!(raw[0].4, "(>K:GOOD)");
+        }
+    }
+
+    #[test]
+    fn rejects_script_injection_in_key_names() {
+        let gauge = Gauge::parse("<Gauge><MouseArea><MouseClick><KeyEvent>TEST) 1 (&gt;L:VALUE</KeyEvent></MouseClick></MouseArea></Gauge>").unwrap();
+        assert!(collect_mouse_areas(gauge.root(), 0.0, 0.0, &mut Vec::new()).is_err());
     }
 }

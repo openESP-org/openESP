@@ -114,3 +114,73 @@ fn picks_external_cockpit_panel_surfaces() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires original XML flight director gauges and OPENESP_AIRCRAFT_PATHS"]
+fn xml_click_updates_flight_director_artwork_and_animation() {
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut aircraft = Aircraft::load(&path, 0).unwrap();
+        let model = aircraft.interior.as_ref().unwrap();
+        let mut state = ModelState::new(model).unwrap();
+        let mut variables = Variables::default();
+        variables.set_number("AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool", 0.0);
+        state.update(model, &mut variables, 0.0).unwrap();
+        let initial_transforms = state.transforms.clone();
+        for panel in aircraft.panel_images.values_mut() {
+            panel.update(&mut variables);
+            let control = panel.mouse_areas.iter().find_map(|area| {
+                let mut probe = Variables::default();
+                area.script.evaluate(&mut probe).ok()?;
+                probe
+                    .drain_events()
+                    .any(|(name, _)| name == "TOGGLE_FLIGHT_DIRECTOR")
+                    .then_some((area.x + area.w * 0.5, area.y + area.h * 0.5))
+            });
+            let Some((x, y)) = control else { continue };
+            let before = panel.image.clone();
+            assert!(panel.left_click(x, y, &mut variables).unwrap());
+            let events = variables.drain_events().collect::<Vec<_>>();
+            assert!(
+                events
+                    .iter()
+                    .any(|(name, _)| name == "TOGGLE_FLIGHT_DIRECTOR")
+            );
+            for (event, value) in events {
+                variables.dispatch_event(&event, value).unwrap();
+            }
+            assert_eq!(
+                variables
+                    .read(&Reference::new(
+                        'A',
+                        "AUTOPILOT FLIGHT DIRECTOR ACTIVE",
+                        Some("bool")
+                    ))
+                    .unwrap(),
+                Value::Number(1.0)
+            );
+            assert!(panel.update(&mut variables));
+            assert!(
+                before
+                    .pixels()
+                    .zip(panel.image.pixels())
+                    .any(|(a, b)| a != b)
+            );
+            state.update(model, &mut variables, 1.0).unwrap();
+            assert!(
+                initial_transforms
+                    .iter()
+                    .zip(&state.transforms)
+                    .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5))
+            );
+            eprintln!(
+                "{}: XML flight director click changed state, artwork and animation",
+                aircraft.title
+            );
+            verified += 1;
+            break;
+        }
+    }
+    assert!(verified > 0, "no original XML flight director verified");
+}
