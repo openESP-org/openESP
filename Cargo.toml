@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/esp-formats"
+    "crates/esp-formats",
+    "crates/esp-assets"
 ]

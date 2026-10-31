@@ -1,0 +1,13 @@
+[package]
+name = "esp-assets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+encoding_rs = "0.8"
+esp-formats = { path = "../esp-formats" }
+glam = "0.30"
+
+[dev-dependencies]
+tempfile = "3"
