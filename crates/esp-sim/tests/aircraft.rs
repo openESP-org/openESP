@@ -342,19 +342,31 @@ fn original_heading_knob_repeats_its_script() {
                 {
                     continue;
                 }
-                if !variables
-                    .drain_events()
-                    .any(|(name, _)| name == "HEADING_BUG_INC")
-                {
+                let events = variables.drain_events().collect::<Vec<_>>();
+                if !events.iter().any(|(name, _)| name == "HEADING_BUG_INC") {
                     continue;
                 }
-                for expected in [20.0, 30.0, 40.0] {
+                for (event, value) in events {
+                    variables.dispatch_event(&event, value).unwrap();
+                }
+                for (expected, heading) in [(20.0, 2.0), (30.0, 3.0), (40.0, 4.0)] {
                     panel
                         .mouse_event(MouseEvent::DownRepeat, &[index], position, &mut variables)
                         .unwrap();
+                    let events = variables.drain_events().collect::<Vec<_>>();
+                    assert_eq!(events, [("HEADING_BUG_INC".into(), Value::Number(1.0))]);
+                    for (event, value) in events {
+                        variables.dispatch_event(&event, value).unwrap();
+                    }
                     assert_eq!(
-                        variables.drain_events().collect::<Vec<_>>(),
-                        [("HEADING_BUG_INC".into(), Value::Number(1.0))]
+                        variables
+                            .read(&Reference::new(
+                                'A',
+                                "AUTOPILOT HEADING LOCK DIR",
+                                Some("degrees")
+                            ))
+                            .unwrap(),
+                        Value::Number(heading)
                     );
                     assert_eq!(
                         variables.read(&Reference::new('G', "Var3", None)).unwrap(),

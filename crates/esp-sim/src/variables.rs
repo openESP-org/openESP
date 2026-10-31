@@ -58,6 +58,23 @@ impl Variables {
                 );
                 Ok(())
             }
+            "HEADING_BUG_SET" | "HEADING_BUG_INC" | "HEADING_BUG_DEC" => {
+                let reference = Reference::new('A', "AUTOPILOT HEADING LOCK DIR", Some("degrees"));
+                let heading = if name == "HEADING_BUG_SET" {
+                    value
+                } else {
+                    let current = self
+                        .values
+                        .get(&reference)
+                        .map(Value::number)
+                        .transpose()?
+                        .unwrap_or(0.0);
+                    current + if name == "HEADING_BUG_INC" { 1.0 } else { -1.0 }
+                };
+                self.values
+                    .insert(reference, Value::Number(heading.rem_euclid(360.0)));
+                Ok(())
+            }
             _ => Err(Error::Unsupported(format!("event {name}"))),
         }
     }
@@ -217,5 +234,29 @@ mod tests {
                 .is_err()
         );
         assert_eq!(variables.read(&reference).unwrap(), Value::Number(100.0));
+    }
+
+    #[test]
+    fn selected_heading_events_wrap_and_preserve_state_on_error() {
+        let mut variables = Variables::default();
+        let reference = Reference::new('A', "AUTOPILOT HEADING LOCK DIR", Some("degrees"));
+        for (event, input, expected) in [
+            ("HEADING_BUG_DEC", 0.0, 359.0),
+            ("HEADING_BUG_INC", 0.0, 0.0),
+            ("HEADING_BUG_SET", 725.0, 5.0),
+            ("HEADING_BUG_SET", -10.0, 350.0),
+            ("HEADING_BUG_INC", 1.0, 351.0),
+        ] {
+            variables
+                .dispatch_event(event, Value::Number(input))
+                .unwrap();
+            assert_eq!(variables.read(&reference).unwrap(), Value::Number(expected));
+        }
+        assert!(
+            variables
+                .dispatch_event("HEADING_BUG_SET", Value::Number(f64::INFINITY))
+                .is_err()
+        );
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(351.0));
     }
 }
