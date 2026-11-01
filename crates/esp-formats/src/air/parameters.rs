@@ -83,7 +83,96 @@ pub enum Parameters {
     Yaw(Yaw),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyParameters {
+    pub lift: Lift,
+    pub drag: Drag,
+    pub pitch: Pitch,
+    pub side: SideForce,
+    pub roll: Roll,
+    pub yaw: Yaw,
+}
+
 impl Record<'_> {
+    pub fn legacy_aerodynamics(&self) -> Result<Option<LegacyParameters>, Error> {
+        if self.id != 0x1101 {
+            return Ok(None);
+        }
+        if self.data.len() != 250 {
+            return Err(Error::RecordSize {
+                id: self.id,
+                expected: 250,
+                actual: self.data.len(),
+            });
+        }
+        let short = |offset| {
+            f64::from(i16::from_le_bytes(
+                self.data[offset..offset + 2].try_into().unwrap(),
+            )) / 2048.0
+        };
+        let long = |offset| {
+            f64::from(i32::from_le_bytes(
+                self.data[offset..offset + 4].try_into().unwrap(),
+            )) / 2048.0
+        };
+        let double = |offset| f64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap());
+        Ok(Some(LegacyParameters {
+            lift: Lift {
+                cl_spoiler: double(0x66),
+                cl_flaps: double(0x5e),
+                cl_ih: short(0x5c),
+                cl_de: short(0x5a),
+                unused0: 0.0,
+                unused1: 0.0,
+            },
+            drag: Drag {
+                cd0: short(0x30),
+                cd_flaps: short(0x32),
+                cd_gear: short(0x34),
+                cd_spoiler: short(0x36),
+            },
+            pitch: Pitch {
+                cm_ih: long(0x92),
+                cm_de: long(0x8e),
+                cm_de_propwash: double(0x9a),
+                cl_q: long(0x56),
+                cl_adot: long(0x52),
+                cm_adot: long(0x8a),
+                cm_q: long(0x96),
+                cm_q_propwash: double(0xa2),
+                cm0: long(0x86),
+                cm_flap: double(0xb2),
+                cm_delta_trim: double(0xaa),
+                cm_gear: double(0xba),
+                cm_spoiler: double(0xc2),
+            },
+            side: SideForce {
+                cy_beta: short(0xee),
+                cy_p: long(0xf2),
+                cy_r: long(0xf6),
+                cy_delta_rudder: short(0xf0),
+            },
+            roll: Roll {
+                cl_beta: short(0x6e),
+                cl_p: long(0x76),
+                cl_r: long(0x7a),
+                cl_delta_spoiler: double(0x7e),
+                cl_delta_aileron: short(0x70),
+                cl_delta_rudder: long(0x72),
+            },
+            yaw: Yaw {
+                cn_beta: long(0xca),
+                cn_p: long(0xe4),
+                cn_r: short(0xe8),
+                cn_r_propwash: double(0xdc),
+                cn_delta_aileron: short(0xce),
+                cn_delta_rudder: long(0xd0),
+                cn_delta_rudder_propwash: double(0xd4),
+                unused: [0.0; 2],
+            },
+        }))
+    }
+
     pub fn aerodynamic_parameters(&self) -> Result<Option<Parameters>, Error> {
         let parameters = match self.id {
             0x1539 => Parameters::Lift(read(self, 48)?),
@@ -116,6 +205,58 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_legacy_signed_coefficients_and_unscaled_doubles() {
+        let mut bytes = [0u8; 250];
+        for (offset, value) in [(0x30, 61i16), (0x5a, -763), (0xee, -819), (0xe8, -370)] {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [(0x86, -81i32), (0x96, -30_000), (0x76, -2100), (0xd0, 112)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[0x5e..0x66].copy_from_slice(&0.57f64.to_le_bytes());
+        bytes[0xdc..0xe4].copy_from_slice(&(-12.5f64).to_le_bytes());
+        let record = Record {
+            id: 0x1101,
+            offset: 0,
+            data: &bytes,
+        };
+        let aero = record.legacy_aerodynamics().unwrap().unwrap();
+        assert_eq!(aero.drag.cd0, 61.0 / 2048.0);
+        assert_eq!(aero.lift.cl_de, -763.0 / 2048.0);
+        assert_eq!(aero.lift.cl_flaps, 0.57);
+        assert_eq!(aero.pitch.cm0, -81.0 / 2048.0);
+        assert_eq!(aero.pitch.cm_q, -30_000.0 / 2048.0);
+        assert_eq!(aero.roll.cl_p, -2100.0 / 2048.0);
+        assert_eq!(aero.side.cy_beta, -819.0 / 2048.0);
+        assert_eq!(aero.yaw.cn_r, -370.0 / 2048.0);
+        assert_eq!(aero.yaw.cn_delta_rudder, 112.0 / 2048.0);
+        assert_eq!(aero.yaw.cn_r_propwash, -12.5);
+    }
+
+    #[test]
+    fn legacy_record_requires_its_complete_layout() {
+        let bytes = [0u8; 251];
+        for length in 0..=251 {
+            let record = Record {
+                id: 0x1101,
+                offset: 0,
+                data: &bytes[..length],
+            };
+            assert_eq!(record.legacy_aerodynamics().is_ok(), length == 250);
+        }
+        assert_eq!(
+            Record {
+                id: 0x1539,
+                offset: 0,
+                data: &bytes
+            }
+            .legacy_aerodynamics()
+            .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn reads_aerodynamic_coefficients_and_unused_values() {

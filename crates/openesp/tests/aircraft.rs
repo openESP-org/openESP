@@ -36,11 +36,19 @@ fn capture_after(
     for variable in variables {
         command.args(["--variable", variable]);
     }
+    capture_command(command, output)
+}
+
+fn capture_command(mut command: Command, output: &Path) -> image::RgbaImage {
     let mut child = command.stdout(Stdio::null()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
+            assert!(
+                status.success(),
+                "render failed: {}",
+                std::fs::read_to_string(output.with_extension("log")).unwrap_or_default()
+            );
             break;
         }
         if Instant::now() >= deadline {
@@ -58,6 +66,73 @@ fn capture_after(
         .collect();
     assert!(colours.len() > 32, "frame has no textured geometry");
     image
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original aircraft AIR data"]
+fn renders_airborne_motion_with_opposite_control_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    for (index, path) in content::aircraft_paths().iter().enumerate() {
+        let mut frames = Vec::new();
+        for (direction, percent) in [("left", -25), ("right", 25)] {
+            let screenshot = temp.path().join(format!("{index}-{direction}.png"));
+            let log_path = screenshot.with_extension("log");
+            let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+            command
+                .arg("--aircraft")
+                .arg(path)
+                .args([
+                    "--glide",
+                    "150",
+                    "--height",
+                    "1000",
+                    "--frames",
+                    "120",
+                    "--variable",
+                ])
+                .arg(format!("A:AILERON LEFT DEFLECTION PCT,percent={percent}"))
+                .arg("--screenshot")
+                .arg(&screenshot)
+                .stderr(std::fs::File::create(&log_path).unwrap());
+            frames.push(capture_command(command, &screenshot));
+            let log = std::fs::read_to_string(log_path).unwrap();
+            let state = log
+                .split("flight state: ")
+                .nth(1)
+                .expect("missing final flight state");
+            let north: f64 = state
+                .split("position: DVec3(")
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let roll: f64 = state
+                .split("orientation: DQuat(")
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(north > 1.0, "aircraft did not move forward: {state}");
+            assert!(
+                roll * percent as f64 > 0.0,
+                "aircraft banked against the input: {state}"
+            );
+        }
+        assert!(
+            frames[0]
+                .pixels()
+                .zip(frames[1].pixels())
+                .filter(|(a, b)| a != b)
+                .count()
+                > 1000
+        );
+    }
 }
 
 #[test]

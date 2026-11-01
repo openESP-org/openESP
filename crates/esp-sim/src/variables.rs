@@ -14,6 +14,10 @@ struct Variable {
 }
 
 impl Variables {
+    pub fn flap_angles(&self) -> impl Iterator<Item = f64> + '_ {
+        self.flaps.iter().flat_map(|flaps| flaps.angles())
+    }
+
     pub fn configure_flaps(
         &mut self,
         definitions: &[esp_formats::cfg::aircraft::FlapSet],

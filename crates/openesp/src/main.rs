@@ -9,7 +9,7 @@ use esp_sim::{
     time::{Clock, STEP},
     variables::Variables,
 };
-use glam::{DVec3, Vec3};
+use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -24,6 +24,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+mod flight;
+use flight::Flight;
+
 #[derive(Parser)]
 struct Arguments {
     #[arg(long)]
@@ -34,6 +37,17 @@ struct Arguments {
     variant: u32,
     #[arg(long)]
     cockpit: bool,
+    #[arg(
+        long,
+        help = "Start an empty, unpowered aircraft at this airspeed in knots, in the local test scene"
+    )]
+    glide: Option<f64>,
+    #[arg(
+        long,
+        default_value_t = 1000.0,
+        help = "Airborne test starting height in meters above the test grid"
+    )]
+    height: f64,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     frames: Option<u64>,
     #[arg(
@@ -104,10 +118,11 @@ fn parse_variable(text: &str) -> Result<Variable, String> {
 
 struct App {
     arguments: Arguments,
-    loaded: mpsc::Receiver<Result<Aircraft>>,
+    loaded: mpsc::Receiver<Result<(Aircraft, Option<Flight>)>>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     aircraft: Option<Aircraft>,
+    flight: Option<Flight>,
     exterior_state: Option<ModelState>,
     interior_state: Option<ModelState>,
     variables: Variables,
@@ -145,6 +160,7 @@ impl App {
 
     fn reset_camera(&mut self) {
         if let Some(renderer) = &self.renderer {
+            let rotation = glam::Quat::from_mat4(&renderer.aircraft_rotation);
             self.camera = if self.arguments.cockpit {
                 Camera::looking_at(
                     renderer.cockpit_eye.unwrap_or(renderer.aircraft_origin),
@@ -152,12 +168,37 @@ impl App {
                 )
             } else {
                 let target = renderer.centre.as_dvec3();
-                Camera::looking_at(
+                let mut camera = Camera::looking_at(
                     target + DVec3::new(-0.9, 0.4, 1.4) * f64::from(renderer.radius),
                     target,
-                )
+                );
+                camera.position =
+                    renderer.aircraft_origin + (rotation.as_dquat() * camera.position);
+                camera
             };
+            self.camera.frame = rotation;
         }
+    }
+
+    fn update_flight_pose(&mut self, alpha: f64) -> Result<()> {
+        let (Some(flight), Some(renderer)) = (&self.flight, &mut self.renderer) else {
+            return Ok(());
+        };
+        let state = flight.sample(alpha)?;
+        let (origin, orientation) = flight.pose(&state);
+        let old = glam::Quat::from_mat4(&renderer.aircraft_rotation);
+        let local_eye =
+            old.as_dquat().conjugate() * (self.camera.position - renderer.aircraft_origin);
+        self.camera.position = origin + orientation.as_dquat() * local_eye;
+        self.camera.frame = (orientation * old.conjugate() * self.camera.frame).normalize();
+        renderer.aircraft_origin = origin;
+        renderer.aircraft_rotation = Mat4::from_quat(orientation);
+        renderer.cockpit_eye = self
+            .aircraft
+            .as_ref()
+            .and_then(|a| a.eyepoint)
+            .map(|eye| origin + orientation.as_dquat() * eye.as_dvec3());
+        Ok(())
     }
 
     fn cockpit_target(&self) -> Option<CockpitTarget> {
@@ -175,7 +216,14 @@ impl App {
         let ny = (1.0 - cy / size.height as f64 * 2.0) as f32;
         let (ray_origin, ray_dir) = self.camera.ray(nx, ny, aspect)?;
         let aircraft_to_camera = (renderer.aircraft_origin - self.camera.position).as_vec3();
-        let hit = picking::pick(interior, state, aircraft_to_camera, ray_origin, ray_dir)?;
+        let inverse = renderer.aircraft_rotation.inverse();
+        let hit = picking::pick(
+            interior,
+            state,
+            inverse.transform_vector3(aircraft_to_camera),
+            inverse.transform_vector3(ray_origin),
+            inverse.transform_vector3(ray_dir),
+        )?;
         let mesh = &interior.lods[0].meshes[hit.mesh];
         if let Ok(index) = usize::try_from(mesh.mouse_rectangle) {
             return Some(CockpitTarget::Model(index));
@@ -300,7 +348,8 @@ impl App {
         if self.renderer.is_none() {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
-                    let mut aircraft = aircraft?;
+                    let (mut aircraft, flight) = aircraft?;
+                    self.flight = flight;
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
                     self.renderer = Some(pollster::block_on(Renderer::new(
@@ -314,7 +363,13 @@ impl App {
                         .map(ModelState::new)
                         .transpose()?;
                     if let Err(error) = self.variables.configure_flaps(&aircraft.flaps) {
+                        if self.flight.is_some() {
+                            return Err(error.context("configuring flight control actuators"));
+                        }
                         eprintln!("flap system: {error}");
+                    }
+                    if let Some(flight) = &self.flight {
+                        Flight::publish(&flight.current, &mut self.variables);
                     }
                     self.apply_variable_overrides();
                     for panel in aircraft.panel_images.values_mut() {
@@ -329,6 +384,7 @@ impl App {
                             .with_context(|| format!("startup event {}", event.name))?;
                     }
                     self.aircraft = Some(aircraft);
+                    self.update_flight_pose(1.0)?;
                     self.reset_camera();
                     self.last_frame = Instant::now();
                 }
@@ -377,15 +433,20 @@ impl App {
         self.camera.move_local(movement, dt.min(0.1) * speed);
         let roll = axis(KeyCode::ArrowRight, KeyCode::ArrowLeft) as f64;
         let pitch = axis(KeyCode::ArrowDown, KeyCode::ArrowUp) as f64;
+        let rudder = axis(KeyCode::KeyX, KeyCode::KeyZ) as f64;
         for (name, value) in [
             ("YOKE X POSITION", roll * 100.0),
             ("YOKE Y POSITION", pitch * 100.0),
             ("AILERON LEFT DEFLECTION PCT", roll * 100.0),
             ("AILERON RIGHT DEFLECTION PCT", -roll * 100.0),
             ("ELEVATOR DEFLECTION PCT", pitch * 100.0),
+            ("RUDDER DEFLECTION PCT", rudder * 100.0),
             ("EXIT OPEN:0", if self.door_open { 100.0 } else { 0.0 }),
         ] {
             self.variables.set_number(name, "percent", value);
+        }
+        if let Some(flight) = &self.flight {
+            Flight::publish(&flight.current, &mut self.variables);
         }
         self.apply_variable_overrides();
         self.variables.interpolate(1.0)?;
@@ -399,8 +460,18 @@ impl App {
                 eprintln!("gauge event: {error}");
             }
             self.variables.advance(STEP)?;
+            if let Some(flight) = &mut self.flight {
+                flight.advance(STEP, &mut self.variables)?;
+                Flight::publish(&flight.current, &mut self.variables);
+            }
+            self.apply_variable_overrides();
         }
         self.variables.interpolate(frame.alpha)?;
+        if let Some(flight) = &self.flight {
+            Flight::publish(&flight.sample(frame.alpha)?, &mut self.variables);
+        }
+        self.apply_variable_overrides();
+        self.update_flight_pose(frame.alpha)?;
         if let Some(aircraft) = &mut self.aircraft {
             for (name, panel) in &mut aircraft.panel_images {
                 let changed = panel.update(&mut self.variables);
@@ -647,15 +718,24 @@ fn main() -> Result<()> {
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;
     let fsx_root = arguments.fsx_root.clone();
+    let glide = arguments.glide;
+    let height = arguments.height;
     let (sender, loaded) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("aircraft loader".into())
         .spawn(move || {
-            let _ = sender.send(Aircraft::load_with_root(
-                &path,
-                variant,
-                fsx_root.as_deref(),
-            ));
+            let loaded = (|| {
+                let aircraft = Aircraft::load_with_root(&path, variant, fsx_root.as_deref())?;
+                let flight = glide.map(|knots| {
+                    let data = esp_assets::flight::FlightData::load(&path, variant)?;
+                    Flight::new(&data, knots, height)
+                }).transpose()?;
+                if flight.is_some() {
+                    eprintln!("airborne test: empty aircraft, no thrust, constant sea-level atmosphere; arrows control elevator/ailerons, Z/X rudder");
+                }
+                Ok((aircraft, flight))
+            })();
+            let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
     variables.set_number("AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool", 0.0);
@@ -666,6 +746,7 @@ fn main() -> Result<()> {
         window: None,
         renderer: None,
         aircraft: None,
+        flight: None,
         exterior_state: None,
         interior_state: None,
         variables,
@@ -684,6 +765,9 @@ fn main() -> Result<()> {
         error: None,
     };
     EventLoop::new()?.run_app(&mut app)?;
+    if let Some(flight) = &app.flight {
+        eprintln!("flight state: {:?}", flight.current);
+    }
     if let Some(error) = app.error {
         return Err(error);
     }
@@ -749,6 +833,7 @@ mod tests {
                 eyepoint: None,
                 texture_directories: vec![],
             }),
+            flight: None,
             exterior_state: None,
             interior_state: None,
             variables,

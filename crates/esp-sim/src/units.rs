@@ -10,6 +10,9 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "knots" | "knot" => Some((2, 1852.0 / 3600.0)),
         "meters per second" => Some((2, 1.0)),
         "feet per second" => Some((2, 0.3048)),
+        "feet per minute" => Some((2, 0.3048 / 60.0)),
+        "meters" | "meter" => Some((3, 1.0)),
+        "feet" | "foot" => Some((3, 0.3048)),
         _ => None,
     };
     let (from_dimension, from_scale) = unit(from)?;

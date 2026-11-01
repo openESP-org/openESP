@@ -1,0 +1,201 @@
+use anyhow::{Result, ensure};
+use esp_assets::flight::FlightData;
+use esp_script::{Host, Reference};
+use esp_sim::{
+    aerodynamics::{Aerodynamics, Controls},
+    flight::State,
+    variables::Variables,
+};
+use glam::{DMat3, DQuat, DVec3, EulerRot, Quat};
+
+#[cfg(test)]
+#[path = "../../../tests/support/content.rs"]
+mod content;
+
+pub struct Flight {
+    model: Aerodynamics,
+    pub current: State,
+    previous: State,
+    flaps: Vec<f64>,
+}
+
+impl Flight {
+    pub fn new(data: &FlightData, knots: f64, height: f64) -> Result<Self> {
+        ensure!(
+            knots.is_finite() && knots > 0.0 && height.is_finite() && height > 0.0,
+            "invalid airborne starting state"
+        );
+        let model = Aerodynamics::from_data(data)?;
+        let current = State {
+            position: DVec3::new(0.0, 0.0, -height),
+            velocity: DVec3::X * (knots * 1852.0 / 3600.0),
+            ..State::default()
+        };
+        Ok(Self {
+            model,
+            current,
+            previous: current,
+            flaps: Vec::new(),
+        })
+    }
+
+    pub fn advance(&mut self, dt: f64, variables: &mut Variables) -> Result<()> {
+        let mut control = |name| -> Result<f64> {
+            Ok(variables
+                .read(&Reference::new('A', name, Some("percent over 100")))?
+                .number()?)
+        };
+        let controls = Controls {
+            elevator: control("ELEVATOR DEFLECTION PCT")?,
+            aileron: control("AILERON LEFT DEFLECTION PCT")?,
+            rudder: control("RUDDER DEFLECTION PCT")?,
+        };
+        self.flaps.clear();
+        self.flaps.extend(variables.flap_angles());
+        let mut next = self.current;
+        next.advance(&self.model.mass, dt, DVec3::Z * 9.80665, |state| {
+            self.model.forces(
+                state.air_velocity(DVec3::ZERO),
+                state.angular_velocity,
+                1.225,
+                controls,
+                &self.flaps,
+            )
+        })?;
+        ensure!(
+            next.position.z < 0.0,
+            "airborne test reached the ground; ground contact is not simulated yet"
+        );
+        self.previous = self.current;
+        self.current = next;
+        Ok(())
+    }
+
+    pub fn sample(&self, alpha: f64) -> Result<State> {
+        self.previous.interpolate(&self.current, alpha)
+    }
+
+    pub fn pose(&self, state: &State) -> (DVec3, Quat) {
+        let basis = DMat3::from_cols(DVec3::Z, DVec3::X, -DVec3::Y);
+        let orientation =
+            DQuat::from_mat3(&(basis * DMat3::from_quat(state.orientation) * basis.transpose()))
+                .as_quat();
+        let origin = basis * (state.position - state.orientation * self.model.cg);
+        (origin, orientation)
+    }
+
+    pub fn publish(state: &State, variables: &mut Variables) {
+        let air = state.air_velocity(DVec3::ZERO);
+        let speed = air.length();
+        let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
+        for name in ["AIRSPEED INDICATED", "AIRSPEED TRUE"] {
+            variables.set_number(name, "meters per second", speed);
+        }
+        for name in [
+            "PLANE ALTITUDE",
+            "INDICATED ALTITUDE",
+            "PLANE ALT ABOVE GROUND",
+        ] {
+            variables.set_number(name, "meters", -state.position.z);
+        }
+        for name in ["PLANE PITCH DEGREES", "ATTITUDE INDICATOR PITCH DEGREES"] {
+            variables.set_number(name, "radians", -pitch);
+        }
+        for name in ["PLANE BANK DEGREES", "ATTITUDE INDICATOR BANK DEGREES"] {
+            variables.set_number(name, "radians", -bank);
+        }
+        variables.set_number(
+            "PLANE HEADING DEGREES TRUE",
+            "radians",
+            heading.rem_euclid(std::f64::consts::TAU),
+        );
+        variables.set_number("INCIDENCE ALPHA", "radians", air.z.atan2(air.x));
+        variables.set_number(
+            "INCIDENCE BETA",
+            "radians",
+            if speed > 0.0 {
+                (air.y / speed).clamp(-1.0, 1.0).asin()
+            } else {
+                0.0
+            },
+        );
+        variables.set_number("VERTICAL SPEED", "meters per second", -state.velocity.z);
+        variables.set_number(
+            "GROUND VELOCITY",
+            "meters per second",
+            state.velocity.truncate().length(),
+        );
+        variables.set_number("SIM ON GROUND", "bool", 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+    fn transforms_aircraft_about_its_cg_and_preserves_simulation_during_interpolation() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut flight = Flight::new(&data, 100.0, 1000.0).unwrap();
+            let mut variables = Variables::default();
+            variables
+                .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
+                .unwrap();
+            for name in [
+                "ELEVATOR DEFLECTION PCT",
+                "AILERON LEFT DEFLECTION PCT",
+                "RUDDER DEFLECTION PCT",
+            ] {
+                variables.set_number(name, "percent", 0.0);
+            }
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            let physical = flight.current;
+            for alpha in [0.0, 0.25, 0.5, 1.0] {
+                let mut state = flight.sample(alpha).unwrap();
+                state.orientation = DQuat::from_euler(EulerRot::ZYX, 0.4, 0.2, 0.3);
+                let (origin, orientation) = flight.pose(&state);
+                let cg = flight.model.cg;
+                let rendered_cg = DVec3::new(cg.y, -cg.z, cg.x);
+                let expected = DVec3::new(state.position.y, -state.position.z, state.position.x);
+                assert!(
+                    (origin + orientation.as_dquat() * rendered_cg).abs_diff_eq(expected, 1e-6)
+                );
+                let forward = state.orientation * DVec3::X;
+                assert!(
+                    (orientation * glam::Vec3::Z)
+                        .as_dvec3()
+                        .abs_diff_eq(DVec3::new(forward.y, -forward.z, forward.x), 1e-6)
+                );
+            }
+            assert_eq!(flight.current, physical);
+        }
+    }
+
+    #[test]
+    fn publishes_attitude_and_airspeed_using_simulator_units() {
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -1000.0),
+            velocity: DVec3::X * 50.0,
+            orientation: DQuat::from_euler(EulerRot::ZYX, 0.4, 0.1, 0.2),
+            ..State::default()
+        };
+        let mut variables = Variables::default();
+        Flight::publish(&state, &mut variables);
+        for (name, unit, expected) in [
+            ("AIRSPEED INDICATED", "knots", 50.0 * 3600.0 / 1852.0),
+            ("PLANE ALTITUDE", "feet", 1000.0 / 0.3048),
+            ("PLANE PITCH DEGREES", "radians", -0.1),
+            ("PLANE BANK DEGREES", "radians", -0.2),
+            ("PLANE HEADING DEGREES TRUE", "radians", 0.4),
+        ] {
+            let actual = variables
+                .read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!((actual - expected).abs() < 1e-9, "{name}: {actual}");
+        }
+    }
+}

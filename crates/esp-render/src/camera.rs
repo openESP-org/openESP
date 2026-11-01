@@ -1,7 +1,8 @@
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 
 pub struct Camera {
     pub position: DVec3,
+    pub frame: Quat,
     pub yaw: f32,
     pub pitch: f32,
 }
@@ -11,17 +12,19 @@ impl Camera {
         let direction = (target - position).normalize().as_vec3();
         Self {
             position,
+            frame: Quat::IDENTITY,
             yaw: direction.x.atan2(direction.z),
             pitch: direction.y.asin(),
         }
     }
 
     pub fn forward(&self) -> Vec3 {
-        Vec3::new(
-            self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-            self.yaw.cos() * self.pitch.cos(),
-        )
+        self.frame
+            * Vec3::new(
+                self.yaw.sin() * self.pitch.cos(),
+                self.pitch.sin(),
+                self.yaw.cos() * self.pitch.cos(),
+            )
     }
 
     pub fn look(&mut self, x: f64, y: f64) {
@@ -31,9 +34,10 @@ impl Camera {
 
     pub fn move_local(&mut self, movement: Vec3, distance: f64) {
         let forward = self.forward();
-        let right = Vec3::Y.cross(forward).normalize_or_zero();
+        let up = self.frame * Vec3::Y;
+        let right = up.cross(forward).normalize_or_zero();
         let direction =
-            (right * movement.x + Vec3::Y * movement.y + forward * movement.z).normalize_or_zero();
+            (right * movement.x + up * movement.y + forward * movement.z).normalize_or_zero();
         self.position += direction.as_dvec3() * distance;
     }
 
@@ -50,7 +54,7 @@ impl Camera {
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
         Mat4::perspective_infinite_reverse_lh(60f32.to_radians(), aspect, 0.05)
-            * Mat4::look_to_lh(Vec3::ZERO, self.forward(), Vec3::Y)
+            * Mat4::look_to_lh(Vec3::ZERO, self.forward(), self.frame * Vec3::Y)
     }
 }
 
@@ -72,6 +76,7 @@ mod tests {
         for (yaw, pitch, aspect) in [(0.0, 0.0, 1.6), (0.6, -0.3, 0.8)] {
             let camera = Camera {
                 position: DVec3::splat(6_378_137.0),
+                frame: Quat::IDENTITY,
                 yaw,
                 pitch,
             };
@@ -94,5 +99,22 @@ mod tests {
             assert!(camera.ray(f32::NAN, 0.0, aspect).is_none());
             assert!(camera.ray(0.0, 0.0, 0.0).is_none());
         }
+    }
+
+    #[test]
+    fn banked_camera_rotates_its_view_and_movement_frame() {
+        let mut camera = Camera::looking_at(DVec3::ZERO, DVec3::Z);
+        camera.frame = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        camera.move_local(Vec3::X, 1.0);
+        assert!(camera.position.abs_diff_eq(DVec3::Y, 1e-6));
+        let (origin, ray) = camera.ray(0.0, 0.5, 1.0).unwrap();
+        assert!(origin.x < 0.0 && ray.x < 0.0);
+        assert!(
+            camera
+                .ray(0.0, 0.0, 1.0)
+                .unwrap()
+                .1
+                .abs_diff_eq(Vec3::Z, 1e-6)
+        );
     }
 }

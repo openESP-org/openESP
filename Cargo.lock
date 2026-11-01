@@ -1832,6 +1832,7 @@ dependencies = [
  "anyhow",
  "clap",
  "esp-assets",
+ "esp-formats",
  "esp-render",
  "esp-script",
  "esp-sim",

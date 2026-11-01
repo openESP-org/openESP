@@ -17,6 +17,10 @@ struct Actuator {
 }
 
 impl Flaps {
+    pub fn angles(&self) -> impl Iterator<Item = f64> + '_ {
+        self.sets.iter().map(|set| set.angle.to_radians())
+    }
+
     pub fn new(definitions: &[FlapSet]) -> Result<Self> {
         let mut sets = Vec::new();
         let mut max_handle = 0;

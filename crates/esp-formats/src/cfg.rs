@@ -57,6 +57,10 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn number(&self, section: &str, key: &str) -> Result<Option<f64>, ValueError> {
+        camera::number(self, section, key)
+    }
+
     pub fn value(&self, section: &str, key: &str) -> Result<Option<&str>, ValueError> {
         let mut matches = self
             .sections

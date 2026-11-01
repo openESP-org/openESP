@@ -15,5 +15,6 @@ pollster = "0.4"
 winit = "0.30"
 
 [dev-dependencies]
+esp-formats = { path = "../esp-formats" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"

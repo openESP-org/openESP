@@ -69,6 +69,7 @@ pub struct Renderer {
     pub centre: Vec3,
     pub radius: f32,
     pub aircraft_origin: DVec3,
+    pub aircraft_rotation: Mat4,
     pub cockpit_eye: Option<DVec3>,
 }
 
@@ -372,7 +373,7 @@ impl Renderer {
             "aircraft has no finite geometry bounds"
         );
         let aircraft_origin = DVec3::new(0.0, -f64::from(min.y), 0.0);
-        let centre = (min + max) * 0.5 + aircraft_origin.as_vec3();
+        let centre = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(1.0);
         let extent = (radius * 4.0).max(50.0);
         let vertices = [
@@ -432,6 +433,7 @@ impl Renderer {
             centre,
             radius,
             aircraft_origin,
+            aircraft_rotation: Mat4::IDENTITY,
             cockpit_eye,
         })
     }
@@ -528,22 +530,25 @@ impl Renderer {
             &mut self.exterior
         };
         for draw in draws.iter_mut().chain(std::iter::once(&mut self.ground)) {
-            let origin = if draw.uniform.settings[1] > 0.0 {
-                DVec3::ZERO
+            let (origin, rotation) = if draw.uniform.settings[1] > 0.0 {
+                (DVec3::ZERO, Mat4::IDENTITY)
             } else {
-                self.aircraft_origin
+                (self.aircraft_origin, self.aircraft_rotation)
             };
-            let transform =
-                Mat4::from_translation((origin - camera.position).as_vec3()) * draw.transform;
+            let model = rotation * draw.transform;
+            let transform = Mat4::from_translation((origin - camera.position).as_vec3()) * model;
             draw.uniform.model = transform.to_cols_array_2d();
-            draw.uniform.normal = draw.transform.inverse().transpose().to_cols_array_2d();
+            draw.uniform.normal = model.inverse().transpose().to_cols_array_2d();
             self.queue
                 .write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
         }
         let mut transparent: Vec<_> = draws.iter().filter(|d| d.visible && d.blended).collect();
         transparent.sort_by(|a, b| {
             let distance = |d: &Draw| {
-                (self.aircraft_origin + d.transform.transform_point3(d.centre).as_dvec3()
+                (self.aircraft_origin
+                    + (self.aircraft_rotation * d.transform)
+                        .transform_point3(d.centre)
+                        .as_dvec3()
                     - camera.position)
                     .length_squared()
             };
