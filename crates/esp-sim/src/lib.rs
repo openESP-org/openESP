@@ -4,6 +4,7 @@ pub mod atmosphere;
 pub mod flaps;
 pub mod flight;
 pub mod interaction;
+pub mod loading;
 pub mod picking;
 pub mod time;
 mod units;

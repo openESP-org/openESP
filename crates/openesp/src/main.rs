@@ -39,7 +39,7 @@ struct Arguments {
     cockpit: bool,
     #[arg(
         long,
-        help = "Start an empty, unpowered aircraft at this airspeed in knots, in the local test scene"
+        help = "Start an unpowered aircraft at this airspeed in knots, in the local test scene"
     )]
     glide: Option<f64>,
     #[arg(
@@ -48,6 +48,19 @@ struct Arguments {
         help = "Airborne test starting height in meters above the test grid"
     )]
     height: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        requires = "glide",
+        help = "Fill usable fuel tanks to this percentage for the airborne test"
+    )]
+    fuel_percent: f64,
+    #[arg(
+        long,
+        requires = "glide",
+        help = "Load the aircraft's configured payload stations for the airborne test"
+    )]
+    payload: bool,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     frames: Option<u64>,
     #[arg(
@@ -370,6 +383,7 @@ impl App {
                     }
                     if let Some(flight) = &self.flight {
                         Flight::publish(&flight.current, &mut self.variables)?;
+                        flight.publish_loading(&mut self.variables);
                     }
                     self.apply_variable_overrides();
                     for panel in aircraft.panel_images.values_mut() {
@@ -720,6 +734,8 @@ fn main() -> Result<()> {
     let fsx_root = arguments.fsx_root.clone();
     let glide = arguments.glide;
     let height = arguments.height;
+    let fuel_fraction = arguments.fuel_percent / 100.0;
+    let payload = arguments.payload;
     let (sender, loaded) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("aircraft loader".into())
@@ -728,10 +744,10 @@ fn main() -> Result<()> {
                 let aircraft = Aircraft::load_with_root(&path, variant, fsx_root.as_deref())?;
                 let flight = glide.map(|knots| {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
-                    Flight::new(&data, knots, height)
+                    Flight::new(&data, knots, height,fuel_fraction,payload)
                 }).transpose()?;
                 if flight.is_some() {
-                    eprintln!("airborne test: empty aircraft, no thrust, standard atmosphere; arrows control elevator/ailerons, Z/X rudder");
+                    eprintln!("airborne test: no thrust, standard atmosphere; arrows control elevator/ailerons, Z/X rudder");
                 }
                 Ok((aircraft, flight))
             })();

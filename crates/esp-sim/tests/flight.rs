@@ -2,6 +2,7 @@ use esp_assets::flight::FlightData;
 use esp_sim::{
     aerodynamics::{Aerodynamics, Controls},
     flight::State,
+    loading::WeightBalance,
     time::STEP,
 };
 use glam::{DQuat, DVec3};
@@ -16,19 +17,34 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
     for path in content::aircraft_paths() {
         let data = FlightData::load(&path, 0).unwrap();
         let model = Aerodynamics::from_data(&data).unwrap();
+        let loading = WeightBalance::from_config(&data.configuration)
+            .unwrap()
+            .load(0.0, false)
+            .unwrap();
         let flap_count = esp_formats::cfg::aircraft::flaps(&data.configuration)
             .unwrap()
             .len();
         let clean = vec![0.0; flap_count];
         let velocity = DVec3::X * 50.0;
-        let forces = |v, omega, controls| model.forces(v, omega, 1.225, controls, &clean).unwrap();
+        let forces = |v, omega, controls| {
+            model
+                .forces(v, omega, 1.225, controls, &clean, loading.cg)
+                .unwrap()
+        };
         let base = forces(velocity, DVec3::ZERO, Controls::default());
         assert!(base.force.x < 0.0 && base.force.z < 0.0);
         let fast = forces(velocity * 2.0, DVec3::ZERO, Controls::default());
         assert!(fast.force.abs_diff_eq(base.force * 4.0, 1e-8));
         assert!(fast.moment.abs_diff_eq(base.moment * 4.0, 1e-8));
         let thin = model
-            .forces(velocity, DVec3::ZERO, 0.6125, Controls::default(), &clean)
+            .forces(
+                velocity,
+                DVec3::ZERO,
+                0.6125,
+                Controls::default(),
+                &clean,
+                loading.cg,
+            )
             .unwrap();
         assert!(thin.force.abs_diff_eq(base.force * 0.5, 1e-8));
         assert!(
@@ -82,6 +98,7 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
                 1.225,
                 Controls::default(),
                 &vec![20f64.to_radians(); flap_count],
+                loading.cg,
             )
             .unwrap();
         assert!(deployed.force.x < base.force.x && deployed.force.z < base.force.z);
@@ -98,7 +115,7 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
         eprintln!(
             "{}: mass={}kg force={}N moment={}Nm",
             path.display(),
-            model.mass.kilograms(),
+            loading.mass.kilograms(),
             base.force,
             base.moment
         );
@@ -113,6 +130,10 @@ fn unpowered_original_aircraft_integrate_flight_without_creating_energy() {
     for path in content::aircraft_paths() {
         let data = FlightData::load(&path, 0).unwrap();
         let model = Aerodynamics::from_data(&data).unwrap();
+        let loading = WeightBalance::from_config(&data.configuration)
+            .unwrap()
+            .load(0.0, false)
+            .unwrap();
         let clean = vec![
             0.0;
             esp_formats::cfg::aircraft::flaps(&data.configuration)
@@ -126,19 +147,20 @@ fn unpowered_original_aircraft_integrate_flight_without_creating_energy() {
             ..State::default()
         };
         let energy = |state: State| {
-            model.mass.kilograms()
+            loading.mass.kilograms()
                 * (0.5 * state.velocity.length_squared() - 9.80665 * state.position.z)
         };
         let mut previous_energy = energy(state);
         for _ in 0..3600 {
             state
-                .advance(&model.mass, STEP, DVec3::Z * 9.80665, |state| {
+                .advance(&loading.mass, STEP, DVec3::Z * 9.80665, |state| {
                     model.forces(
                         state.air_velocity(DVec3::ZERO),
                         state.angular_velocity,
                         1.225,
                         Controls::default(),
                         &clean,
+                        loading.cg,
                     )
                 })
                 .unwrap();

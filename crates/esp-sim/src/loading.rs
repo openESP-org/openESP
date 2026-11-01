@@ -1,0 +1,174 @@
+use anyhow::{Context, Result, ensure};
+use esp_formats::cfg::{self, Config};
+use glam::{DMat3, DVec3};
+
+use crate::flight::MassProperties;
+
+const FOOT: f64 = 0.3048;
+const POUND: f64 = 0.45359237;
+
+pub struct WeightBalance {
+    empty: MassProperties,
+    empty_cg: DVec3,
+    datum: DVec3,
+    stations: Vec<cfg::loading::Station>,
+    tanks: Vec<cfg::loading::Tank>,
+    fuel_density: f64,
+}
+
+pub struct Loading {
+    pub mass: MassProperties,
+    pub cg: DVec3,
+    pub empty_kilograms: f64,
+    pub payload_kilograms: f64,
+    pub fuel_gallons: f64,
+    pub fuel_capacity_gallons: f64,
+    pub fuel_pounds_per_gallon: f64,
+}
+
+fn body([x, y, z]: [f64; 3]) -> DVec3 {
+    DVec3::new(x, y, -z) * FOOT
+}
+
+fn parallel_axis(mass: f64, offset: DVec3) -> DMat3 {
+    (DMat3::IDENTITY * offset.length_squared()
+        - DMat3::from_cols(offset * offset.x, offset * offset.y, offset * offset.z))
+        * mass
+}
+
+impl WeightBalance {
+    pub fn from_config(config: &Config) -> Result<Self> {
+        let weight = |key| -> Result<f64> {
+            config
+                .number("weight_and_balance", key)?
+                .with_context(|| format!("missing [weight_and_balance] {key}"))
+        };
+        let mass = weight("empty_weight")? * POUND;
+        let unit = 1.3558179483314004;
+        let coupled = weight("empty_weight_coupled_MOI")? * unit;
+        let inertia = DMat3::from_cols(
+            DVec3::new(weight("empty_weight_roll_MOI")? * unit, 0.0, -coupled),
+            DVec3::Y * weight("empty_weight_pitch_MOI")? * unit,
+            DVec3::new(-coupled, 0.0, weight("empty_weight_yaw_MOI")? * unit),
+        );
+        let reference = cfg::aircraft::ReferencePoints::from_config(config)?;
+        let datum = body(reference.datum_feet.context("missing reference datum")?);
+        let empty_cg = datum
+            + body(
+                reference
+                    .empty_cg_feet
+                    .context("missing empty aircraft CG")?,
+            );
+        let tanks = cfg::loading::tanks(config)?;
+        let fuel_density = if tanks.is_empty() {
+            0.0
+        } else {
+            match config.number("fuel", "fuel_type")? {
+                Some(1.0) => 6.0,
+                Some(2.0) => 6.7,
+                _ => anyhow::bail!("missing or unsupported aircraft fuel type"),
+            }
+        };
+        Ok(Self {
+            empty: MassProperties::new(mass, inertia)?,
+            empty_cg,
+            datum,
+            stations: cfg::loading::stations(config)?,
+            tanks,
+            fuel_density,
+        })
+    }
+
+    pub fn load(&self, fuel_fraction: f64, payload: bool) -> Result<Loading> {
+        ensure!(
+            fuel_fraction.is_finite() && (0.0..=1.0).contains(&fuel_fraction),
+            "invalid fuel fraction"
+        );
+        ensure!(
+            fuel_fraction == 0.0 || !self.tanks.is_empty(),
+            "aircraft has no fuel tanks"
+        );
+        ensure!(
+            fuel_fraction == 0.0 || self.tanks.iter().all(|t| t.unusable_gallons == 0.0),
+            "loading tanks with unusable fuel is not simulated yet"
+        );
+        let mut points = Vec::new();
+        if payload {
+            points.extend(
+                self.stations
+                    .iter()
+                    .map(|s| (s.pounds * POUND, self.datum + body(s.position_feet))),
+            );
+        }
+        let payload_kilograms = points.iter().map(|(mass, _)| mass).sum();
+        let fuel_capacity_gallons = self.tanks.iter().map(|t| t.capacity_gallons).sum::<f64>();
+        points.extend(self.tanks.iter().map(|t| {
+            (
+                t.capacity_gallons * fuel_fraction * self.fuel_density * POUND,
+                self.datum + body(t.position_feet),
+            )
+        }));
+        let mass = self.empty.kilograms() + points.iter().map(|(mass, _)| mass).sum::<f64>();
+        let cg = (self.empty_cg * self.empty.kilograms()
+            + points.iter().map(|(mass, pos)| pos * mass).sum::<DVec3>())
+            / mass;
+        let inertia = self.empty.inertia
+            + parallel_axis(self.empty.kilograms(), self.empty_cg - cg)
+            + points
+                .iter()
+                .map(|(mass, pos)| parallel_axis(*mass, *pos - cg))
+                .sum::<DMat3>();
+        Ok(Loading {
+            mass: MassProperties::new(mass, inertia)?,
+            cg,
+            empty_kilograms: self.empty.kilograms(),
+            payload_kilograms,
+            fuel_gallons: fuel_capacity_gallons * fuel_fraction,
+            fuel_capacity_gallons,
+            fuel_pounds_per_gallon: self.fuel_density,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config::parse("[weight_and_balance]\nempty_weight=1000\nempty_weight_roll_MOI=100\nempty_weight_pitch_MOI=200\nempty_weight_yaw_MOI=250\nempty_weight_coupled_MOI=0\nreference_datum_position=2,0,0\nempty_weight_CG_position=-2,0,0\nstation_load.0=200,8,0,0,Pilot\n[fuel]\nfuel_type=1\nleftmain=-2,-5,1,10,0\nrightmain=-2,5,1,10,0").unwrap()
+    }
+
+    #[test]
+    fn shifts_cg_and_applies_parallel_axis_inertia() {
+        let weights = WeightBalance::from_config(&config()).unwrap();
+        let empty = weights.load(0.0, false).unwrap();
+        assert_eq!(empty.cg, DVec3::ZERO);
+        let loaded = weights.load(0.0, true).unwrap();
+        let expected_cg = 200.0 * 10.0 / 1200.0 * FOOT;
+        assert!(loaded.cg.abs_diff_eq(DVec3::X * expected_cg, 1e-12));
+        let extra_pitch = 1000.0 * POUND * expected_cg.powi(2)
+            + 200.0 * POUND * (10.0 * FOOT - expected_cg).powi(2);
+        assert!(
+            (loaded.mass.inertia.y_axis.y - empty.mass.inertia.y_axis.y - extra_pitch).abs() < 1e-9
+        );
+        assert!((loaded.mass.inertia.x_axis.x - empty.mass.inertia.x_axis.x).abs() < 1e-12);
+    }
+
+    #[test]
+    fn loads_symmetric_fuel_and_bounds_quantities() {
+        let weights = WeightBalance::from_config(&config()).unwrap();
+        let empty = weights.load(0.0, false).unwrap();
+        let full = weights.load(1.0, false).unwrap();
+        assert!((full.mass.kilograms() - (1000.0 + 20.0 * 6.0) * POUND).abs() < 1e-10);
+        assert_eq!(full.fuel_gallons, 20.0);
+        assert!(full.cg.y.abs() < 1e-12 && full.cg.z < 0.0);
+        assert!(full.mass.inertia.x_axis.x > empty.mass.inertia.x_axis.x);
+        assert!(weights.load(1.0, true).unwrap().mass.inertia.x_axis.z < 0.0);
+        assert!(weights.load(-0.1, false).is_err());
+        assert!(weights.load(f64::NAN, false).is_err());
+        let mut weights = weights;
+        weights.tanks[0].unusable_gallons = 1.0;
+        assert!(weights.load(0.0, false).is_ok());
+        assert!(weights.load(1.0, false).is_err());
+    }
+}

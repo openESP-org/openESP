@@ -84,6 +84,9 @@ fn renders_airborne_motion_with_opposite_control_inputs() {
                 .args([
                     "--glide",
                     "150",
+                    "--fuel-percent",
+                    "50",
+                    "--payload",
                     "--height",
                     "1000",
                     "--frames",

@@ -8,17 +8,13 @@ use esp_formats::{
     },
     cfg::Config,
 };
-use glam::{DMat3, DVec3};
+use glam::DVec3;
 
-use crate::flight::{MassProperties, Wrench};
+use crate::{flight::Wrench, loading::WeightBalance};
 
 const FOOT: f64 = 0.3048;
-const POUND: f64 = 0.45359237;
-const SLUG_FOOT_SQUARED: f64 = 1.3558179483314004;
 
 pub struct Aerodynamics {
-    pub mass: MassProperties,
-    pub cg: DVec3,
     area: f64,
     span: f64,
     chord: f64,
@@ -88,7 +84,6 @@ fn tuning(config: &Config, key: &str) -> Result<f64> {
 }
 
 impl Aerodynamics {
-    // Currently models the empty, unpowered aircraft in free air.
     pub fn from_data(data: &FlightData) -> Result<Self> {
         let config = &data.configuration;
         let records = air::parse(&data.air)?;
@@ -127,32 +122,7 @@ impl Aerodynamics {
         ensure!(tip >= 0.0, "wing geometry implies a negative tip chord");
         let taper = tip / root;
         let chord = 2.0 * root * (1.0 + taper + taper * taper) / (3.0 * (1.0 + taper));
-        let weight = |key| required(config, "weight_and_balance", key);
-        let mass = weight("empty_weight")? * POUND;
-        let coupled = weight("empty_weight_coupled_MOI")? * SLUG_FOOT_SQUARED;
-        let inertia = DMat3::from_cols(
-            DVec3::new(
-                weight("empty_weight_roll_MOI")? * SLUG_FOOT_SQUARED,
-                0.0,
-                -coupled,
-            ),
-            DVec3::Y * weight("empty_weight_pitch_MOI")? * SLUG_FOOT_SQUARED,
-            DVec3::new(
-                -coupled,
-                0.0,
-                weight("empty_weight_yaw_MOI")? * SLUG_FOOT_SQUARED,
-            ),
-        );
-        let reference = esp_formats::cfg::aircraft::ReferencePoints::from_config(config)?;
-        let datum = reference.datum_feet.context("missing reference datum")?;
-        let empty_cg = reference
-            .empty_cg_feet
-            .context("missing empty aircraft CG")?;
-        let cg = DVec3::new(
-            datum[0] + empty_cg[0],
-            datum[1] + empty_cg[1],
-            -datum[2] - empty_cg[2],
-        ) * FOOT;
+        let weights = WeightBalance::from_config(config)?;
         let pitch_reference = if records.iter().any(|r| r.id == 0x1534) {
             let reference = record(0x1534)?;
             ensure!(
@@ -161,41 +131,11 @@ impl Aerodynamics {
             );
             f64::from_le_bytes(reference.data[16..24].try_into().unwrap()) * FOOT
         } else {
-            let mut weight_sum = mass / POUND;
-            let mut moment = empty_cg[0] * weight_sum;
-            for (section, properties) in &config.sections {
-                if !section.is_some_and(|s| s.eq_ignore_ascii_case("weight_and_balance")) {
-                    continue;
-                }
-                for (key, value) in properties {
-                    let key_lower = key.to_ascii_lowercase();
-                    let Some(suffix) = key_lower.strip_prefix("station_load.") else {
-                        continue;
-                    };
-                    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
-                        continue;
-                    }
-                    config.value("weight_and_balance", key)?;
-                    let numbers = value
-                        .split(',')
-                        .take(4)
-                        .map(|s| s.trim().parse::<f64>())
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    ensure!(
-                        numbers.len() == 4
-                            && numbers.iter().all(|n| n.is_finite())
-                            && numbers[0] >= 0.0,
-                        "invalid station load {key}"
-                    );
-                    weight_sum += numbers[0];
-                    moment += numbers[0] * numbers[1];
-                }
-            }
             ensure!(
                 lift.gradient().abs() > 1e-10,
                 "lift curve has no linear gradient"
             );
-            (datum[0] + moment / weight_sum) * FOOT - pitch.gradient() / lift.gradient() * chord
+            weights.load(0.0, true)?.cg.x - pitch.gradient() / lift.gradient() * chord
         };
         ensure!(
             pitch_reference.is_finite(),
@@ -214,8 +154,6 @@ impl Aerodynamics {
             })
             .collect::<Result<Vec<_>>>()?;
         let result = Self {
-            mass: MassProperties::new(mass, inertia)?,
-            cg,
             area,
             span,
             chord,
@@ -265,6 +203,7 @@ impl Aerodynamics {
             1.225,
             Controls::default(),
             &vec![0.0; result.flaps.len()],
+            weights.load(0.0, false)?.cg,
         )?;
         Ok(result)
     }
@@ -276,12 +215,14 @@ impl Aerodynamics {
         density: f64,
         controls: Controls,
         flaps: &[f64],
+        cg: DVec3,
     ) -> Result<Wrench> {
         ensure!(
             velocity.is_finite()
                 && angular_velocity.is_finite()
                 && density.is_finite()
-                && density >= 0.0,
+                && density >= 0.0
+                && cg.is_finite(),
             "invalid airflow"
         );
         ensure!(
@@ -347,7 +288,7 @@ impl Aerodynamics {
         // AIR roll/pitch moments use the opposite signs to forward-right-down body axes.
         let mut moment =
             DVec3::new(-roll * self.span, -pitch * self.chord, yaw * self.span) * qbar_area;
-        let offset = -self.cg.cross(force);
+        let offset = -cg.cross(force);
         moment += DVec3::new(
             offset.x,
             offset.y - self.pitch_reference * force.z,

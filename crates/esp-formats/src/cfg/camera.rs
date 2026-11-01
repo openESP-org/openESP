@@ -91,7 +91,7 @@ fn invalid(section: &str, key: &str, value: &str) -> ValueError {
     }
 }
 
-fn parse_number(section: &str, key: &str, value: &str) -> Result<f64, ValueError> {
+pub(super) fn parse_number(section: &str, key: &str, value: &str) -> Result<f64, ValueError> {
     value
         .trim()
         .parse::<f64>()

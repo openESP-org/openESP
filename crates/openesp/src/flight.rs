@@ -5,6 +5,7 @@ use esp_sim::{
     aerodynamics::{Aerodynamics, Controls},
     atmosphere::Atmosphere,
     flight::State,
+    loading::{Loading, WeightBalance},
     variables::Variables,
 };
 use glam::{DMat3, DQuat, DVec3, EulerRot, Quat};
@@ -15,18 +16,27 @@ mod content;
 
 pub struct Flight {
     model: Aerodynamics,
+    loading: Loading,
     pub current: State,
     previous: State,
     flaps: Vec<f64>,
 }
 
 impl Flight {
-    pub fn new(data: &FlightData, knots: f64, height: f64) -> Result<Self> {
+    pub fn new(
+        data: &FlightData,
+        knots: f64,
+        height: f64,
+        fuel_fraction: f64,
+        payload: bool,
+    ) -> Result<Self> {
         ensure!(
             knots.is_finite() && knots > 0.0 && height.is_finite() && height > 0.0,
             "invalid airborne starting state"
         );
         let model = Aerodynamics::from_data(data)?;
+        let loading =
+            WeightBalance::from_config(&data.configuration)?.load(fuel_fraction, payload)?;
         Atmosphere::standard(height)?;
         let current = State {
             position: DVec3::new(0.0, 0.0, -height),
@@ -35,6 +45,7 @@ impl Flight {
         };
         Ok(Self {
             model,
+            loading,
             current,
             previous: current,
             flaps: Vec::new(),
@@ -55,7 +66,7 @@ impl Flight {
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
         let mut next = self.current;
-        next.advance(&self.model.mass, dt, DVec3::Z * 9.80665, |state| {
+        next.advance(&self.loading.mass, dt, DVec3::Z * 9.80665, |state| {
             let air = Atmosphere::standard(-state.position.z)?;
             self.model.forces(
                 state.air_velocity(DVec3::ZERO),
@@ -63,6 +74,7 @@ impl Flight {
                 air.density,
                 controls,
                 &self.flaps,
+                self.loading.cg,
             )
         })?;
         ensure!(
@@ -83,8 +95,29 @@ impl Flight {
         let orientation =
             DQuat::from_mat3(&(basis * DMat3::from_quat(state.orientation) * basis.transpose()))
                 .as_quat();
-        let origin = basis * (state.position - state.orientation * self.model.cg);
+        let origin = basis * (state.position - state.orientation * self.loading.cg);
         (origin, orientation)
+    }
+
+    pub fn publish_loading(&self, variables: &mut Variables) {
+        variables.set_number("TOTAL WEIGHT", "kilograms", self.loading.mass.kilograms());
+        variables.set_number("EMPTY WEIGHT", "kilograms", self.loading.empty_kilograms);
+        variables.set_number("FUEL TOTAL QUANTITY", "gallons", self.loading.fuel_gallons);
+        variables.set_number(
+            "FUEL TOTAL CAPACITY",
+            "gallons",
+            self.loading.fuel_capacity_gallons,
+        );
+        variables.set_number(
+            "FUEL TOTAL QUANTITY WEIGHT",
+            "pounds",
+            self.loading.fuel_gallons * self.loading.fuel_pounds_per_gallon,
+        );
+        variables.set_number(
+            "FUEL WEIGHT PER GALLON",
+            "pounds",
+            self.loading.fuel_pounds_per_gallon,
+        );
     }
 
     pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
@@ -153,7 +186,7 @@ mod tests {
     fn transforms_aircraft_about_its_cg_and_preserves_simulation_during_interpolation() {
         for path in content::aircraft_paths() {
             let data = FlightData::load(&path, 0).unwrap();
-            let mut flight = Flight::new(&data, 100.0, 1000.0).unwrap();
+            let mut flight = Flight::new(&data, 100.0, 1000.0, 0.0, false).unwrap();
             let mut variables = Variables::default();
             variables
                 .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
@@ -171,7 +204,7 @@ mod tests {
                 let mut state = flight.sample(alpha).unwrap();
                 state.orientation = DQuat::from_euler(EulerRot::ZYX, 0.4, 0.2, 0.3);
                 let (origin, orientation) = flight.pose(&state);
-                let cg = flight.model.cg;
+                let cg = flight.loading.cg;
                 let rendered_cg = DVec3::new(cg.y, -cg.z, cg.x);
                 let expected = DVec3::new(state.position.y, -state.position.z, state.position.x);
                 assert!(
@@ -193,8 +226,8 @@ mod tests {
     fn altitude_changes_forces_and_indicated_airspeed() {
         for path in content::aircraft_paths() {
             let data = FlightData::load(&path, 0).unwrap();
-            let mut low = Flight::new(&data, 150.0, 1000.0).unwrap();
-            let mut high = Flight::new(&data, 150.0, 10_000.0).unwrap();
+            let mut low = Flight::new(&data, 150.0, 1000.0, 0.0, false).unwrap();
+            let mut high = Flight::new(&data, 150.0, 10_000.0, 0.0, false).unwrap();
             let mut variables = Variables::default();
             variables
                 .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
@@ -222,6 +255,55 @@ mod tests {
                 .number()
                 .unwrap();
             assert!((pressure - 264.999).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+    fn configured_loading_changes_flight_response_and_weight_variables() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut empty = Flight::new(&data, 150.0, 1000.0, 0.0, false).unwrap();
+            let mut full = Flight::new(&data, 150.0, 1000.0, 1.0, true).unwrap();
+            assert!(full.loading.mass.kilograms() > empty.loading.mass.kilograms());
+            assert!(full.loading.payload_kilograms > 0.0 && full.loading.fuel_gallons > 0.0);
+            assert!(!full.loading.cg.abs_diff_eq(empty.loading.cg, 1e-6));
+            let mut variables = Variables::default();
+            variables
+                .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
+                .unwrap();
+            for name in [
+                "ELEVATOR DEFLECTION PCT",
+                "AILERON LEFT DEFLECTION PCT",
+                "RUDDER DEFLECTION PCT",
+            ] {
+                variables.set_number(name, "percent", 0.0);
+            }
+            full.publish_loading(&mut variables);
+            let total = variables
+                .read(&Reference::new('A', "TOTAL WEIGHT", Some("pounds")))
+                .unwrap()
+                .number()
+                .unwrap();
+            let fuel = variables
+                .read(&Reference::new(
+                    'A',
+                    "FUEL TOTAL QUANTITY WEIGHT",
+                    Some("kilograms"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!((total * 0.45359237 - full.loading.mass.kilograms()).abs() < 1e-8);
+            assert!(
+                (fuel + full.loading.payload_kilograms + full.loading.empty_kilograms
+                    - full.loading.mass.kilograms())
+                .abs()
+                    < 1e-8
+            );
+            empty.advance(1.0 / 60.0, &mut variables).unwrap();
+            full.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert!(full.current.velocity.z > empty.current.velocity.z);
         }
     }
 
