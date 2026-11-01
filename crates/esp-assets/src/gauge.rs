@@ -88,6 +88,7 @@ struct Canvas {
     target: (u32, u32),
     position: (i64, i64),
     layers: Vec<Layer>,
+    cached: Option<RgbaImage>,
 }
 
 struct Layer {
@@ -283,6 +284,7 @@ impl PanelImage {
         }
         let mut changed = false;
         for gauge in &mut self.gauges {
+            let mut dirty = false;
             for layer in &mut gauge.layers {
                 let transform = rotation::transform(&layer.motion, &self.conditions);
                 let visible = transform.is_some()
@@ -297,12 +299,16 @@ impl PanelImage {
                                 self.conditions[*index].value == Some(*expected)
                             }
                         });
-                changed |= visible != layer.visible;
+                dirty |= visible != layer.visible;
                 if let Some(transform) = transform {
-                    changed |= visible && layer.transform != transform;
+                    dirty |= visible && layer.transform != transform;
                     layer.transform = transform;
                 }
                 layer.visible = visible;
+            }
+            if dirty {
+                gauge.cached = None;
+                changed = true;
             }
         }
         if changed {
@@ -312,10 +318,13 @@ impl PanelImage {
     }
 
     fn compose(&mut self) {
-        for pixel in self.image.pixels_mut() {
-            *pixel = self.background;
-        }
-        for gauge in &self.gauges {
+        let mut dirty: Option<[i64; 4]> = None;
+        let width = i64::from(self.image.width());
+        let height = i64::from(self.image.height());
+        for gauge in &mut self.gauges {
+            if gauge.cached.is_some() {
+                continue;
+            }
             let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
             for layer in &gauge.layers {
                 if layer.visible {
@@ -323,7 +332,57 @@ impl PanelImage {
                 }
             }
             let scaled = resize(&art, gauge.target.0, gauge.target.1, FilterType::Triangle);
-            overlay(&mut self.image, &scaled, gauge.position.0, gauge.position.1);
+            gauge.cached = Some(scaled);
+            let bounds = [
+                gauge.position.0.clamp(0, width),
+                gauge.position.1.clamp(0, height),
+                gauge
+                    .position
+                    .0
+                    .saturating_add(i64::from(gauge.target.0))
+                    .clamp(0, width),
+                gauge
+                    .position
+                    .1
+                    .saturating_add(i64::from(gauge.target.1))
+                    .clamp(0, height),
+            ];
+            if bounds[0] < bounds[2] && bounds[1] < bounds[3] {
+                dirty = Some(match dirty {
+                    Some(previous) => [
+                        previous[0].min(bounds[0]),
+                        previous[1].min(bounds[1]),
+                        previous[2].max(bounds[2]),
+                        previous[3].max(bounds[3]),
+                    ],
+                    None => bounds,
+                });
+            }
+        }
+        let Some([left, top, right, bottom]) = dirty else {
+            return;
+        };
+        for y in top..bottom {
+            for x in left..right {
+                self.image.put_pixel(x as u32, y as u32, self.background);
+            }
+        }
+        for gauge in &self.gauges {
+            let x = left.max(gauge.position.0);
+            let y = top.max(gauge.position.1);
+            let end_x = right.min(gauge.position.0.saturating_add(i64::from(gauge.target.0)));
+            let end_y = bottom.min(gauge.position.1.saturating_add(i64::from(gauge.target.1)));
+            if x >= end_x || y >= end_y {
+                continue;
+            }
+            let image = image::imageops::crop_imm(
+                gauge.cached.as_ref().expect("gauge image was composed"),
+                (x - gauge.position.0) as u32,
+                (y - gauge.position.1) as u32,
+                (end_x - x) as u32,
+                (end_y - y) as u32,
+            );
+            overlay(&mut self.image, &*image, x, y);
         }
     }
 }
@@ -612,6 +671,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     (gauge.y * f64::from(height) / layout_height).round() as i64,
                 ),
                 layers,
+                cached: None,
             };
             let mut raw_areas = Vec::new();
             collect_mouse_areas(document.root(), 0.0, 0.0, &mut raw_areas)?;
@@ -1006,6 +1066,43 @@ mod tests {
         host.0 = 1.0;
         assert!(image.update(&mut host));
         assert_eq!(image.image.get_pixel(1, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn repaint_preserves_overlapping_gauges_and_clips_offscreen_artwork() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=4,1\npixel_size=4,1\ntexture=$screen\nbackground_color=25,25,25\ngauge00=example!back,-1,0\ngauge01=example!front,0,0").unwrap();
+        std::fs::write(module.join("back.xml"), r#"<Gauge><Size X="3" Y="1"/><Element><Visibility>(L:POWER,bool)</Visibility><Image Name="back.bmp"/></Element></Gauge>"#).unwrap();
+        std::fs::write(
+            module.join("front.xml"),
+            r#"<Gauge><Size X="3" Y="1"/><Image Name="front.bmp" Transparent="True"/></Gauge>"#,
+        )
+        .unwrap();
+        for (name, pixels) in [
+            ("back.bmp", [255, 0, 0, 255, 0, 0, 255, 0, 0]),
+            ("front.bmp", [0, 0, 0, 0, 0, 255, 0, 0, 0]),
+        ] {
+            let mut bytes = Vec::new();
+            image::codecs::bmp::BmpEncoder::new(&mut bytes)
+                .encode(&pixels, 3, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            std::fs::write(module.join(name), bytes).unwrap();
+        }
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(1.0);
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(image.image.get_pixel(1, 0).0, [0, 0, 255, 255]);
+        assert_eq!(image.image.get_pixel(3, 0).0, [25, 25, 25, 255]);
+        host.0 = 0.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(0, 0).0, [25, 25, 25, 255]);
+        assert_eq!(image.image.get_pixel(1, 0).0, [0, 0, 255, 255]);
+        assert!(!image.update(&mut host));
     }
 
     #[test]
