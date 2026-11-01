@@ -521,3 +521,39 @@ fn original_efis_update_initializes_once() {
         "no original EFIS initialization update verified"
     );
 }
+
+#[test]
+#[ignore = "requires original XML EFIS gauges and OPENESP_AIRCRAFT_PATHS"]
+fn original_efis_standard_pressure_click_emits_event() {
+    use esp_assets::gauge::MouseEvent;
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        for panel in aircraft.panel_images.values() {
+            for (index, area) in panel.mouse_areas.iter().enumerate() {
+                let mut variables = Variables::default();
+                if panel
+                    .mouse_event(
+                        MouseEvent::LeftSingle,
+                        &[index],
+                        [area.x, area.y],
+                        &mut variables,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+                if variables.drain_events().any(|(name, value)| {
+                    name == "BAROMETRIC_STD_PRESSURE" && value == Value::Number(1.0)
+                }) {
+                    verified += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        verified > 0,
+        "no original EFIS standard-pressure button verified"
+    );
+}

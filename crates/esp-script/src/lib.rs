@@ -58,6 +58,7 @@ impl Reference {
     }
 
     fn parse(text: &str) -> Result<Self, Error> {
+        let text = text.trim();
         let (category, name) = text
             .split_once(':')
             .ok_or_else(|| Error::Unsupported(text.into()))?;
@@ -187,7 +188,7 @@ impl Program {
                     instructions.push(Instruction::Push(Value::Text((*text).into())))
                 }
                 Token::Variable(variable) => {
-                    instructions.push(if let Some(variable) = variable.strip_prefix('>') {
+                    instructions.push(if let Some(variable) = variable.trim().strip_prefix('>') {
                         Instruction::Write(Reference::parse(variable)?)
                     } else {
                         Instruction::Read(Reference::parse(variable)?)
@@ -498,6 +499,27 @@ mod tests {
                 .evaluate(&mut host)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn accepts_whitespace_inside_variable_references() {
+        let mut host = Variables::default();
+        Program::compile(
+            "1 (> K:BAROMETRIC_STD_PRESSURE,number) 42 ( > L:VALUE, number ) ( L:value, number )",
+        )
+        .unwrap()
+        .evaluate(&mut host)
+        .unwrap();
+        assert_eq!(
+            host.0[&Reference::new('K', "BAROMETRIC_STD_PRESSURE", Some("number"))],
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            host.0[&Reference::new('L', "VALUE", Some("number"))],
+            Value::Number(42.0)
+        );
+        assert!(Program::compile("( A B:VALUE, number )").is_err());
+        assert!(Program::compile("( > :VALUE )").is_err());
     }
 
     #[test]
