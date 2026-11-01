@@ -27,6 +27,12 @@ pub struct Model {
     pub lods: Vec<Lod>,
     pub animations: Vec<animation::Animation>,
     pub visibility: Vec<animation::Visibility>,
+    pub mouse_rectangles: Vec<ModelMouseRectangle>,
+}
+
+pub struct ModelMouseRectangle {
+    pub flags: u32,
+    pub key_event: Option<u32>,
 }
 
 pub struct Node {
@@ -216,6 +222,14 @@ impl Model {
         let parents = mdl::scene::parents(&data.nodes)?;
         let animations = animation::animations(&data)?;
         let visibility = animation::visibility(&data)?;
+        let mouse_rectangles = data
+            .mouse_rectangles
+            .iter()
+            .map(|rectangle| ModelMouseRectangle {
+                flags: rectangle.header.flags,
+                key_event: rectangle.key_event(),
+            })
+            .collect::<Vec<_>>();
         let track_ids = animations
             .iter()
             .flat_map(|a| &a.tracks)
@@ -280,6 +294,14 @@ impl Model {
                     bail!("unsupported mesh primitive {}", part.primitive_type);
                 }
                 let geometry = data.part_geometry(part)?;
+                anyhow::ensure!(
+                    part.mouse_rectangle == -1
+                        || usize::try_from(part.mouse_rectangle)
+                            .ok()
+                            .is_some_and(|index| index < mouse_rectangles.len()),
+                    "invalid mouse rectangle reference {}",
+                    part.mouse_rectangle
+                );
                 if !geometry.indices.len().is_multiple_of(3) {
                     bail!("incomplete triangle list");
                 }
@@ -314,6 +336,7 @@ impl Model {
             lods,
             animations,
             visibility,
+            mouse_rectangles,
         })
     }
 
@@ -382,6 +405,7 @@ mod tests {
             lods: vec![],
             animations: vec![],
             visibility: vec![],
+            mouse_rectangles: vec![],
         };
         assert!(
             model.transforms().unwrap()[0]

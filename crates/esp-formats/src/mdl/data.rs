@@ -1,5 +1,5 @@
 use super::{
-    Chunk, Error, animation, attachment, geometry, material, parse_chunks, scene, visibility,
+    Chunk, Error, animation, attachment, geometry, material, mouse, parse_chunks, scene, visibility,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -24,6 +24,7 @@ pub struct ModelData<'a> {
     pub platforms: Vec<attachment::Platform<'a>>,
     pub attachpoints: Vec<attachment::AttachPoint<'a>>,
     pub attached_objects: Vec<attachment::AttachedObject<'a>>,
+    pub mouse_rectangles: Vec<mouse::Rectangle<'a>>,
     pub unknown_platform_sections: Vec<Chunk<'a>>,
     pub unknown_attachpoint_sections: Vec<Chunk<'a>>,
     pub unknown: Vec<Chunk<'a>>,
@@ -216,6 +217,8 @@ impl<'a> ModelData<'a> {
         }
         let mut result = Self::default();
         let mut seen = HashSet::new();
+        let mut mouse_data = None;
+        let mut mouse_index = None;
         for child in parse_chunks(chunk.data)? {
             let known = matches!(
                 &child.id,
@@ -235,6 +238,8 @@ impl<'a> ModelData<'a> {
                     | b"VISL"
                     | b"SGVL"
                     | b"ATTO"
+                    | b"MREC"
+                    | b"MREI"
             );
             if known && !seen.insert(child.id) {
                 return Err(Error::DuplicateSection(child.id));
@@ -252,6 +257,8 @@ impl<'a> ModelData<'a> {
                 b"VISL" => result.visibility = visibility::conditions(child.data)?,
                 b"SGVL" => result.visibility_links = scene::visibility_links(child.data)?,
                 b"ATTO" => result.attached_objects = attachment::attached_objects(child.data)?,
+                b"MREC" => mouse_data = Some(child.data),
+                b"MREI" => mouse_index = Some(child.data),
                 b"VERB" => {
                     for buffer in parse_chunks(child.data)? {
                         match &buffer.id {
@@ -299,6 +306,12 @@ impl<'a> ModelData<'a> {
                 _ => result.unknown.push(child),
             }
         }
+        result.mouse_rectangles = match (mouse_data, mouse_index) {
+            (Some(data), Some(index)) => mouse::rectangles(data, index)?,
+            (None, None) => Vec::new(),
+            (Some(_), None) => return Err(Error::MissingSection(*b"MREI")),
+            (None, Some(_)) => return Err(Error::MissingSection(*b"MREC")),
+        };
         Ok(result)
     }
 }
@@ -430,6 +443,30 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn requires_paired_mouse_sections_in_either_order() {
+        for (first, second) in [(b"MREC", b"MREI"), (b"MREI", b"MREC")] {
+            let bytes = chunk(first, &[]);
+            assert!(
+                matches!(ModelData::parse(&Chunk { id: *b"MDLD", data: &bytes }), Err(Error::MissingSection(id)) if id == *second)
+            );
+            let bytes = [chunk(first, &[]), chunk(second, &[])].concat();
+            assert!(
+                ModelData::parse(&Chunk {
+                    id: *b"MDLD",
+                    data: &bytes
+                })
+                .unwrap()
+                .mouse_rectangles
+                .is_empty()
+            );
+            let bytes = [bytes, chunk(first, &[])].concat();
+            assert!(
+                matches!(ModelData::parse(&Chunk { id: *b"MDLD", data: &bytes }), Err(Error::DuplicateSection(id)) if id == *first)
+            );
+        }
     }
 
     #[test]

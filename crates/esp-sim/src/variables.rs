@@ -3,20 +3,25 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Variables {
-    values: HashMap<Reference, Value>,
-    locals: HashMap<(char, String), Value>,
+    values: HashMap<(char, String), Variable>,
     events: Vec<(String, Value)>,
+}
+
+struct Variable {
+    unit: Option<String>,
+    value: Value,
 }
 
 impl Variables {
     pub fn set(&mut self, category: char, name: &str, unit: Option<&str>, value: Value) {
         let reference = Reference::new(category, name, unit);
-        if reference.category == 'L' || reference.category == 'G' {
-            self.locals
-                .insert((reference.category, reference.name), value);
-        } else {
-            self.values.insert(reference, value);
-        }
+        self.values.insert(
+            (reference.category, reference.name),
+            Variable {
+                unit: reference.unit,
+                value,
+            },
+        );
     }
 
     pub fn set_number(&mut self, name: &str, unit: &str, value: f64) {
@@ -34,22 +39,50 @@ impl Variables {
             .collect()
     }
 
+    pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
+        let name = match id {
+            0x10018 => "STROBES_TOGGLE",
+            0x100d7 => "LANDING_LIGHTS_TOGGLE",
+            0x100d8 => "PARKING_BRAKES",
+            0x100fa => "SPOILERS_SET",
+            0x10142 => "PITOT_HEAT_TOGGLE",
+            0x10157 => "HEADING_BUG_INC",
+            0x10158 => "HEADING_BUG_DEC",
+            0x102bf => "TOGGLE_BEACON_LIGHTS",
+            0x102c0 => "TOGGLE_TAXI_LIGHTS",
+            0x102c1 => "TOGGLE_MASTER_BATTERY",
+            0x102f0 => "TOGGLE_FLIGHT_DIRECTOR",
+            0x102f5 => "TOGGLE_AVIONICS_MASTER",
+            0x1034b => "TOGGLE_NAV_LIGHTS",
+            _ => return Err(Error::Unsupported(format!("key event {id:#x}"))),
+        };
+        self.dispatch_event(name, value)
+    }
+
+    fn toggle(&mut self, name: &str) -> Result<(), Error> {
+        let reference = Reference::new('A', name, Some("bool"));
+        let active = if self.values.contains_key(&('A', reference.name.clone())) {
+            self.read(&reference)?.number()?
+        } else {
+            0.0
+        };
+        self.set_number(name, "bool", f64::from(active == 0.0));
+        Ok(())
+    }
+
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
         match name {
-            "TOGGLE_FLIGHT_DIRECTOR" => {
-                let reference =
-                    Reference::new('A', "AUTOPILOT FLIGHT DIRECTOR ACTIVE", Some("bool"));
-                let active = self
-                    .values
-                    .get(&reference)
-                    .map(Value::number)
-                    .transpose()?
-                    .unwrap_or(0.0);
-                self.values
-                    .insert(reference, Value::Number(f64::from(active == 0.0)));
-                Ok(())
-            }
+            "TOGGLE_FLIGHT_DIRECTOR" => self.toggle("AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
+            "TOGGLE_MASTER_BATTERY" => self.toggle("ELECTRICAL MASTER BATTERY"),
+            "TOGGLE_AVIONICS_MASTER" => self.toggle("AVIONICS MASTER SWITCH"),
+            "TOGGLE_BEACON_LIGHTS" => self.toggle("LIGHT BEACON"),
+            "TOGGLE_TAXI_LIGHTS" => self.toggle("LIGHT TAXI"),
+            "TOGGLE_NAV_LIGHTS" => self.toggle("LIGHT NAV"),
+            "STROBES_TOGGLE" => self.toggle("LIGHT STROBE"),
+            "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
+            "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
+            "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
             "SPOILERS_SET" => {
                 self.set_number(
                     "SPOILERS HANDLE POSITION",
@@ -63,16 +96,18 @@ impl Variables {
                 let heading = if name == "HEADING_BUG_SET" {
                     value
                 } else {
-                    let current = self
-                        .values
-                        .get(&reference)
-                        .map(Value::number)
-                        .transpose()?
-                        .unwrap_or(0.0);
+                    let current = if self.values.contains_key(&('A', reference.name.clone())) {
+                        self.read(&reference)?.number()?
+                    } else {
+                        0.0
+                    };
                     current + if name == "HEADING_BUG_INC" { 1.0 } else { -1.0 }
                 };
-                self.values
-                    .insert(reference, Value::Number(heading.rem_euclid(360.0)));
+                self.set_number(
+                    "AUTOPILOT HEADING LOCK DIR",
+                    "degrees",
+                    heading.rem_euclid(360.0),
+                );
                 Ok(())
             }
             _ => Err(Error::Unsupported(format!("event {name}"))),
@@ -82,26 +117,47 @@ impl Variables {
 
 impl Host for Variables {
     fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
-        if reference.category == 'L' || reference.category == 'G' {
-            return Ok(self
-                .locals
-                .get(&(reference.category, reference.name.clone()))
-                .cloned()
-                .unwrap_or(Value::Number(0.0)));
-        }
-        self.values.get(reference).cloned().ok_or_else(|| {
-            Error::Variable(format!(
+        let local = reference.category == 'L' || reference.category == 'G';
+        let Some(variable) = self
+            .values
+            .get(&(reference.category, reference.name.clone()))
+        else {
+            if local {
+                return Ok(Value::Number(0.0));
+            }
+            return Err(Error::Variable(format!(
                 "{}:{}, {}",
                 reference.category,
                 reference.name,
                 reference.unit.as_deref().unwrap_or("")
+            )));
+        };
+        if local || variable.unit == reference.unit {
+            return Ok(variable.value.clone());
+        }
+        super::units::convert(
+            &variable.value,
+            variable.unit.as_deref(),
+            reference.unit.as_deref(),
+        )
+        .ok_or_else(|| {
+            Error::Variable(format!(
+                "{}:{} cannot convert {} to {}",
+                reference.category,
+                reference.name,
+                variable.unit.as_deref().unwrap_or("unitless"),
+                reference.unit.as_deref().unwrap_or("unitless")
             ))
         })
     }
     fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
         if reference.category == 'L' || reference.category == 'G' {
-            self.locals
-                .insert((reference.category, reference.name.clone()), value);
+            self.set(
+                reference.category,
+                &reference.name,
+                reference.unit.as_deref(),
+                value,
+            );
             return Ok(());
         }
         if reference.category == 'K' {
@@ -119,6 +175,110 @@ impl Host for Variables {
 mod tests {
     use super::*;
     use esp_script::Program;
+
+    #[test]
+    fn shares_values_across_compatible_units() {
+        let mut variables = Variables::default();
+        let read = |variables: &mut Variables, unit| {
+            variables
+                .read(&Reference::new('A', "BRAKE PARKING POSITION", Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables.set_number("BRAKE PARKING POSITION", "percent", 100.0);
+        assert_eq!(read(&mut variables, "bool"), 1.0);
+        assert_eq!(read(&mut variables, "percent over 100"), 1.0);
+        variables
+            .dispatch_key_event(0x100d8, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "percent"), 0.0);
+        variables
+            .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "percent"), 100.0);
+        assert_eq!(read(&mut variables, "boolean"), 1.0);
+        variables.set_number(
+            "AUTOPILOT HEADING LOCK DIR",
+            "radians",
+            std::f64::consts::PI,
+        );
+        variables
+            .dispatch_event("HEADING_BUG_INC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "AUTOPILOT HEADING LOCK DIR",
+                    Some("degrees")
+                ))
+                .unwrap(),
+            Value::Number(181.0)
+        );
+        assert!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "BRAKE PARKING POSITION",
+                    Some("degrees")
+                ))
+                .is_err()
+        );
+        assert!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "BRAKE PARKING POSITION",
+                    Some("unknown")
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn numeric_and_script_events_share_switch_state() {
+        for (id, event, name) in [
+            (
+                0x102c1,
+                "TOGGLE_MASTER_BATTERY",
+                "ELECTRICAL MASTER BATTERY",
+            ),
+            (0x102f5, "TOGGLE_AVIONICS_MASTER", "AVIONICS MASTER SWITCH"),
+            (0x102bf, "TOGGLE_BEACON_LIGHTS", "LIGHT BEACON"),
+            (0x102c0, "TOGGLE_TAXI_LIGHTS", "LIGHT TAXI"),
+            (0x1034b, "TOGGLE_NAV_LIGHTS", "LIGHT NAV"),
+            (0x10018, "STROBES_TOGGLE", "LIGHT STROBE"),
+            (0x100d7, "LANDING_LIGHTS_TOGGLE", "LIGHT LANDING"),
+            (0x10142, "PITOT_HEAT_TOGGLE", "PITOT HEAT"),
+            (0x100d8, "PARKING_BRAKES", "BRAKE PARKING POSITION"),
+            (
+                0x102f0,
+                "TOGGLE_FLIGHT_DIRECTOR",
+                "AUTOPILOT FLIGHT DIRECTOR ACTIVE",
+            ),
+        ] {
+            let mut variables = Variables::default();
+            let reference = Reference::new('A', name, Some("bool"));
+            variables
+                .dispatch_key_event(id, Value::Number(0.0))
+                .unwrap();
+            assert_eq!(variables.read(&reference).unwrap(), Value::Number(1.0));
+            variables.dispatch_event(event, Value::Number(0.0)).unwrap();
+            assert_eq!(variables.read(&reference).unwrap(), Value::Number(0.0));
+            assert!(
+                variables
+                    .dispatch_key_event(id, Value::Number(f64::NAN))
+                    .is_err()
+            );
+            assert_eq!(variables.read(&reference).unwrap(), Value::Number(0.0));
+        }
+        assert!(
+            Variables::default()
+                .dispatch_key_event(u32::MAX, Value::Number(0.0))
+                .is_err()
+        );
+    }
 
     #[test]
     fn separates_local_and_gauge_register_namespaces() {

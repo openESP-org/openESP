@@ -329,6 +329,7 @@ mod tests {
                     ],
                 }],
             }],
+            mouse_rectangles: vec![],
             visibility: vec![esp_assets::animation::Visibility {
                 default_visible: true,
                 source: Some(Source::Code {

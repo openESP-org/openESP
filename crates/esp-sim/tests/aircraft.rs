@@ -8,6 +8,98 @@ mod content;
 struct PoseHost {
     door: f64,
 }
+
+#[test]
+#[ignore = "requires original MDL cockpit controls and OPENESP_AIRCRAFT_PATHS"]
+fn original_model_click_changes_switch_state_and_animation() {
+    use esp_assets::gauge::MouseEvent;
+    use esp_sim::{interaction::model_mouse, picking::pick, variables::Variables};
+    use glam::Vec3;
+
+    let mut verified = std::collections::HashSet::new();
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        let model = aircraft.interior.as_ref().unwrap();
+        let eye = aircraft.eyepoint.unwrap();
+        for (id, name) in [
+            (0x102c1, "ELECTRICAL MASTER BATTERY"),
+            (0x102f0, "AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
+            (0x100d8, "BRAKE PARKING POSITION"),
+        ] {
+            let Some(index) = model
+                .mouse_rectangles
+                .iter()
+                .position(|r| r.key_event == Some(id))
+            else {
+                continue;
+            };
+            let mut variables = Variables::default();
+            variables.set_number(name, "bool", 0.0);
+            let mut state = ModelState::new(model).unwrap();
+            state.update(model, &mut variables, 0.0).unwrap();
+            let before = state.transforms.clone();
+            let reachable = model.lods[0]
+                .meshes
+                .iter()
+                .filter(|mesh| mesh.mouse_rectangle == index as i32)
+                .any(|mesh| {
+                    mesh.indices.as_chunks::<3>().0.iter().any(|triangle| {
+                        let target = triangle
+                            .iter()
+                            .map(|&i| {
+                                state.transforms[mesh.node].transform_point3(Vec3::from_array(
+                                    mesh.vertices[i as usize].position,
+                                ))
+                            })
+                            .sum::<Vec3>()
+                            / 3.0;
+                        let Some(direction) = (target - eye).try_normalize() else {
+                            return false;
+                        };
+                        pick(model, &state, -eye, Vec3::ZERO, direction).is_some_and(|hit| {
+                            model.lods[0].meshes[hit.mesh].mouse_rectangle == index as i32
+                        })
+                    })
+                });
+            assert!(reachable, "{}: {name} is occluded", aircraft.title);
+            assert!(model_mouse(model, index, MouseEvent::LeftSingle, &mut variables).unwrap());
+            assert_eq!(
+                variables
+                    .read(&Reference::new('A', name, Some("bool")))
+                    .unwrap(),
+                Value::Number(1.0)
+            );
+            state.update(model, &mut variables, 1.0).unwrap();
+            assert!(
+                before
+                    .iter()
+                    .zip(&state.transforms)
+                    .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5)),
+                "{}: {name} did not animate",
+                aircraft.title
+            );
+            assert!(!model_mouse(model, index, MouseEvent::LeftRelease, &mut variables).unwrap());
+            assert!(!model_mouse(model, index, MouseEvent::DownRepeat, &mut variables).unwrap());
+            eprintln!(
+                "{}: picked MDL {name}, updated state and animation",
+                aircraft.title
+            );
+            verified.insert(id);
+        }
+    }
+    assert!(
+        verified.contains(&0x102c1),
+        "no original battery switch verified"
+    );
+    assert!(
+        verified.contains(&0x102f0),
+        "no original flight director verified"
+    );
+    assert!(
+        verified.contains(&0x100d8),
+        "no original parking brake verified"
+    );
+}
 impl Host for PoseHost {
     fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
         Ok(Value::Number(if reference.name == "EXIT OPEN:0" {

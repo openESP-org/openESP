@@ -3,7 +3,7 @@ use clap::Parser;
 use esp_assets::{Aircraft, gauge::MouseEvent};
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
-use esp_sim::{animation::ModelState, picking, variables::Variables};
+use esp_sim::{animation::ModelState, interaction, picking, variables::Variables};
 use glam::{DVec3, Vec3};
 use std::{
     collections::HashSet,
@@ -86,10 +86,16 @@ struct App {
     mouse_look: bool,
     cursor: Option<(f64, f64)>,
     pressed_panel: Option<(String, Vec<usize>, [f64; 2])>,
+    pressed_model: Option<usize>,
     repeat_at: Option<Instant>,
     last_frame: Instant,
     frames: u64,
     error: Option<anyhow::Error>,
+}
+
+enum CockpitTarget {
+    Model(usize),
+    Panel(String, f64, f64),
 }
 
 impl App {
@@ -110,7 +116,7 @@ impl App {
         }
     }
 
-    fn cockpit_target(&self) -> Option<(String, f64, f64)> {
+    fn cockpit_target(&self) -> Option<CockpitTarget> {
         let (cx, cy) = self.cursor?;
         let size = self.window.as_ref()?.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -127,6 +133,9 @@ impl App {
         let aircraft_to_camera = (renderer.aircraft_origin - self.camera.position).as_vec3();
         let hit = picking::pick(interior, state, aircraft_to_camera, ray_origin, ray_dir)?;
         let mesh = &interior.lods[0].meshes[hit.mesh];
+        if let Ok(index) = usize::try_from(mesh.mouse_rectangle) {
+            return Some(CockpitTarget::Model(index));
+        }
         let key = interior
             .materials
             .get(mesh.material)?
@@ -134,7 +143,7 @@ impl App {
             .as_ref()?
             .to_ascii_uppercase();
         let panel = aircraft.panel_images.get(&key)?;
-        Some((
+        Some(CockpitTarget::Panel(
             key,
             f64::from(hit.uv[0].rem_euclid(1.0)) * f64::from(panel.image.width()),
             f64::from(hit.uv[1].rem_euclid(1.0)) * f64::from(panel.image.height()),
@@ -142,11 +151,37 @@ impl App {
     }
 
     fn cockpit_mouse(&mut self, event: MouseEvent) -> Result<()> {
+        let hit = if event == MouseEvent::LeftRelease {
+            self.repeat_at = None;
+            self.pressed_model.take().map(CockpitTarget::Model)
+        } else {
+            self.cockpit_target()
+        };
+        let held_event = matches!(event, MouseEvent::LeftDrag | MouseEvent::DownRepeat);
+        if held_event && self.pressed_model.is_some() {
+            if let Some(CockpitTarget::Model(index)) = hit
+                && self.pressed_model == Some(index)
+            {
+                return self.model_mouse(index, event);
+            }
+            return Ok(());
+        }
+        let panel_hit = match hit {
+            Some(CockpitTarget::Model(index)) if !held_event => {
+                if event == MouseEvent::LeftSingle {
+                    self.pressed_model = Some(index);
+                    self.repeat_at = Some(Instant::now() + std::time::Duration::from_millis(400));
+                }
+                return self.model_mouse(index, event);
+            }
+            Some(CockpitTarget::Panel(name, x, y)) => Some((name, x, y)),
+            _ => None,
+        };
         let target = if event == MouseEvent::LeftRelease {
             self.repeat_at = None;
             self.pressed_panel.take()
         } else if matches!(event, MouseEvent::LeftDrag | MouseEvent::DownRepeat) {
-            let Some((name, x, y)) = self.cockpit_target() else {
+            let Some((name, x, y)) = panel_hit else {
                 return Ok(());
             };
             let Some((captured, areas, position)) = &mut self.pressed_panel else {
@@ -170,7 +205,7 @@ impl App {
             }
             Some((name, areas, *position))
         } else {
-            if let Some((name, x, y)) = self.cockpit_target() {
+            if let Some((name, x, y)) = panel_hit {
                 let panel = self
                     .aircraft
                     .as_ref()
@@ -204,6 +239,16 @@ impl App {
             eprintln!("cockpit event: {error}");
         }
         result?;
+        Ok(())
+    }
+
+    fn model_mouse(&mut self, index: usize, event: MouseEvent) -> Result<()> {
+        let model = self
+            .aircraft
+            .as_ref()
+            .and_then(|aircraft| aircraft.interior.as_ref())
+            .context("cockpit model is absent")?;
+        interaction::model_mouse(model, index, event, &mut self.variables)?;
         Ok(())
     }
 
@@ -537,6 +582,7 @@ fn main() -> Result<()> {
         mouse_look: false,
         cursor: None,
         pressed_panel: None,
+        pressed_model: None,
         repeat_at: None,
         last_frame: Instant::now(),
         frames: 0,
@@ -578,6 +624,7 @@ mod tests {
             lods: vec![],
             animations: vec![],
             visibility: vec![],
+            mouse_rectangles: vec![],
         };
         let (_, loaded) = mpsc::channel();
         let mut app = App {
@@ -604,6 +651,7 @@ mod tests {
             mouse_look: true,
             cursor: None,
             pressed_panel: Some(("$TEST".into(), areas, [0.5, 0.5])),
+            pressed_model: None,
             repeat_at: Some(Instant::now()),
             last_frame: Instant::now(),
             frames: 0,
@@ -631,5 +679,22 @@ mod tests {
                 .unwrap(),
             Value::Number(1.0)
         );
+        let mut model = empty_model();
+        model
+            .mouse_rectangles
+            .push(esp_assets::ModelMouseRectangle {
+                flags: 1 << 17,
+                key_event: Some(0x102f0),
+            });
+        app.aircraft.as_mut().unwrap().interior = Some(model);
+        app.pressed_model = Some(0);
+        app.repeat_at = Some(Instant::now());
+        app.cockpit_mouse(MouseEvent::LeftRelease).unwrap();
+        assert!(app.pressed_model.is_none());
+        assert!(app.repeat_at.is_none());
+        let reference = Reference::new('A', "AUTOPILOT FLIGHT DIRECTOR ACTIVE", Some("bool"));
+        assert_eq!(app.variables.read(&reference).unwrap(), Value::Number(1.0));
+        app.cockpit_mouse(MouseEvent::LeftRelease).unwrap();
+        assert_eq!(app.variables.read(&reference).unwrap(), Value::Number(1.0));
     }
 }
