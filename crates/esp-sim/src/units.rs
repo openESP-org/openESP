@@ -3,7 +3,7 @@ use esp_script::Value;
 pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Value> {
     let (from, to) = (from?, to?);
     let unit = |name| match name {
-        "bool" | "boolean" | "number" | "percent over 100" => Some((0, 1.0)),
+        "bool" | "boolean" | "number" | "percent over 100" | "mach" => Some((0, 1.0)),
         "percent" => Some((0, 0.01)),
         "degrees" | "degree" => Some((1, std::f64::consts::PI / 180.0)),
         "radians" | "radian" => Some((1, 1.0)),
@@ -13,6 +13,9 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "feet per minute" => Some((2, 0.3048 / 60.0)),
         "meters" | "meter" => Some((3, 1.0)),
         "feet" | "foot" => Some((3, 0.3048)),
+        "pascals" | "pascal" => Some((4, 1.0)),
+        "millibars" => Some((4, 100.0)),
+        "inhg" => Some((4, 3386.389)),
         _ => None,
     };
     let (from_dimension, from_scale) = unit(from)?;

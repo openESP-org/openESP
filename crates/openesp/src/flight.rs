@@ -3,6 +3,7 @@ use esp_assets::flight::FlightData;
 use esp_script::{Host, Reference};
 use esp_sim::{
     aerodynamics::{Aerodynamics, Controls},
+    atmosphere::Atmosphere,
     flight::State,
     variables::Variables,
 };
@@ -26,6 +27,7 @@ impl Flight {
             "invalid airborne starting state"
         );
         let model = Aerodynamics::from_data(data)?;
+        Atmosphere::standard(height)?;
         let current = State {
             position: DVec3::new(0.0, 0.0, -height),
             velocity: DVec3::X * (knots * 1852.0 / 3600.0),
@@ -54,10 +56,11 @@ impl Flight {
         self.flaps.extend(variables.flap_angles());
         let mut next = self.current;
         next.advance(&self.model.mass, dt, DVec3::Z * 9.80665, |state| {
+            let air = Atmosphere::standard(-state.position.z)?;
             self.model.forces(
                 state.air_velocity(DVec3::ZERO),
                 state.angular_velocity,
-                1.225,
+                air.density,
                 controls,
                 &self.flaps,
             )
@@ -84,13 +87,24 @@ impl Flight {
         (origin, orientation)
     }
 
-    pub fn publish(state: &State, variables: &mut Variables) {
+    pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         let air = state.air_velocity(DVec3::ZERO);
         let speed = air.length();
+        let atmosphere = Atmosphere::standard(-state.position.z)?;
         let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
-        for name in ["AIRSPEED INDICATED", "AIRSPEED TRUE"] {
-            variables.set_number(name, "meters per second", speed);
-        }
+        variables.set_number("AIRSPEED TRUE", "meters per second", speed);
+        variables.set_number(
+            "AIRSPEED INDICATED",
+            "meters per second",
+            atmosphere.calibrated_airspeed(speed)?,
+        );
+        variables.set_number("AIRSPEED MACH", "mach", speed / atmosphere.sound_speed);
+        variables.set_number("AMBIENT PRESSURE", "pascals", atmosphere.pressure);
+        variables.set_number(
+            "AMBIENT TEMPERATURE",
+            "celsius",
+            atmosphere.temperature - 273.15,
+        );
         for name in [
             "PLANE ALTITUDE",
             "INDICATED ALTITUDE",
@@ -126,6 +140,7 @@ impl Flight {
             state.velocity.truncate().length(),
         );
         variables.set_number("SIM ON GROUND", "bool", 0.0);
+        Ok(())
     }
 }
 
@@ -174,6 +189,43 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+    fn altitude_changes_forces_and_indicated_airspeed() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut low = Flight::new(&data, 150.0, 1000.0).unwrap();
+            let mut high = Flight::new(&data, 150.0, 10_000.0).unwrap();
+            let mut variables = Variables::default();
+            variables
+                .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
+                .unwrap();
+            for name in [
+                "ELEVATOR DEFLECTION PCT",
+                "AILERON LEFT DEFLECTION PCT",
+                "RUDDER DEFLECTION PCT",
+            ] {
+                variables.set_number(name, "percent", 0.0);
+            }
+            low.advance(1.0 / 60.0, &mut variables).unwrap();
+            high.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert!(low.current.velocity.x < high.current.velocity.x);
+            assert!(low.current.velocity.z < high.current.velocity.z);
+            let reference = Reference::new('A', "AIRSPEED INDICATED", Some("knots"));
+            Flight::publish(&low.current, &mut variables).unwrap();
+            let low_ias = variables.read(&reference).unwrap().number().unwrap();
+            Flight::publish(&high.current, &mut variables).unwrap();
+            let high_ias = variables.read(&reference).unwrap().number().unwrap();
+            assert!(high_ias < low_ias && low_ias < 150.0);
+            let pressure = variables
+                .read(&Reference::new('A', "AMBIENT PRESSURE", Some("millibars")))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!((pressure - 264.999).abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn publishes_attitude_and_airspeed_using_simulator_units() {
         let state = State {
             position: DVec3::new(0.0, 0.0, -1000.0),
@@ -182,9 +234,9 @@ mod tests {
             ..State::default()
         };
         let mut variables = Variables::default();
-        Flight::publish(&state, &mut variables);
+        Flight::publish(&state, &mut variables).unwrap();
         for (name, unit, expected) in [
-            ("AIRSPEED INDICATED", "knots", 50.0 * 3600.0 / 1852.0),
+            ("AIRSPEED TRUE", "knots", 50.0 * 3600.0 / 1852.0),
             ("PLANE ALTITUDE", "feet", 1000.0 / 0.3048),
             ("PLANE PITCH DEGREES", "radians", -0.1),
             ("PLANE BANK DEGREES", "radians", -0.2),

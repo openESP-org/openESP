@@ -369,7 +369,7 @@ impl App {
                         eprintln!("flap system: {error}");
                     }
                     if let Some(flight) = &self.flight {
-                        Flight::publish(&flight.current, &mut self.variables);
+                        Flight::publish(&flight.current, &mut self.variables)?;
                     }
                     self.apply_variable_overrides();
                     for panel in aircraft.panel_images.values_mut() {
@@ -446,7 +446,7 @@ impl App {
             self.variables.set_number(name, "percent", value);
         }
         if let Some(flight) = &self.flight {
-            Flight::publish(&flight.current, &mut self.variables);
+            Flight::publish(&flight.current, &mut self.variables)?;
         }
         self.apply_variable_overrides();
         self.variables.interpolate(1.0)?;
@@ -462,13 +462,13 @@ impl App {
             self.variables.advance(STEP)?;
             if let Some(flight) = &mut self.flight {
                 flight.advance(STEP, &mut self.variables)?;
-                Flight::publish(&flight.current, &mut self.variables);
+                Flight::publish(&flight.current, &mut self.variables)?;
             }
             self.apply_variable_overrides();
         }
         self.variables.interpolate(frame.alpha)?;
         if let Some(flight) = &self.flight {
-            Flight::publish(&flight.sample(frame.alpha)?, &mut self.variables);
+            Flight::publish(&flight.sample(frame.alpha)?, &mut self.variables)?;
         }
         self.apply_variable_overrides();
         self.update_flight_pose(frame.alpha)?;
@@ -731,7 +731,7 @@ fn main() -> Result<()> {
                     Flight::new(&data, knots, height)
                 }).transpose()?;
                 if flight.is_some() {
-                    eprintln!("airborne test: empty aircraft, no thrust, constant sea-level atmosphere; arrows control elevator/ailerons, Z/X rudder");
+                    eprintln!("airborne test: empty aircraft, no thrust, standard atmosphere; arrows control elevator/ailerons, Z/X rudder");
                 }
                 Ok((aircraft, flight))
             })();
