@@ -6,10 +6,10 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 esp-assets = { path = "../esp-assets" }
+esp-formats = { path = "../esp-formats" }
 esp-script = { path = "../esp-script" }
 glam = "0.30"
 petgraph = "0.8"
 
 [dev-dependencies]
-esp-formats = { path = "../esp-formats" }
 tempfile = "3"

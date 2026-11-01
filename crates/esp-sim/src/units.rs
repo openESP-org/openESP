@@ -7,6 +7,9 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "percent" => Some((0, 0.01)),
         "degrees" | "degree" => Some((1, std::f64::consts::PI / 180.0)),
         "radians" | "radian" => Some((1, 1.0)),
+        "knots" | "knot" => Some((2, 1852.0 / 3600.0)),
+        "meters per second" => Some((2, 1.0)),
+        "feet per second" => Some((2, 0.3048)),
         _ => None,
     };
     let (from_dimension, from_scale) = unit(from)?;

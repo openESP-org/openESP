@@ -610,3 +610,95 @@ fn original_flap_indicator_rotates_with_surface_angles() {
     }
     assert!(verified > 0, "no original rotating flap indicator verified");
 }
+
+#[test]
+#[ignore = "requires original aircraft flap definitions and OPENESP_AIRCRAFT_PATHS"]
+fn flap_commands_drive_configured_actuators_models_and_gauges() {
+    use esp_sim::variables::Variables;
+    let mut gauge_changes = 0;
+    for path in content::aircraft_paths() {
+        let mut aircraft = Aircraft::load(&path, 0).unwrap();
+        let primary = aircraft.flaps.iter().find(|set| set.kind == 1).unwrap();
+        let time = primary.extending_time.unwrap();
+        let first = primary.positions[0].angle;
+        let last = primary.positions.last().unwrap().angle;
+        let mut variables = Variables::default();
+        variables.configure_flaps(&aircraft.flaps).unwrap();
+        let mut state = ModelState::new(&aircraft.exterior).unwrap();
+        state
+            .update(&aircraft.exterior, &mut variables, 0.0)
+            .unwrap();
+        let initial = state.transforms.clone();
+        let images: Vec<_> = aircraft
+            .panel_images
+            .values_mut()
+            .map(|panel| {
+                panel.update(&mut variables);
+                panel.image.clone()
+            })
+            .collect();
+        variables
+            .dispatch_key_event(0x10043, Value::Number(0.0))
+            .unwrap();
+        let angle = Reference::new('A', "TRAILING EDGE FLAPS0 LEFT ANGLE", Some("degrees"));
+        assert_eq!(variables.read(&angle).unwrap(), Value::Number(first));
+        let dt = time / 1200.0;
+        for _ in 0..600 {
+            variables.advance(dt).unwrap();
+            state
+                .update(&aircraft.exterior, &mut variables, dt)
+                .unwrap();
+        }
+        let half = variables.read(&angle).unwrap().number().unwrap();
+        assert!((half - (first + last) * 0.5).abs() < 1e-9);
+        assert!(
+            initial
+                .iter()
+                .zip(&state.transforms)
+                .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5)),
+            "{}: flap actuator did not animate model",
+            aircraft.title
+        );
+        let ratio = variables
+            .read(&Reference::new(
+                'A',
+                "TRAILING EDGE FLAPS LEFT PERCENT",
+                Some("percent"),
+            ))
+            .unwrap()
+            .number()
+            .unwrap();
+        assert!((ratio - 50.0).abs() < 1e-9);
+        for (before, panel) in images.iter().zip(aircraft.panel_images.values_mut()) {
+            panel.update(&mut variables);
+            gauge_changes += before
+                .pixels()
+                .zip(panel.image.pixels())
+                .filter(|(a, b)| a != b)
+                .count();
+        }
+        let mut single_step = Variables::default();
+        single_step.configure_flaps(&aircraft.flaps).unwrap();
+        single_step
+            .dispatch_event("FLAPS_DOWN", Value::Number(0.0))
+            .unwrap();
+        single_step.advance(time * 0.5).unwrap();
+        let single_angle = single_step.read(&angle).unwrap().number().unwrap();
+        assert!((single_angle - half).abs() < 1e-9);
+        variables.advance(time).unwrap();
+        assert!((variables.read(&angle).unwrap().number().unwrap() - last).abs() < 1e-9);
+        variables
+            .dispatch_event("FLAPS_UP", Value::Number(0.0))
+            .unwrap();
+        variables.advance(time).unwrap();
+        assert!((variables.read(&angle).unwrap().number().unwrap() - first).abs() < 1e-9);
+        eprintln!(
+            "{}: configured {time}s flap travel verified through events, model transforms and gauge inputs",
+            aircraft.title
+        );
+    }
+    assert!(
+        gauge_changes > 30,
+        "no original flap instrument responded to actuator state"
+    );
+}

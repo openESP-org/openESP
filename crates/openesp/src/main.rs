@@ -31,10 +31,37 @@ struct Arguments {
     cockpit: bool,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     frames: Option<u64>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Save the final requested frame, or the first frame without --frames"
+    )]
     screenshot: Option<PathBuf>,
     #[arg(long = "variable", value_parser = parse_variable)]
     variables: Vec<Variable>,
+    #[arg(long = "event", value_parser = parse_event, help = "Send a startup simulator event: NAME or NAME=VALUE")]
+    events: Vec<StartupEvent>,
+}
+
+#[derive(Clone)]
+struct StartupEvent {
+    name: String,
+    value: f64,
+}
+
+fn parse_event(text: &str) -> Result<StartupEvent, String> {
+    let (name, value) = text.split_once('=').unwrap_or((text, "0"));
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("event name is empty".into());
+    }
+    let value = value.trim().parse::<f64>().map_err(|e| e.to_string())?;
+    if !value.is_finite() {
+        return Err("event value must be finite".into());
+    }
+    Ok(StartupEvent {
+        name: name.to_ascii_uppercase(),
+        value,
+    })
 }
 
 #[derive(Clone)]
@@ -269,6 +296,14 @@ impl App {
                         .as_ref()
                         .map(ModelState::new)
                         .transpose()?;
+                    if let Err(error) = self.variables.configure_flaps(&aircraft.flaps) {
+                        eprintln!("flap system: {error}");
+                    }
+                    for event in &self.arguments.events {
+                        self.variables
+                            .dispatch_event(&event.name, Value::Number(event.value))
+                            .with_context(|| format!("startup event {}", event.name))?;
+                    }
                     self.aircraft = Some(aircraft);
                     self.reset_camera();
                     self.last_frame = Instant::now();
@@ -324,6 +359,7 @@ impl App {
                 Value::Number(variable.value),
             );
         }
+        self.variables.advance(dt)?;
         if let Some(aircraft) = &mut self.aircraft {
             for (name, panel) in &mut aircraft.panel_images {
                 let changed = panel.advance(dt, &mut self.variables)?;
@@ -364,7 +400,11 @@ impl App {
             if let Some(state) = &self.interior_state {
                 renderer.update_model(true, &state.transforms, &state.visible)?;
             }
-            let screenshot = if self.frames == 0 {
+            let screenshot = if self
+                .arguments
+                .frames
+                .map_or(self.frames == 0, |limit| self.frames == limit - 1)
+            {
                 self.arguments.screenshot.as_deref()
             } else {
                 None
@@ -505,6 +545,19 @@ impl ApplicationHandler for App {
                                 }
                                 KeyCode::Home => self.reset_camera(),
                                 KeyCode::KeyO => self.door_open = !self.door_open,
+                                KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8 => {
+                                    let name = match key {
+                                        KeyCode::F5 => "FLAPS_UP",
+                                        KeyCode::F6 => "FLAPS_DECR",
+                                        KeyCode::F7 => "FLAPS_INCR",
+                                        _ => "FLAPS_DOWN",
+                                    };
+                                    if let Err(error) =
+                                        self.variables.dispatch_event(name, Value::Number(0.0))
+                                    {
+                                        eprintln!("flap input: {error}");
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -601,6 +654,18 @@ mod tests {
     use esp_script::{Host, Reference};
 
     #[test]
+    fn parses_startup_events_with_finite_optional_values() {
+        let event = parse_event("flaps_down").unwrap();
+        assert_eq!(event.name, "FLAPS_DOWN");
+        assert_eq!(event.value, 0.0);
+        let event = parse_event(" FLAPS_SET = 8191.5 ").unwrap();
+        assert_eq!(event.value, 8191.5);
+        for text in ["", "=1", "FLAPS_SET=NaN", "FLAPS_SET=inf", "FLAPS_SET=1=2"] {
+            assert!(parse_event(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
     fn releases_captured_panel_without_a_cursor() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("panel");
@@ -634,6 +699,7 @@ mod tests {
             renderer: None,
             aircraft: Some(Aircraft {
                 title: "test".into(),
+                flaps: vec![],
                 exterior: empty_model(),
                 interior: None,
                 panel: Some(panel),

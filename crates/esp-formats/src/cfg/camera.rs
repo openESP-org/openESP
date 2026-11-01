@@ -100,7 +100,7 @@ fn parse_number(section: &str, key: &str, value: &str) -> Result<f64, ValueError
         .ok_or_else(|| invalid(section, key, value))
 }
 
-fn number(config: &Config, section: &str, key: &str) -> Result<Option<f64>, ValueError> {
+pub(super) fn number(config: &Config, section: &str, key: &str) -> Result<Option<f64>, ValueError> {
     config
         .value(section, key)?
         .map(|value| parse_number(section, key, value))

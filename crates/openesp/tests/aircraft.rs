@@ -8,12 +8,28 @@ use std::{
 mod content;
 
 fn capture(aircraft: &Path, cockpit: bool, variables: &[&str], output: &Path) -> image::RgbaImage {
+    capture_after(aircraft, cockpit, variables, None, 1, output)
+}
+
+fn capture_after(
+    aircraft: &Path,
+    cockpit: bool,
+    variables: &[&str],
+    event: Option<&str>,
+    frames: u64,
+    output: &Path,
+) -> image::RgbaImage {
     let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
     command
         .arg("--aircraft")
         .arg(aircraft)
-        .args(["--frames", "1", "--screenshot"])
+        .arg("--frames")
+        .arg(frames.to_string())
+        .arg("--screenshot")
         .arg(output);
+    if let Some(event) = event {
+        command.args(["--event", event]);
+    }
     if cockpit {
         command.arg("--cockpit");
     }
@@ -192,4 +208,30 @@ fn renders_flap_indicator() {
         differences > 20,
         "flap input did not change a cockpit needle"
     );
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original aircraft with flap animations"]
+fn renders_configured_flap_motion_after_startup_command() {
+    let temp = tempfile::tempdir().unwrap();
+    for path in content::aircraft_paths() {
+        let up = capture(&path, false, &[], &temp.path().join("up.png"));
+        let moving = capture_after(
+            &path,
+            false,
+            &[],
+            Some("FLAPS_DOWN"),
+            120,
+            &temp.path().join("moving.png"),
+        );
+        let differences = up
+            .pixels()
+            .zip(moving.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differences > 100,
+            "flap command did not visibly move the original aircraft surfaces"
+        );
+    }
 }

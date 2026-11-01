@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub struct Variables {
     values: HashMap<(char, String), Variable>,
     events: Vec<(String, Value)>,
+    flaps: Option<crate::flaps::Flaps>,
 }
 
 struct Variable {
@@ -13,6 +14,28 @@ struct Variable {
 }
 
 impl Variables {
+    pub fn configure_flaps(
+        &mut self,
+        definitions: &[esp_formats::cfg::aircraft::FlapSet],
+    ) -> anyhow::Result<()> {
+        self.flaps = Some(crate::flaps::Flaps::new(definitions)?);
+        Ok(())
+    }
+
+    pub fn advance(&mut self, dt: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid simulation timestep");
+        let reference = Reference::new('A', "AIRSPEED INDICATED", Some("knots"));
+        let airspeed = if self.values.contains_key(&('A', reference.name.clone())) {
+            self.read(&reference)?.number()?
+        } else {
+            0.0
+        };
+        if let Some(flaps) = &mut self.flaps {
+            flaps.advance(dt, airspeed)?;
+        }
+        Ok(())
+    }
+
     pub fn set(&mut self, category: char, name: &str, unit: Option<&str>, value: Value) {
         let reference = Reference::new(category, name, unit);
         self.values.insert(
@@ -42,6 +65,11 @@ impl Variables {
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
         let name = match id {
             0x10018 => "STROBES_TOGGLE",
+            0x1003b => "FLAPS_UP",
+            0x10043 => "FLAPS_DOWN",
+            0x100a2 => "FLAPS_SET",
+            0x100de => "FLAPS_INCR",
+            0x100df => "FLAPS_DECR",
             0x100d7 => "LANDING_LIGHTS_TOGGLE",
             0x100d8 => "PARKING_BRAKES",
             0x100fa => "SPOILERS_SET",
@@ -73,6 +101,11 @@ impl Variables {
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
         match name {
+            "FLAPS_UP" | "FLAPS_DOWN" | "FLAPS_INCR" | "FLAPS_DECR" | "FLAPS_SET" => self
+                .flaps
+                .as_mut()
+                .ok_or_else(|| Error::Unsupported("flap system is unavailable".into()))?
+                .event(name, value),
             "TOGGLE_FLIGHT_DIRECTOR" => self.toggle("AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
             "TOGGLE_MASTER_BATTERY" => self.toggle("ELECTRICAL MASTER BATTERY"),
             "TOGGLE_AVIONICS_MASTER" => self.toggle("AVIONICS MASTER SWITCH"),
@@ -122,6 +155,24 @@ impl Host for Variables {
             .values
             .get(&(reference.category, reference.name.clone()))
         else {
+            if reference.category == 'A'
+                && let Some((value, unit)) = self
+                    .flaps
+                    .as_ref()
+                    .and_then(|flaps| flaps.read(&reference.name))
+            {
+                let value = Value::Number(value);
+                if reference.unit.as_deref() == Some(unit) {
+                    return Ok(value);
+                }
+                return super::units::convert(&value, Some(unit), reference.unit.as_deref())
+                    .ok_or_else(|| {
+                        Error::Variable(format!(
+                            "unsupported flap unit {}",
+                            reference.unit.as_deref().unwrap_or("unitless")
+                        ))
+                    });
+            }
             if local {
                 return Ok(Value::Number(0.0));
             }
@@ -175,6 +226,33 @@ impl Host for Variables {
 mod tests {
     use super::*;
     use esp_script::Program;
+
+    #[test]
+    fn flap_actuators_use_airspeed_units_and_publish_surface_angles() {
+        let config = esp_formats::cfg::Config::parse(
+            "[flaps.0]\ntype=1\nextending-time=10\nflaps-position.0=0\nflaps-position.1=30,120",
+        )
+        .unwrap();
+        let mut variables = Variables::default();
+        variables
+            .configure_flaps(&esp_formats::cfg::aircraft::flaps(&config).unwrap())
+            .unwrap();
+        variables
+            .dispatch_event("FLAPS_DOWN", Value::Number(0.0))
+            .unwrap();
+        let angle = Reference::new('A', "TRAILING EDGE FLAPS0 LEFT ANGLE", Some("radians"));
+        variables.set_number("AIRSPEED INDICATED", "meters per second", 70.0);
+        variables.advance(10.0).unwrap();
+        assert_eq!(variables.read(&angle).unwrap(), Value::Number(0.0));
+        variables.set_number("AIRSPEED INDICATED", "meters per second", 50.0);
+        variables.advance(10.0).unwrap();
+        assert!(
+            (variables.read(&angle).unwrap().number().unwrap() - std::f64::consts::PI / 6.0).abs()
+                < 1e-12
+        );
+        variables.set_number("AIRSPEED INDICATED", "knots", f64::NAN);
+        assert!(variables.advance(1.0).is_err());
+    }
 
     #[test]
     fn shares_values_across_compatible_units() {
