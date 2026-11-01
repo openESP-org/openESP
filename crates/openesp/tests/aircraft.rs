@@ -153,3 +153,43 @@ fn renders_flight_director_switch() {
         "flight director input did not change the cockpit switch"
     );
 }
+
+#[test]
+#[ignore = "requires a GPU, desktop and an aircraft with an XML flap indicator"]
+fn renders_flap_indicator() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut differences = 0;
+    for path in content::aircraft_paths() {
+        let up = capture(
+            &path,
+            true,
+            &[
+                "A:Trailing edge flaps0 left angle,degrees=0",
+                "A:Trailing edge flaps0 right angle,degrees=0",
+                "A:Trailing edge flaps1 left angle,degrees=0",
+                "A:Trailing edge flaps1 right angle,degrees=0",
+            ],
+            &temp.path().join("up.png"),
+        );
+        let down = capture(
+            &path,
+            true,
+            &[
+                "A:Trailing edge flaps0 left angle,degrees=40",
+                "A:Trailing edge flaps0 right angle,degrees=40",
+                "A:Trailing edge flaps1 left angle,degrees=40",
+                "A:Trailing edge flaps1 right angle,degrees=40",
+            ],
+            &temp.path().join("down.png"),
+        );
+        differences += up
+            .pixels()
+            .zip(down.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+    }
+    assert!(
+        differences > 20,
+        "flap input did not change a cockpit needle"
+    );
+}

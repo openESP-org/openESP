@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use esp_formats::{cfg::panel::WindowKind, gauge::Gauge};
 use esp_script::{Host, Program};
+use glam::DAffine2;
 use image::{
     Rgba, RgbaImage,
     imageops::{FilterType, overlay, resize},
@@ -9,6 +10,9 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
+
+mod rotation;
+use rotation::Motion;
 
 pub struct PanelImage {
     pub image: RgbaImage,
@@ -88,7 +92,8 @@ struct Canvas {
 
 struct Layer {
     image: RgbaImage,
-    position: (i64, i64),
+    motion: Vec<Motion>,
+    transform: DAffine2,
     conditions: Vec<Requirement>,
     visible: bool,
 }
@@ -279,18 +284,24 @@ impl PanelImage {
         let mut changed = false;
         for gauge in &mut self.gauges {
             for layer in &mut gauge.layers {
-                let visible = layer
-                    .conditions
-                    .iter()
-                    .all(|requirement| match requirement {
-                        Requirement::Visible(index) => self.conditions[*index]
-                            .value
-                            .is_some_and(|value| value != 0.0),
-                        Requirement::Case(index, expected) => {
-                            self.conditions[*index].value == Some(*expected)
-                        }
-                    });
+                let transform = rotation::transform(&layer.motion, &self.conditions);
+                let visible = transform.is_some()
+                    && layer
+                        .conditions
+                        .iter()
+                        .all(|requirement| match requirement {
+                            Requirement::Visible(index) => self.conditions[*index]
+                                .value
+                                .is_some_and(|value| value != 0.0),
+                            Requirement::Case(index, expected) => {
+                                self.conditions[*index].value == Some(*expected)
+                            }
+                        });
                 changed |= visible != layer.visible;
+                if let Some(transform) = transform {
+                    changed |= visible && layer.transform != transform;
+                    layer.transform = transform;
+                }
                 layer.visible = visible;
             }
         }
@@ -308,7 +319,7 @@ impl PanelImage {
             let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
             for layer in &gauge.layers {
                 if layer.visible {
-                    overlay(&mut art, &layer.image, layer.position.0, layer.position.1);
+                    rotation::draw(&layer.image, layer.transform, &mut art);
                 }
             }
             let scaled = resize(&art, gauge.target.0, gauge.target.1, FilterType::Triangle);
@@ -420,15 +431,14 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 anyhow::bail!("invalid gauge size {w}x{h}");
             }
             let mut layers = Vec::new();
-            let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new())];
-            while let Some((node, x, y, mut parents)) = stack.pop() {
+            let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new(), Vec::new())];
+            while let Some((node, x, y, mut parents, mut motion)) = stack.pop() {
                 if node.has_tag_name("Element")
                     && node.children().any(|child| {
                         child.is_element()
                             && matches!(
                                 child.tag_name().name(),
                                 "Rotate"
-                                    | "Rotation"
                                     | "Shift"
                                     | "MaskImage"
                                     | "LeftScript"
@@ -517,12 +527,20 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         };
                         let mut requirements = parents.clone();
                         requirements.push(Requirement::Case(index, value));
-                        stack.push((case, x, y, requirements));
+                        stack.push((case, x, y, requirements, motion.clone()));
                     }
                     continue;
                 }
                 let (x, y) = if node.has_tag_name("Element") {
                     let (px, py) = position(node)?;
+                    match Motion::element(node, (x + px, y + py), (px, py), &mut conditions) {
+                        Ok(transform) => motion.push(transform),
+                        Err(error) => {
+                            eprintln!("gauge rotation {}: {error}", gauge.reference);
+                            omitted_elements += 1;
+                            continue;
+                        }
+                    }
                     (x + px, y + py)
                 } else {
                     (x, y)
@@ -560,10 +578,14 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                                 .with_context(|| format!("{}: {name}", gauge.reference));
                         }
                     };
+                    let mut motion = motion.clone();
+                    motion.push(Motion::image(node)?);
+                    let transform = rotation::transform(&motion, &conditions);
                     layers.push(Layer {
                         image: bitmap,
-                        position: (x.round() as i64, y.round() as i64),
-                        visible: parents.is_empty(),
+                        motion,
+                        transform: transform.unwrap_or(DAffine2::IDENTITY),
+                        visible: parents.is_empty() && transform.is_some(),
                         conditions: parents.clone(),
                     });
                 }
@@ -572,7 +594,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         || child.has_tag_name("Image")
                         || child.has_tag_name("Select")
                     {
-                        stack.push((child, x, y, parents.clone()));
+                        stack.push((child, x, y, parents.clone(), motion.clone()));
                     }
                 }
             }
@@ -616,6 +638,9 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             continue;
         };
         for layer in &mut canvas.layers {
+            for motion in &mut layer.motion {
+                motion.rebase(conditions.len());
+            }
             for requirement in &mut layer.conditions {
                 match requirement {
                     Requirement::Visible(index) | Requirement::Case(index, _) => {
@@ -1522,5 +1547,44 @@ mod tests {
         let image = load_panel(&panel, "$test").unwrap().unwrap();
         assert_eq!(image.updates.len(), 1);
         assert_eq!(image.updates[0].interval, Some(0.5));
+    }
+    #[test]
+    fn rotates_nested_images_about_their_axis_and_skips_unchanged_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+        directory.join("panel.cfg"),
+        "[VCockpit01]\nsize_mm=9,9\npixel_size=9,9\ntexture=$screen\ngauge00=example!needle,0,0",
+    )
+    .unwrap();
+        std::fs::write(module.join("needle.xml"), r#"<Gauge><Size X="9" Y="9"/><Element><Position X="1" Y="1"/><Element><Position X="3" Y="3"/><Image Name="needle.bmp"><Transparent>True</Transparent><Axis X="1" Y="3"/></Image><Rotation><PointsTo>NORTH</PointsTo><Expression><Minimum>0</Minimum><Maximum>1.5707963267948966</Maximum><Script>(L:Angle,number)</Script></Expression></Rotation></Element></Element></Gauge>"#).unwrap();
+        let mut pixels = vec![0; 3 * 4 * 3];
+        for y in 0..4 {
+            pixels[(y * 3 + 1) * 3] = 255;
+        }
+        let mut bytes = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut bytes)
+            .encode(&pixels, 3, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("needle.bmp"), bytes).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_elements, 0);
+        let mut host = TestHost(0.0);
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(4, 1).0, [255, 0, 0, 255]);
+        assert!(!image.update(&mut host));
+        host.0 = std::f64::consts::FRAC_PI_2;
+        assert!(image.update(&mut host));
+        assert!(image.image.get_pixel(7, 4)[0] > 240);
+        assert_eq!(image.image.get_pixel(4, 1).0, [0, 0, 0, 255]);
+        assert!(!image.update(&mut host));
+        host.0 = 100.0;
+        assert!(
+            !image.update(&mut host),
+            "rotation must clamp at the expression maximum"
+        );
     }
 }

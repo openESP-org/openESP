@@ -557,3 +557,56 @@ fn original_efis_standard_pressure_click_emits_event() {
         "no original EFIS standard-pressure button verified"
     );
 }
+
+#[test]
+#[ignore = "requires original XML flap indicators and OPENESP_AIRCRAFT_PATHS"]
+fn original_flap_indicator_rotates_with_surface_angles() {
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut aircraft = Aircraft::load(&path, 0).unwrap();
+        for panel in aircraft.panel_images.values_mut() {
+            let mut variables = Variables::default();
+            let set_flaps = |variables: &mut Variables, angle| {
+                for surface in [
+                    "TRAILING EDGE FLAPS0 LEFT ANGLE",
+                    "TRAILING EDGE FLAPS0 RIGHT ANGLE",
+                    "TRAILING EDGE FLAPS1 LEFT ANGLE",
+                    "TRAILING EDGE FLAPS1 RIGHT ANGLE",
+                ] {
+                    variables.set_number(surface, "degrees", angle);
+                }
+            };
+            set_flaps(&mut variables, 0.0);
+            panel.update(&mut variables);
+            let before = panel.image.clone();
+            set_flaps(&mut variables, 40.0);
+            let started = std::time::Instant::now();
+            if !panel.update(&mut variables) {
+                continue;
+            }
+            let update_time = started.elapsed();
+            let differences = before
+                .pixels()
+                .zip(panel.image.pixels())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(differences > 30, "flap indicator did not visibly rotate");
+            assert!(
+                !panel.update(&mut variables),
+                "unchanged flap angles rebuilt artwork"
+            );
+            set_flaps(&mut variables, 50.0);
+            assert!(
+                !panel.update(&mut variables),
+                "flap gauge did not clamp at its configured limit"
+            );
+            eprintln!(
+                "{}: flap needle changed {differences} pixels in {update_time:?}",
+                aircraft.title,
+            );
+            verified += 1;
+        }
+    }
+    assert!(verified > 0, "no original rotating flap indicator verified");
+}
