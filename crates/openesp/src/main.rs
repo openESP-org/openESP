@@ -3,7 +3,12 @@ use clap::Parser;
 use esp_assets::{Aircraft, gauge::MouseEvent};
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
-use esp_sim::{animation::ModelState, interaction, picking, variables::Variables};
+use esp_sim::{
+    animation::ModelState,
+    interaction, picking,
+    time::{Clock, STEP},
+    variables::Variables,
+};
 use glam::{DVec3, Vec3};
 use std::{
     collections::HashSet,
@@ -106,6 +111,7 @@ struct App {
     exterior_state: Option<ModelState>,
     interior_state: Option<ModelState>,
     variables: Variables,
+    clock: Clock,
     door_open: bool,
     reported_diagnostics: HashSet<String>,
     camera: Camera,
@@ -126,6 +132,17 @@ enum CockpitTarget {
 }
 
 impl App {
+    fn apply_variable_overrides(&mut self) {
+        for variable in &self.arguments.variables {
+            self.variables.set(
+                variable.category,
+                &variable.name,
+                Some(&variable.unit),
+                Value::Number(variable.value),
+            );
+        }
+    }
+
     fn reset_camera(&mut self) {
         if let Some(renderer) = &self.renderer {
             self.camera = if self.arguments.cockpit {
@@ -283,7 +300,7 @@ impl App {
         if self.renderer.is_none() {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
-                    let aircraft = aircraft?;
+                    let mut aircraft = aircraft?;
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
                     self.renderer = Some(pollster::block_on(Renderer::new(
@@ -298,6 +315,13 @@ impl App {
                         .transpose()?;
                     if let Err(error) = self.variables.configure_flaps(&aircraft.flaps) {
                         eprintln!("flap system: {error}");
+                    }
+                    self.apply_variable_overrides();
+                    for panel in aircraft.panel_images.values_mut() {
+                        panel.update_scripts(0.0, &mut self.variables)?;
+                    }
+                    for error in self.variables.dispatch_events() {
+                        eprintln!("gauge event: {error}");
                     }
                     for event in &self.arguments.events {
                         self.variables
@@ -315,8 +339,20 @@ impl App {
             }
         }
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f64().min(0.1);
+        let elapsed = (now - self.last_frame).as_secs_f64();
         self.last_frame = now;
+        let frame = self.clock.advance(elapsed)?;
+        let dt = frame.elapsed;
+        if frame.discarded > 0.0
+            && self
+                .reported_diagnostics
+                .insert("simulation catch-up limit".into())
+        {
+            eprintln!(
+                "simulation catch-up capped; discarded {:.3}s after a frame stall",
+                frame.discarded
+            );
+        }
         if self.repeat_at.is_some_and(|deadline| now >= deadline) {
             self.repeat_at = Some(now + std::time::Duration::from_millis(100));
             if let Err(error) = self.cockpit_mouse(MouseEvent::DownRepeat) {
@@ -338,7 +374,7 @@ impl App {
         } else {
             5.0
         };
-        self.camera.move_local(movement, dt * speed);
+        self.camera.move_local(movement, dt.min(0.1) * speed);
         let roll = axis(KeyCode::ArrowRight, KeyCode::ArrowLeft) as f64;
         let pitch = axis(KeyCode::ArrowDown, KeyCode::ArrowUp) as f64;
         for (name, value) in [
@@ -351,18 +387,23 @@ impl App {
         ] {
             self.variables.set_number(name, "percent", value);
         }
-        for variable in &self.arguments.variables {
-            self.variables.set(
-                variable.category,
-                &variable.name,
-                Some(&variable.unit),
-                Value::Number(variable.value),
-            );
+        self.apply_variable_overrides();
+        self.variables.interpolate(1.0)?;
+        for _ in 0..frame.steps {
+            if let Some(aircraft) = &mut self.aircraft {
+                for panel in aircraft.panel_images.values_mut() {
+                    panel.update_scripts(STEP, &mut self.variables)?;
+                }
+            }
+            for error in self.variables.dispatch_events() {
+                eprintln!("gauge event: {error}");
+            }
+            self.variables.advance(STEP)?;
         }
-        self.variables.advance(dt)?;
+        self.variables.interpolate(frame.alpha)?;
         if let Some(aircraft) = &mut self.aircraft {
             for (name, panel) in &mut aircraft.panel_images {
-                let changed = panel.advance(dt, &mut self.variables)?;
+                let changed = panel.update(&mut self.variables);
                 if changed && let Some(renderer) = &self.renderer {
                     renderer.update_panel(
                         name,
@@ -628,6 +669,7 @@ fn main() -> Result<()> {
         exterior_state: None,
         interior_state: None,
         variables,
+        clock: Clock::default(),
         door_open: false,
         reported_diagnostics: HashSet::new(),
         camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
@@ -710,6 +752,7 @@ mod tests {
             exterior_state: None,
             interior_state: None,
             variables,
+            clock: Clock::default(),
             door_open: false,
             reported_diagnostics: HashSet::new(),
             camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),

@@ -36,6 +36,17 @@ impl Variables {
         Ok(())
     }
 
+    pub fn interpolate(&mut self, alpha: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            alpha.is_finite() && (0.0..=1.0).contains(&alpha),
+            "invalid simulation interpolation"
+        );
+        if let Some(flaps) = &mut self.flaps {
+            flaps.interpolate(alpha)?;
+        }
+        Ok(())
+    }
+
     pub fn set(&mut self, category: char, name: &str, unit: Option<&str>, value: Value) {
         let reference = Reference::new(category, name, unit);
         self.values.insert(

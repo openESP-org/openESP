@@ -6,11 +6,13 @@ pub struct Flaps {
     sets: Vec<Actuator>,
     handle: u32,
     max_handle: u32,
+    alpha: f64,
 }
 
 struct Actuator {
     definition: FlapSet,
     angle: f64,
+    previous: f64,
     rate: f64,
 }
 
@@ -58,6 +60,7 @@ impl Flaps {
             sets.push(Actuator {
                 definition: definition.clone(),
                 angle,
+                previous: angle,
                 rate,
             });
         }
@@ -65,6 +68,7 @@ impl Flaps {
             sets,
             handle: 0,
             max_handle,
+            alpha: 1.0,
         })
     }
 
@@ -96,7 +100,9 @@ impl Flaps {
             airspeed.is_finite() && airspeed >= 0.0,
             "invalid flap airspeed"
         );
+        self.alpha = 1.0;
         for set in &mut self.sets {
+            set.previous = set.angle;
             let positions = &set.definition.positions;
             let index = positions.partition_point(|position| position.index <= self.handle) - 1;
             let position = &positions[index];
@@ -107,6 +113,15 @@ impl Flaps {
             let travel = set.rate * dt;
             set.angle += (target - set.angle).clamp(-travel, travel);
         }
+        Ok(())
+    }
+
+    pub fn interpolate(&mut self, alpha: f64) -> Result<()> {
+        ensure!(
+            alpha.is_finite() && (0.0..=1.0).contains(&alpha),
+            "invalid simulation interpolation"
+        );
+        self.alpha = alpha;
         Ok(())
     }
 
@@ -153,16 +168,17 @@ impl Flaps {
             _ => return None,
         };
         let value = |set: &Actuator| {
+            let angle = set.previous + (set.angle - set.previous) * self.alpha;
             let first = set.definition.positions[0].angle;
             let range = set.definition.positions.last().unwrap().angle - first;
             if percent {
                 if range == 0.0 {
                     0.0
                 } else {
-                    (set.angle - first) / range
+                    (angle - first) / range
                 }
             } else {
-                set.angle
+                angle
             }
         };
         let mut sets = self.sets.iter().filter(|s| s.definition.kind == kind);
@@ -240,6 +256,41 @@ mod tests {
         assert_eq!(
             flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE"),
             Some((-5.0, "degrees"))
+        );
+    }
+
+    #[test]
+    fn interpolation_samples_presentation_without_changing_actuator_state() {
+        let mut flaps = Flaps::new(&[definition()]).unwrap();
+        flaps.event("FLAPS_DOWN", 0.0).unwrap();
+        flaps.advance(1.0, 0.0).unwrap();
+        flaps.interpolate(0.5).unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -3.5
+        );
+        assert_eq!(flaps.read("FLAPS HANDLE INDEX").unwrap().0, 2.0);
+        flaps.advance(1.0, 0.0).unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            1.0
+        );
+        flaps.interpolate(0.0).unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -2.0
+        );
+        flaps.interpolate(0.5).unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -0.5
+        );
+        for alpha in [f64::NAN, -1.0, 1.1] {
+            assert!(flaps.interpolate(alpha).is_err());
+        }
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -0.5
         );
     }
 

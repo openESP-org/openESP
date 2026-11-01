@@ -702,3 +702,57 @@ fn flap_commands_drive_configured_actuators_models_and_gauges() {
         "no original flap instrument responded to actuator state"
     );
 }
+
+#[test]
+#[ignore = "requires original aircraft flap definitions and OPENESP_AIRCRAFT_PATHS"]
+fn fixed_ticks_preserve_aircraft_motion_across_render_rates() {
+    use esp_sim::{
+        time::{Clock, STEP},
+        variables::Variables,
+    };
+    for path in content::aircraft_paths() {
+        let aircraft = Aircraft::load(&path, 0).unwrap();
+        let primary = aircraft.flaps.iter().find(|s| s.kind == 1).unwrap();
+        let first = primary.positions[0].angle;
+        let last = primary.positions.last().unwrap().angle;
+        let expected =
+            first + (last - first) * ((2.0 - STEP) / primary.extending_time.unwrap()).min(1.0);
+        let mut samples = Vec::new();
+        for fps in [24, 144] {
+            let mut clock = Clock::default();
+            let mut variables = Variables::default();
+            variables.configure_flaps(&aircraft.flaps).unwrap();
+            variables
+                .dispatch_event("FLAPS_DOWN", Value::Number(0.0))
+                .unwrap();
+            let mut ticks = 0;
+            for _ in 0..fps * 2 {
+                let frame = clock.advance(1.0 / f64::from(fps)).unwrap();
+                variables.interpolate(1.0).unwrap();
+                for _ in 0..frame.steps {
+                    variables.advance(STEP).unwrap();
+                }
+                ticks += frame.steps;
+                variables.interpolate(frame.alpha).unwrap();
+            }
+            assert_eq!(ticks, 120);
+            let angle = variables
+                .read(&Reference::new(
+                    'A',
+                    "TRAILING EDGE FLAPS0 LEFT ANGLE",
+                    Some("degrees"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!(
+                (angle - expected).abs() < 1e-8,
+                "{}: {fps} fps produced {angle}, expected {expected}",
+                aircraft.title
+            );
+            samples.push(angle);
+        }
+        assert!((samples[0] - samples[1]).abs() < 1e-9);
+        eprintln!("{}: flap state matches at 24 and 144 fps", aircraft.title);
+    }
+}

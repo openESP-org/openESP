@@ -228,6 +228,11 @@ impl PanelImage {
     }
 
     pub fn advance(&mut self, dt: f64, host: &mut impl Host) -> Result<bool> {
+        self.update_scripts(dt, host)?;
+        Ok(self.update(host))
+    }
+
+    pub fn update_scripts(&mut self, dt: f64, host: &mut impl Host) -> Result<()> {
         anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid gauge timestep");
         for update in &mut self.updates {
             let elapsed = update
@@ -237,7 +242,9 @@ impl PanelImage {
                 || update
                     .interval
                     .zip(elapsed)
-                    .is_none_or(|(interval, elapsed)| dt >= interval || elapsed >= interval);
+                    .is_none_or(|(interval, elapsed)| {
+                        dt >= interval || elapsed >= interval * (1.0 - 1e-12)
+                    });
             if !due {
                 update.elapsed = elapsed.unwrap_or(0.0);
                 continue;
@@ -245,7 +252,12 @@ impl PanelImage {
             update.initialized = true;
             if let Some(interval) = update.interval {
                 // Missed updates are coalesced so slow frames cannot trigger an unbounded script burst.
-                update.elapsed = elapsed.unwrap_or(0.0) % interval;
+                let remainder = elapsed.unwrap_or(0.0) % interval;
+                update.elapsed = if remainder >= interval * (1.0 - 1e-12) {
+                    0.0
+                } else {
+                    remainder
+                };
             } else {
                 update.elapsed = 0.0;
             }
@@ -256,7 +268,7 @@ impl PanelImage {
                 update.reported = true;
             }
         }
-        Ok(self.update(host))
+        Ok(())
     }
 
     pub fn update(&mut self, host: &mut impl Host) -> bool {
@@ -1587,6 +1599,18 @@ mod tests {
                 .iter()
                 .all(|update| update.elapsed.is_finite())
         );
+        let mut image = load_panel(&panel, "$test").unwrap().unwrap();
+        let mut host = Values::default();
+        image.update_scripts(0.0, &mut host).unwrap();
+        for _ in 0..60 {
+            image.update_scripts(1.0 / 60.0, &mut host).unwrap();
+        }
+        assert_eq!(host.0["TICKS"], Value::Number(3.0));
+        assert_eq!(host.0["FRAMES"], Value::Number(61.0));
+        assert_eq!(image.image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert!(image.update(&mut host));
+        assert_eq!(host.0["FRAMES"], Value::Number(61.0));
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
 
     #[test]
