@@ -194,6 +194,8 @@ impl Variables {
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x10210 => "SPOILERS_ON",
             0x10211 => "SPOILERS_OFF",
+            0x10305 => "TOGGLE_HYDRAULIC_FAILURE",
+            0x10498 => "HYDRAULIC_SWITCH_TOGGLE",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
             0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
@@ -326,6 +328,8 @@ impl Variables {
                 .ok_or_else(|| Error::Unsupported("flap system is unavailable".into()))?
                 .event(name, value),
             "TOGGLE_FLIGHT_DIRECTOR" => self.toggle("AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
+            "HYDRAULIC_SWITCH_TOGGLE" => self.toggle("HYDRAULIC SWITCH"),
+            "TOGGLE_HYDRAULIC_FAILURE" => self.toggle("HYDRAULIC FAILURE"),
             "TOGGLE_MASTER_BATTERY" => self.toggle("ELECTRICAL MASTER BATTERY"),
             "TOGGLE_AVIONICS_MASTER" => self.toggle("AVIONICS MASTER SWITCH"),
             "AVIONICS_MASTER_SET" => {

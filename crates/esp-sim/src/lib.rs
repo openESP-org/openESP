@@ -5,6 +5,7 @@ pub mod electrical;
 pub mod flaps;
 pub mod flight;
 pub mod ground;
+pub mod hydraulics;
 pub mod interaction;
 pub mod loading;
 mod lookup;

@@ -18,6 +18,8 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "pascals" | "pascal" => Some((4, 1.0)),
         "millibars" => Some((4, 100.0)),
         "inhg" => Some((4, 3386.389)),
+        "psi" | "pounds per square inch" => Some((4, 6894.757293168)),
+        "psf" | "pounds per square foot" => Some((4, 47.88025898033584)),
         "kilograms" | "kilogram" => Some((5, 1.0)),
         "pounds" | "pound" => Some((5, 0.45359237)),
         "gallons" | "gallon" => Some((6, 0.003785411784)),

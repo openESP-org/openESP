@@ -6,6 +6,7 @@ use esp_sim::{
     atmosphere::Atmosphere,
     flight::State,
     ground::{Controls as GroundControls, LandingGear, Surface},
+    hydraulics::Hydraulics,
     loading::{Loading, WeightBalance},
     propulsion::{Command, Output as EngineOutput, Propulsion},
     variables::Variables,
@@ -30,6 +31,7 @@ pub struct Flight {
     spoilers: f64,
     spoiler_extension_time: f64,
     gear: LandingGear,
+    hydraulics: Option<Hydraulics>,
     on_ground: bool,
 }
 
@@ -58,6 +60,7 @@ impl Flight {
             "invalid flight starting state"
         );
         let model = Aerodynamics::from_data(data)?;
+        let hydraulics = Hydraulics::from_config(&data.configuration)?;
         let spoiler_extension_time = data
             .configuration
             .number("airplane_geometry", "spoiler_extension_time")?
@@ -112,6 +115,7 @@ impl Flight {
             spoilers: 0.0,
             spoiler_extension_time,
             gear,
+            hydraulics,
             on_ground,
         })
     }
@@ -119,6 +123,8 @@ impl Flight {
     pub fn configure_ground(variables: &mut Variables) {
         variables.set_number("ELEVATOR TRIM PCT", "percent", 0.0);
         variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
+        variables.set_number("HYDRAULIC SWITCH", "bool", 0.0);
+        variables.set_number("HYDRAULIC FAILURE", "bool", 0.0);
         variables.set_number("ELEVATOR TRIM POSITION", "radians", 0.0);
         for name in [
             "SPOILERS HANDLE POSITION",
@@ -261,6 +267,11 @@ impl Flight {
             dt.is_finite() && (0.0..=0.25).contains(&dt),
             "invalid aircraft timestep"
         );
+        let hydraulic_fraction = self
+            .hydraulics
+            .as_ref()
+            .map(|h| h.update(variables))
+            .transpose()?;
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -272,15 +283,19 @@ impl Flight {
         let ias = air.calibrated_airspeed(self.current.air_velocity(DVec3::ZERO).length())?
             * 3600.0
             / 1852.0;
-        let gear_powered = match self.gear.system_type() {
-            Some(0) => control("CIRCUIT GEAR MOTOR ON")
-                .ok()
-                .is_some_and(|v| v != 0.0),
-            Some(4) => false,
-            _ => true,
+        let gear_power = match self.gear.system_type() {
+            Some(0) => f64::from(
+                control("CIRCUIT GEAR MOTOR ON")
+                    .ok()
+                    .is_some_and(|v| v != 0.0),
+            ),
+            Some(1) => hydraulic_fraction.unwrap_or(1.0),
+            Some(4) => 0.0,
+            _ => 1.0,
         };
-        if gear_powered {
-            self.gear.advance(gear_handle || self.on_ground, ias, dt)?;
+        if gear_power > 0.0 {
+            self.gear
+                .advance(gear_handle || self.on_ground, ias, dt * gear_power)?;
         }
         ensure!(
             (0.0..=1.0).contains(&spoiler_handle),
@@ -744,6 +759,58 @@ mod tests {
     use esp_script::Value;
 
     #[test]
+    #[ignore = "requires original hydraulic aircraft"]
+    fn hydraulic_failure_stops_gear_until_pressure_is_restored() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration)
+                .unwrap()
+                .gear_system_type
+                != Some(1)
+                || data
+                    .configuration
+                    .number("GeneralEngineData", "engine_type")
+                    .unwrap()
+                    != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            vars.dispatch_event("GEAR_UP", Value::Number(0.0)).unwrap();
+            vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(flight.gear.extension(), 1.0);
+            assert_eq!(
+                vars.read(&Reference::new('A', "HYDRAULIC PRESSURE:1", Some("psi")))
+                    .unwrap(),
+                Value::Number(0.0)
+            );
+            vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(flight.gear.extension() < 1.0);
+            assert!(
+                vars.read(&Reference::new('A', "HYDRAULIC PRESSURE:1", Some("psi")))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+                    > 0.0
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
     #[ignore = "requires original retractable aircraft"]
     fn electric_gear_stops_without_power_and_resumes_when_power_returns() {
         let mut verified = 0;
@@ -828,6 +895,8 @@ mod tests {
             let data = FlightData::load(&path, 0).unwrap();
             let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, true).unwrap();
             let mut vars = controls(&data);
+            vars.set_number("HYDRAULIC SWITCH", "bool", 1.0);
+            vars.set_number("CIRCUIT HYDRAULIC PUMP ON", "bool", 1.0);
             vars.dispatch_key_event(0x10022, Value::Number(0.0))
                 .unwrap();
             for _ in 0..120 {
