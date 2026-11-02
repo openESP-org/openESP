@@ -486,10 +486,12 @@ impl App {
             for error in self.variables.dispatch_events() {
                 eprintln!("gauge event: {error}");
             }
-            self.variables.advance(STEP)?;
             if let Some(flight) = &mut self.flight {
+                self.variables.update_electrical()?;
                 flight.advance(STEP, &mut self.variables)?;
                 Flight::publish(&flight.current, &mut self.variables)?;
+            } else {
+                self.variables.advance(STEP)?;
             }
             self.apply_variable_overrides();
         }

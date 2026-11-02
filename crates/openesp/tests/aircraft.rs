@@ -554,15 +554,36 @@ fn renders_flap_indicator() {
 fn renders_configured_flap_motion_after_startup_command() {
     let temp = tempfile::tempdir().unwrap();
     for path in content::aircraft_paths() {
-        let up = capture(&path, false, &[], &temp.path().join("up.png"));
-        let moving = capture_after(
-            &path,
-            false,
-            &[],
-            Some("FLAPS_DOWN"),
-            120,
-            &temp.path().join("moving.png"),
-        );
+        let up_path = temp.path().join("up.png");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+        command
+            .arg("--aircraft")
+            .arg(&path)
+            .args([
+                "--event",
+                "TOGGLE_MASTER_BATTERY",
+                "--frames",
+                "1",
+                "--screenshot",
+            ])
+            .arg(&up_path);
+        let up = capture_command(command, &up_path);
+        let moving_path = temp.path().join("moving.png");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+        command
+            .arg("--aircraft")
+            .arg(&path)
+            .args([
+                "--event",
+                "TOGGLE_MASTER_BATTERY",
+                "--event",
+                "FLAPS_DOWN",
+                "--frames",
+                "120",
+                "--screenshot",
+            ])
+            .arg(&moving_path);
+        let moving = capture_command(command, &moving_path);
         let differences = up
             .pixels()
             .zip(moving.pixels())

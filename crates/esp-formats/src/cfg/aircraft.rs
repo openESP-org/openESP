@@ -23,6 +23,7 @@ pub struct FlapSet {
     pub index: u32,
     pub kind: u32,
     pub extending_time: Option<f64>,
+    pub system_type: Option<u32>,
     pub positions: Vec<FlapPosition>,
 }
 
@@ -54,6 +55,22 @@ pub fn flaps(config: &Config) -> Result<Vec<FlapSet>, ValueError> {
             return Err(flap_error(section, "type", &kind.to_string()));
         }
         let extending_time = super::camera::number(config, section, "extending-time")?;
+        let system_type = config
+            .value(section, "system_type")?
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| flap_error(section, "system_type", value))
+            })
+            .transpose()?;
+        if system_type.is_some_and(|kind| kind > 4) {
+            return Err(flap_error(
+                section,
+                "system_type",
+                "unsupported system type",
+            ));
+        }
         if extending_time.is_some_and(|time| time <= 0.0) {
             return Err(flap_error(section, "extending-time", "must be positive"));
         }
@@ -107,6 +124,7 @@ pub fn flaps(config: &Config) -> Result<Vec<FlapSet>, ValueError> {
             index,
             kind,
             extending_time,
+            system_type,
             positions,
         });
     }
@@ -190,6 +208,7 @@ mod tests {
                 index: 0,
                 kind: 1,
                 extending_time: Some(7.0),
+                system_type: None,
                 positions: [(0, -7.0), (1, 0.0), (2, 40.0)]
                     .into_iter()
                     .map(|(index, angle)| FlapPosition {
@@ -221,6 +240,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(limited[0].positions[1].speed_limit, Some(120.0));
+        let powered = flaps(&Config::parse("[flaps.0]\ntype=1\nsystem_type=1").unwrap()).unwrap();
+        assert_eq!(powered[0].system_type, Some(1));
     }
 
     #[test]
@@ -230,6 +251,8 @@ mod tests {
             "[flaps.0]\ntype=1\nTYPE=2",
             "[flaps.0]\nextending-time=0",
             "[flaps.0]\nextending-time=NaN",
+            "[flaps.0]\nsystem_type=5",
+            "[flaps.0]\nsystem_type=-1",
             "[flaps.0]\nflaps-position.0=NaN",
             "[flaps.0]\nflaps-position.0=10,20,30",
             "[flaps.0]\nflaps-position.0=10,NaN",

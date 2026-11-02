@@ -9,6 +9,21 @@ pub struct Flaps {
     alpha: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Power {
+    pub electric: f64,
+    pub hydraulic: f64,
+}
+
+impl Default for Power {
+    fn default() -> Self {
+        Self {
+            electric: 1.0,
+            hydraulic: 1.0,
+        }
+    }
+}
+
 struct Actuator {
     definition: FlapSet,
     angle: f64,
@@ -99,7 +114,17 @@ impl Flaps {
     }
 
     pub fn advance(&mut self, dt: f64, airspeed: f64) -> Result<()> {
+        self.advance_with_power(dt, airspeed, Power::default())
+    }
+
+    pub fn advance_with_power(&mut self, dt: f64, airspeed: f64, power: Power) -> Result<()> {
         ensure!(dt.is_finite() && dt >= 0.0, "invalid flap timestep");
+        ensure!(
+            [power.electric, power.hydraulic]
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invalid flap power"
+        );
         ensure!(
             airspeed.is_finite() && airspeed >= 0.0,
             "invalid flap airspeed"
@@ -114,7 +139,13 @@ impl Flaps {
                 continue;
             }
             let target = position.angle;
-            let travel = set.rate * dt;
+            let available = match set.definition.system_type {
+                Some(0) => power.electric,
+                Some(1) => power.hydraulic,
+                Some(4) => 0.0,
+                _ => 1.0,
+            };
+            let travel = set.rate * dt * available;
             set.angle += (target - set.angle).clamp(-travel, travel);
         }
         Ok(())
@@ -225,8 +256,69 @@ mod tests {
             index: 0,
             kind: 1,
             extending_time: Some(10.0),
+            system_type: None,
             positions: positions(&[(0, -5.0), (1, 0.0), (2, 25.0)]),
         }
+    }
+
+    #[test]
+    fn actuators_follow_their_configured_power_sources() {
+        let mut electric = definition();
+        electric.system_type = Some(0);
+        let mut hydraulic = definition();
+        hydraulic.index = 1;
+        hydraulic.kind = 2;
+        hydraulic.system_type = Some(1);
+        let mut flaps = Flaps::new(&[electric, hydraulic]).unwrap();
+        flaps.event("FLAPS_DOWN", 0.0).unwrap();
+        flaps
+            .advance_with_power(
+                2.0,
+                0.0,
+                Power {
+                    electric: 1.0,
+                    hydraulic: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            1.0
+        );
+        assert_eq!(
+            flaps.read("LEADING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -5.0
+        );
+        flaps
+            .advance_with_power(
+                2.0,
+                0.0,
+                Power {
+                    electric: 0.0,
+                    hydraulic: 0.5,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            flaps.read("TRAILING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            1.0
+        );
+        assert_eq!(
+            flaps.read("LEADING EDGE FLAPS0 LEFT ANGLE").unwrap().0,
+            -2.0
+        );
+        assert!(
+            flaps
+                .advance_with_power(
+                    1.0,
+                    0.0,
+                    Power {
+                        electric: 1.1,
+                        hydraulic: 1.0
+                    }
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -306,6 +398,7 @@ mod tests {
             index: 1,
             kind: 2,
             extending_time: Some(2.0),
+            system_type: None,
             positions: positions(&[(0, 0.0), (1, 0.5), (3, 1.0)]),
         };
         let mut flaps = Flaps::new(&[primary, sparse]).unwrap();

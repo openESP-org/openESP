@@ -95,14 +95,36 @@ impl Variables {
     pub fn advance(&mut self, dt: f64) -> anyhow::Result<()> {
         anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid simulation timestep");
         self.update_electrical()?;
+        self.advance_flaps(dt, None)
+    }
+
+    pub fn advance_flaps(
+        &mut self,
+        dt: f64,
+        hydraulic_fraction: Option<f64>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid simulation timestep");
         let reference = Reference::new('A', "AIRSPEED INDICATED", Some("knots"));
         let airspeed = if self.values.contains_key(&('A', reference.name.clone())) {
             self.read(&reference)?.number()?
         } else {
             0.0
         };
+        let electric = if self.electrical.is_some() {
+            self.read(&Reference::new('A', "CIRCUIT FLAP MOTOR ON", Some("bool")))?
+                .number()?
+        } else {
+            1.0
+        };
         if let Some(flaps) = &mut self.flaps {
-            flaps.advance(dt, airspeed)?;
+            flaps.advance_with_power(
+                dt,
+                airspeed,
+                crate::flaps::Power {
+                    electric,
+                    hydraulic: hydraulic_fraction.unwrap_or(1.0),
+                },
+            )?;
         }
         Ok(())
     }

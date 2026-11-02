@@ -30,6 +30,7 @@ pub struct Flight {
     flaps: Vec<f64>,
     spoiler_surfaces: [f64; 2],
     spoiler_extension_time: f64,
+    spoiler_system_type: Option<u32>,
     auto_spoiler_available: bool,
     auto_spoiler_min_speed: f64,
     auto_spoiler_auto_retracts: bool,
@@ -70,6 +71,14 @@ impl Flight {
             .configuration
             .number("airplane_geometry", "spoiler_extension_time")?
             .unwrap_or(0.0);
+        let spoiler_type = data
+            .configuration
+            .number("airplane_geometry", "spoiler_system_type")?;
+        ensure!(
+            spoiler_type.is_none_or(|kind| kind.fract() == 0.0 && (0.0..=4.0).contains(&kind)),
+            "invalid spoiler system type"
+        );
+        let spoiler_system_type = spoiler_type.map(|kind| kind as u32);
         let auto_spoiler_available = data
             .configuration
             .number("airplane_geometry", "auto_spoiler_available")?
@@ -133,6 +142,7 @@ impl Flight {
             flaps: Vec::new(),
             spoiler_surfaces: [0.0; 2],
             spoiler_extension_time,
+            spoiler_system_type,
             auto_spoiler_available,
             auto_spoiler_min_speed,
             auto_spoiler_auto_retracts,
@@ -297,6 +307,23 @@ impl Flight {
             .as_ref()
             .map(|h| h.update(variables))
             .transpose()?;
+        variables.advance_flaps(dt, hydraulic_fraction)?;
+        let spoiler_power = match self.spoiler_system_type {
+            Some(0) => f64::from(
+                variables
+                    .read(&Reference::new(
+                        'A',
+                        "ELECTRICAL MAIN BUS VOLTAGE",
+                        Some("volts"),
+                    ))
+                    .ok()
+                    .and_then(|v| v.number().ok())
+                    .is_some_and(|v| v > 0.0),
+            ),
+            Some(1) => hydraulic_fraction.unwrap_or(1.0),
+            Some(4) => 0.0,
+            _ => 1.0,
+        };
         let armed = variables
             .read(&Reference::new('A', "SPOILERS ARMED", Some("bool")))?
             .number()?
@@ -382,8 +409,10 @@ impl Flight {
         let targets = self
             .model
             .spoiler_targets(spoiler_handle, aileron, flap_handle);
-        let travel = if self.spoiler_extension_time > 0.0 {
-            dt / self.spoiler_extension_time
+        let travel = if dt == 0.0 || spoiler_power == 0.0 {
+            0.0
+        } else if self.spoiler_extension_time > 0.0 {
+            dt / self.spoiler_extension_time * spoiler_power
         } else {
             1.0
         };
@@ -1099,6 +1128,115 @@ mod tests {
             verified += 1;
         }
         assert!(verified > 0);
+    }
+
+    #[test]
+    #[ignore = "requires original electric and hydraulic flap aircraft"]
+    fn configured_flaps_stop_without_power_and_resume() {
+        let mut verified = [false; 2];
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let sets = esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap();
+            let Some(kind @ (0 | 1)) = sets.first().and_then(|set| set.system_type) else {
+                continue;
+            };
+            let mut flight = Flight::new(&data, 80.0, 5000.0, 0.5, true).unwrap();
+            let mut vars = controls(&data);
+            vars.configure_electrical(
+                &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+            if kind == 1 {
+                flight.start_running(&data).unwrap();
+                flight.configure_engines(&mut vars).unwrap();
+                vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                    .unwrap();
+            }
+            vars.dispatch_event("FLAPS_DOWN", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let position = || {
+                Reference::new(
+                    'A',
+                    "TRAILING EDGE FLAPS LEFT PERCENT",
+                    Some("percent over 100"),
+                )
+            };
+            assert_eq!(vars.read(&position()).unwrap().number().unwrap(), 0.0);
+            if kind == 0 {
+                vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                    .unwrap();
+            } else {
+                vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                    .unwrap();
+            }
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(vars.read(&position()).unwrap().number().unwrap() > 0.0);
+            verified[kind as usize] = true;
+        }
+        assert_eq!(verified, [true, true]);
+    }
+
+    #[test]
+    #[ignore = "requires original hydraulic aircraft"]
+    fn configured_spoilers_stop_without_power_and_resume() {
+        let mut verified = false;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration)
+                .unwrap()
+                .gear_system_type
+                != Some(1)
+            {
+                continue;
+            }
+            for kind in [0, 1] {
+                let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, true).unwrap();
+                flight.spoiler_system_type = Some(kind);
+                let mut vars = controls(&data);
+                vars.configure_electrical(
+                    &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                        .unwrap(),
+                    false,
+                )
+                .unwrap();
+                if kind == 1 {
+                    flight.start_running(&data).unwrap();
+                    flight.configure_engines(&mut vars).unwrap();
+                    vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                        .unwrap();
+                }
+                vars.dispatch_event("SPOILERS_ON", Value::Number(0.0))
+                    .unwrap();
+                for _ in 0..60 {
+                    vars.update_electrical().unwrap();
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                }
+                assert_eq!(flight.spoiler_surfaces, [0.0; 2]);
+                if kind == 0 {
+                    vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                        .unwrap();
+                } else {
+                    vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                        .unwrap();
+                }
+                for _ in 0..60 {
+                    vars.update_electrical().unwrap();
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                }
+                assert!(flight.spoiler_surfaces.iter().all(|surface| *surface > 0.0));
+            }
+            verified = true;
+        }
+        assert!(verified);
     }
 
     #[test]
