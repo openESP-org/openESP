@@ -65,6 +65,23 @@ pub struct Output {
 }
 
 impl LandingGear {
+    pub fn animation_positions(
+        &self,
+        state: &State,
+        cg: DVec3,
+        surface: Surface,
+    ) -> impl Iterator<Item = (u32, f64)> + '_ {
+        let state = *state;
+        self.wheels.iter().map(move |wheel| {
+            let arm = state.orientation * (wheel.position - cg);
+            let compression = (state.position.z + arm.z + surface.elevation).max(0.0);
+            (
+                wheel.index,
+                100.0 + 100.0 * (compression / wheel.maximum_compression).clamp(0.0, 1.0),
+            )
+        })
+    }
+
     pub fn from_data(data: &FlightData) -> Result<Self> {
         let config = &data.configuration;
         let contacts = ContactPoints::from_config(config)?;

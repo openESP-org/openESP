@@ -6,7 +6,7 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "bool" | "boolean" | "number" | "part" | "position" | "percent over 100" | "mach" => {
             Some((0, 1.0))
         }
-        "percent" => Some((0, 0.01)),
+        "percent" | "keyframe" => Some((0, 0.01)),
         "degrees" | "degree" => Some((1, std::f64::consts::PI / 180.0)),
         "radians" | "radian" => Some((1, 1.0)),
         "knots" | "knot" => Some((2, 1852.0 / 3600.0)),

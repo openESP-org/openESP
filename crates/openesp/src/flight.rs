@@ -537,6 +537,28 @@ impl Flight {
 
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
+        variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
+        for (index, position) in
+            self.gear
+                .animation_positions(&self.current, self.loading.cg, TEST_SURFACE)
+        {
+            variables.set_number(
+                &format!("GEAR ANIMATION POSITION:{index}"),
+                "keyframe",
+                position,
+            );
+            variables.set_number(&format!("GEAR POSITION:{index}"), "enum", 2.0);
+            if let Some(name) = [
+                "GEAR CENTER POSITION",
+                "GEAR LEFT POSITION",
+                "GEAR RIGHT POSITION",
+                "GEAR AUX POSITION",
+            ]
+            .get(index as usize)
+            {
+                variables.set_number(name, "percent over 100", 1.0);
+            }
+        }
         let fraction = if self.loading.fuel_capacity_gallons > 0.0 {
             self.loading.fuel_gallons / self.loading.fuel_capacity_gallons
         } else {
@@ -685,6 +707,51 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original aircraft with wheel contacts"]
+    fn gear_animation_tracks_actual_suspension_compression() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let airborne = Flight::new(&data, 100.0, 1000.0, 0.5, true).unwrap();
+            let mut ground = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            let mut vars = controls(&data);
+            airborne.publish_loading(&mut vars);
+            let position = |vars: &mut Variables, index| {
+                vars.read(&Reference::new(
+                    'A',
+                    &format!("GEAR ANIMATION POSITION:{index}"),
+                    Some("keyframe"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap()
+            };
+            for index in 0..3 {
+                assert_eq!(position(&mut vars, index), 100.0);
+            }
+            for _ in 0..600 {
+                ground.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            for index in 0..3 {
+                let value = position(&mut vars, index);
+                assert!(
+                    value > 100.0 && value <= 200.0,
+                    "{} gear {index} frame {value}",
+                    path.display()
+                );
+            }
+            assert_eq!(
+                vars.read(&Reference::new(
+                    'A',
+                    "GEAR CENTER POSITION",
+                    Some("percent over 100")
+                ))
+                .unwrap(),
+                Value::Number(1.0)
+            );
+        }
+    }
 
     #[test]
     #[ignore = "requires original aircraft with configured spoilers"]
