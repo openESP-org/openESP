@@ -12,6 +12,13 @@ use super::Condition;
 pub(super) struct Motion {
     offset: DVec2,
     rotation: Option<Rotation>,
+    shift: Option<Shift>,
+}
+
+#[derive(Clone)]
+struct Shift {
+    expression: usize,
+    scale: DVec2,
 }
 
 #[derive(Clone)]
@@ -33,22 +40,24 @@ impl Motion {
             .find(|c| c.has_tag_name("Rotation"))
             .map(|node| Rotation::parse(node, DVec2::from(centre), conditions))
             .transpose()?;
+        let shift = node
+            .children()
+            .find(|c| c.has_tag_name("Shift"))
+            .map(|node| Shift::parse(node, conditions))
+            .transpose()?;
         Ok(Self {
             offset: DVec2::from(offset),
             rotation,
+            shift,
         })
     }
 
     pub fn image(node: Node<'_, '_>) -> Result<Self> {
-        let offset = node
-            .children()
-            .find(|c| c.has_tag_name("Axis"))
-            .map(point)
-            .transpose()?
-            .unwrap_or(DVec2::ZERO);
+        let offset = axis(node)?;
         Ok(Self {
             offset: -offset,
             rotation: None,
+            shift: None,
         })
     }
 
@@ -56,17 +65,98 @@ impl Motion {
         if let Some(index) = self.rotation.as_mut().and_then(|r| r.expression.as_mut()) {
             *index += offset;
         }
+        if let Some(shift) = &mut self.shift {
+            shift.expression += offset;
+        }
+    }
+
+    pub fn translation(offset: DVec2) -> Self {
+        Self {
+            offset,
+            rotation: None,
+            shift: None,
+        }
+    }
+}
+
+pub(super) fn axis(node: Node<'_, '_>) -> Result<DVec2> {
+    node.children()
+        .find(|c| c.has_tag_name("Axis"))
+        .map(point)
+        .transpose()
+        .map(|p| p.unwrap_or(DVec2::ZERO))
+}
+
+fn supported_effects(node: Node<'_, '_>) -> Result<()> {
+    anyhow::ensure!(
+        !node.children().any(|c| c.has_tag_name("Delay")),
+        "unsupported gauge motion delay"
+    );
+    for failure in node
+        .children()
+        .filter(|c| c.has_tag_name("FailureTable"))
+        .flat_map(|t| t.children().filter(|c| c.has_tag_name("Failure")))
+    {
+        let key = child_text(failure, "Fail_Key").unwrap_or("NONE").trim();
+        anyhow::ensure!(
+            key.is_empty() || key.eq_ignore_ascii_case("NONE"),
+            "unsupported gauge motion failure {key}"
+        );
+    }
+    Ok(())
+}
+
+fn expression(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<usize> {
+    let source = child_text(node, "Script").context("missing motion expression")?;
+    anyhow::ensure!(!source.trim().is_empty(), "empty motion expression");
+    let program = Program::compile(source.trim())?;
+    let minimum = number(node, "Minimum")?.filter(|v| *v != -9_999_999.0);
+    let maximum = number(node, "Maximum")?.filter(|v| *v != -9_999_999.0);
+    anyhow::ensure!(
+        minimum.zip(maximum).is_none_or(|(min, max)| min <= max),
+        "invalid motion bounds"
+    );
+    let index = conditions.len();
+    conditions.push(Condition {
+        program,
+        value: None,
+        minimum,
+        maximum,
+        reported: false,
+    });
+    Ok(index)
+}
+
+impl Shift {
+    fn parse(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<Self> {
+        supported_effects(node)?;
+        anyhow::ensure!(
+            !node.children().any(|c| c.has_tag_name("NonlinearityTable")),
+            "unsupported nonlinear gauge shift"
+        );
+        let scale = point(
+            node.children()
+                .find(|c| c.has_tag_name("Scale"))
+                .context("missing shift scale")?,
+        )?;
+        let expression = expression(
+            node.children()
+                .find(|c| c.has_tag_name("Expression"))
+                .context("missing shift expression")?,
+            conditions,
+        )?;
+        Ok(Self { expression, scale })
+    }
+
+    fn offset(&self, conditions: &[Condition]) -> Option<DVec2> {
+        let value = conditions[self.expression].value?;
+        Some(self.scale * value)
     }
 }
 
 impl Rotation {
     fn parse(node: Node<'_, '_>, centre: DVec2, conditions: &mut Vec<Condition>) -> Result<Self> {
-        anyhow::ensure!(
-            !node
-                .children()
-                .any(|c| c.has_tag_name("Delay") || c.has_tag_name("FailureTable")),
-            "unsupported rotation delay or failure table"
-        );
+        supported_effects(node)?;
         let points_to = if let Some(direction) = child_text(node, "PointsTo") {
             match direction.trim().to_ascii_uppercase().as_str() {
                 "NORTH" => 0.0,
@@ -90,14 +180,19 @@ impl Rotation {
                 let value =
                     number(entry, "ExpressionResult")?.context("missing rotation table value")?;
                 let angle = match (
-                    number(entry, "Degrees")?,
-                    number(entry, "Radians")?,
-                    entry.children().find(|c| c.has_tag_name("FloatPosition")),
+                    number(entry, "Degrees")?.filter(|v| *v != -99_999.0),
+                    number(entry, "Radians")?.filter(|v| *v != -99_999.0),
+                    entry
+                        .children()
+                        .find(|c| c.has_tag_name("FloatPosition"))
+                        .map(point)
+                        .transpose()?
+                        .filter(|p| *p != DVec2::ZERO),
                 ) {
                     (Some(degrees), None, None) => degrees.to_radians(),
                     (None, Some(radians), None) => radians,
                     (None, None, Some(position)) => {
-                        let delta = point(position)? - centre;
+                        let delta = position - centre;
                         anyhow::ensure!(
                             delta.length_squared() > 0.0,
                             "rotation table point is at pivot"
@@ -128,27 +223,7 @@ impl Rotation {
         let expression = node
             .children()
             .find(|c| c.has_tag_name("Expression"))
-            .map(|expression| -> Result<usize> {
-                let source =
-                    child_text(expression, "Script").context("missing rotation expression")?;
-                anyhow::ensure!(!source.trim().is_empty(), "empty rotation expression");
-                let program = Program::compile(source.trim())?;
-                let minimum = number(expression, "Minimum")?.filter(|v| *v != -9_999_999.0);
-                let maximum = number(expression, "Maximum")?.filter(|v| *v != -9_999_999.0);
-                anyhow::ensure!(
-                    minimum.zip(maximum).is_none_or(|(min, max)| min <= max),
-                    "invalid rotation bounds"
-                );
-                let index = conditions.len();
-                conditions.push(Condition {
-                    program,
-                    value: None,
-                    minimum,
-                    maximum,
-                    reported: false,
-                });
-                Ok(index)
-            })
+            .map(|node| expression(node, conditions))
             .transpose()?;
         Ok(Self {
             expression,
@@ -195,11 +270,23 @@ pub(super) fn transform(motion: &[Motion], conditions: &[Condition]) -> Option<D
         if let Some(rotation) = &step.rotation {
             transform *= DAffine2::from_angle(rotation.angle(conditions)?);
         }
+        if let Some(shift) = &step.shift {
+            transform *= DAffine2::from_translation(shift.offset(conditions)?);
+        }
     }
     transform.is_finite().then_some(transform)
 }
 
 pub(super) fn draw(image: &RgbaImage, transform: DAffine2, output: &mut RgbaImage) {
+    draw_sampled(image, transform, output, Interpolation::Bilinear);
+}
+
+pub(super) fn draw_sampled(
+    image: &RgbaImage,
+    transform: DAffine2,
+    output: &mut RgbaImage,
+    interpolation: Interpolation,
+) {
     if transform.matrix2 == DMat2::IDENTITY && transform.translation.fract() == DVec2::ZERO {
         overlay(
             output,
@@ -240,7 +327,7 @@ pub(super) fn draw(image: &RgbaImage, transform: DAffine2, output: &mut RgbaImag
     warp_into(
         image,
         projection,
-        Interpolation::Bilinear,
+        interpolation,
         Border::Constant(Rgba([0; 4])),
         &mut warped,
     );
@@ -321,6 +408,32 @@ mod tests {
         assert!((rotation.angle(&conditions).unwrap() - PI / 4.0).abs() < 1e-12);
         conditions[0].value = None;
         assert!(rotation.angle(&conditions).is_none());
+    }
+
+    #[test]
+    fn applies_shift_along_the_rotated_instrument_axes() {
+        let document = roxmltree::Document::parse("<Element><Rotation><Expression><Script>0</Script></Expression></Rotation><Shift><Scale>2,-3</Scale><Expression><Script>0</Script></Expression></Shift></Element>").unwrap();
+        let mut conditions = Vec::new();
+        let motion = Motion::element(
+            document.root_element(),
+            (10.0, 20.0),
+            (10.0, 20.0),
+            &mut conditions,
+        )
+        .unwrap();
+        assert!(transform(std::slice::from_ref(&motion), &conditions).is_none());
+        conditions[0].value = Some(FRAC_PI_2);
+        conditions[1].value = Some(4.0);
+        let position = transform(&[motion], &conditions)
+            .unwrap()
+            .transform_point2(DVec2::ZERO);
+        assert!(position.abs_diff_eq(DVec2::new(22.0, 28.0), 1e-12));
+    }
+
+    #[test]
+    fn empty_failure_entries_do_not_disable_motion() {
+        assert!(rotation("<Rotation><FailureTable><Failure/></FailureTable><Expression><Script>0</Script></Expression></Rotation>").is_ok());
+        assert!(rotation("<Rotation><FailureTable><Failure><Fail_Key>SYSTEM_PITOT_STATIC</Fail_Key><Fail_Action>Freeze</Fail_Action></Failure></FailureTable></Rotation>").is_err());
     }
 
     #[test]

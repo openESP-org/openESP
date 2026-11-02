@@ -393,6 +393,128 @@ mod tests {
     use esp_script::Value;
 
     #[test]
+    #[ignore = "requires original PFD artwork and installed gauge fonts"]
+    fn original_attitude_horizon_tracks_flight_orientation_within_its_mask() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let panel = esp_assets::panel::Panel::load(&path, None)
+                .unwrap()
+                .unwrap();
+            let layout = panel.layout().unwrap();
+            let Some((window, gauge)) = layout
+                .windows
+                .iter()
+                .filter(|w| w.texture.is_some())
+                .find_map(|w| {
+                    w.gauges
+                        .iter()
+                        .find(|g| g.reference.to_ascii_lowercase().ends_with("!pfd"))
+                        .map(|g| (w, g))
+                })
+            else {
+                continue;
+            };
+            let mut image = esp_assets::gauge::load_panel(&panel, window.texture.unwrap())
+                .unwrap()
+                .unwrap();
+            let mut variables = controls(&data);
+            variables
+                .configure_electrical(
+                    &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                        .unwrap(),
+                    true,
+                )
+                .unwrap();
+            variables.set('P', "UNITS OF MEASURE", Some("enum"), Value::Number(0.0));
+            let flight = Flight::new(&data, 200.0, 10000.0, 0.5, true).unwrap();
+            let sx =
+                window.pixel_size.as_ref().unwrap().width / window.size_mm.as_ref().unwrap().width;
+            let sy = window.pixel_size.as_ref().unwrap().height.unwrap()
+                / window.size_mm.as_ref().unwrap().height.unwrap();
+            let gx = gauge.width.unwrap_or(260.0) / 260.0;
+            let gy = gauge.height.unwrap_or(260.0) / 260.0;
+            let point = |x: f64, y: f64| {
+                (
+                    ((gauge.x + x * gx) * sx).round() as u32,
+                    ((gauge.y + y * gy) * sy).round() as u32,
+                )
+            };
+            let sample = |image: &image::RgbaImage, x, y| {
+                let (x, y) = point(x, y);
+                *image.get_pixel(x, y)
+            };
+            let crop = |image: &image::RgbaImage| {
+                let (x, y) = point(47.0, 55.0);
+                let (right, bottom) = point(179.0, 194.0);
+                image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image()
+            };
+            let mut pictures = Vec::new();
+            for (name, pitch, bank) in [
+                ("level", 0.0_f64, 0.0_f64),
+                ("pitch", 20.0, 0.0),
+                ("bank", 0.0, 30.0),
+            ] {
+                let state = State {
+                    orientation: DQuat::from_euler(
+                        EulerRot::ZYX,
+                        0.0,
+                        pitch.to_radians(),
+                        bank.to_radians(),
+                    ),
+                    ..flight.current
+                };
+                Flight::publish(&state, &mut variables).unwrap();
+                assert!(image.update(&mut variables));
+                if let Some(directory) = std::env::var_os("OPENESP_TEST_CAPTURE") {
+                    let directory = std::path::PathBuf::from(directory);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let (x, y) = point(0.0, 0.0);
+                    let (right, bottom) = point(260.0, 260.0);
+                    image::imageops::crop_imm(&image.image, x, y, right - x, bottom - y)
+                        .to_image()
+                        .save(directory.join(format!("pfd-{name}.png")))
+                        .unwrap();
+                }
+                pictures.push(crop(&image.image));
+                if name == "level" {
+                    let sky = sample(&image.image, 80.0, 90.0);
+                    let ground = sample(&image.image, 80.0, 150.0);
+                    assert!(
+                        sky[2] > sky[0] + 20,
+                        "sky is outside its expected aperture: {sky:?}"
+                    );
+                    assert!(
+                        ground[0] > ground[2] + 20,
+                        "ground is outside its expected aperture: {ground:?}"
+                    );
+                }
+                if name == "pitch" {
+                    let sky = sample(&image.image, 80.0, 150.0);
+                    assert!(
+                        sky[2] > sky[0] + 20,
+                        "nose-up pitch did not move the horizon down: {sky:?}"
+                    );
+                }
+                assert!(!image.update(&mut variables));
+            }
+            for picture in &pictures[1..] {
+                assert!(
+                    pictures[0]
+                        .pixels()
+                        .zip(picture.pixels())
+                        .filter(|(a, b)| a != b)
+                        .count()
+                        > 1000,
+                    "flight attitude did not move original horizon artwork"
+                );
+            }
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
     #[ignore = "requires original EICAS XML artwork and its installed Arial font"]
     fn original_engine_text_readouts_follow_air_table_engine_state() {
         let mut count = 0;

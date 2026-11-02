@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use esp_formats::{cfg::panel::WindowKind, gauge::Gauge};
 use esp_script::{Host, Program};
-use glam::DAffine2;
+use glam::{DAffine2, DVec2};
 use image::{
     Rgba, RgbaImage,
     imageops::{FilterType, overlay, resize},
@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
 
+mod mask;
 mod rotation;
 mod text;
+use mask::Mask;
 use rotation::Motion;
 
 pub struct PanelImage {
@@ -95,6 +97,7 @@ struct Canvas {
 struct Layer {
     image: RgbaImage,
     text: Option<text::Text>,
+    masks: Vec<Mask>,
     motion: Vec<Motion>,
     transform: DAffine2,
     conditions: Vec<Requirement>,
@@ -301,7 +304,11 @@ impl PanelImage {
             let mut dirty = false;
             for layer in &mut gauge.layers {
                 let transform = rotation::transform(&layer.motion, &self.conditions);
+                for mask in &mut layer.masks {
+                    dirty |= mask.update(&self.conditions);
+                }
                 let visible = transform.is_some()
+                    && layer.masks.iter().all(Mask::ready)
                     && layer
                         .conditions
                         .iter()
@@ -345,7 +352,7 @@ impl PanelImage {
             let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
             for layer in &gauge.layers {
                 if layer.visible {
-                    rotation::draw(&layer.image, layer.transform, &mut art);
+                    mask::draw(&layer.image, layer.transform, &layer.masks, &mut art);
                 }
             }
             let scaled = resize(&art, gauge.target.0, gauge.target.1, FilterType::Triangle);
@@ -507,19 +514,21 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 anyhow::bail!("invalid gauge size {w}x{h}");
             }
             let mut layers = Vec::new();
-            let mut stack = vec![(document.root(), 0.0, 0.0, Vec::new(), Vec::new())];
-            while let Some((node, x, y, mut parents, mut motion)) = stack.pop() {
+            let mut stack = vec![(
+                document.root(),
+                0.0,
+                0.0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )];
+            while let Some((node, x, y, mut parents, mut motion, mut masks)) = stack.pop() {
                 if node.has_tag_name("Element")
                     && node.children().any(|child| {
                         child.is_element()
                             && matches!(
                                 child.tag_name().name(),
-                                "Rotate"
-                                    | "Shift"
-                                    | "MaskImage"
-                                    | "LeftScript"
-                                    | "TopScript"
-                                    | "ClipRect"
+                                "Rotate" | "LeftScript" | "TopScript" | "ClipRect"
                             )
                     })
                 {
@@ -603,12 +612,33 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         };
                         let mut requirements = parents.clone();
                         requirements.push(Requirement::Case(index, value));
-                        stack.push((case, x, y, requirements, motion.clone()));
+                        stack.push((case, x, y, requirements, motion.clone(), masks.clone()));
                     }
                     continue;
                 }
                 let (x, y) = if node.has_tag_name("Element") {
-                    let (px, py) = position(node)?;
+                    let (mut px, mut py) = position(node)?;
+                    if let Some(mask) = node.children().find(|c| c.has_tag_name("MaskImage")) {
+                        match Mask::parse(
+                            panel,
+                            module,
+                            mask,
+                            motion.clone(),
+                            DVec2::new(px, py),
+                            &conditions,
+                        ) {
+                            Ok(mask) => {
+                                px += mask.anchor().x;
+                                py += mask.anchor().y;
+                                masks.push(mask);
+                            }
+                            Err(error) => {
+                                eprintln!("gauge mask {}: {error:#}", gauge.reference);
+                                omitted_elements += 1;
+                                continue;
+                            }
+                        }
+                    }
                     match Motion::element(node, (x + px, y + py), (px, py), &mut conditions) {
                         Ok(transform) => motion.push(transform),
                         Err(error) => {
@@ -660,9 +690,12 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     layers.push(Layer {
                         image: bitmap,
                         text: None,
+                        masks: masks.clone(),
                         motion,
                         transform: transform.unwrap_or(DAffine2::IDENTITY),
-                        visible: parents.is_empty() && transform.is_some(),
+                        visible: parents.is_empty()
+                            && transform.is_some()
+                            && masks.iter().all(Mask::ready),
                         conditions: parents.clone(),
                     });
                 }
@@ -673,9 +706,12 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                             layers.push(Layer {
                                 image,
                                 text: Some(text),
+                                masks: masks.clone(),
                                 motion: motion.clone(),
                                 transform: transform.unwrap_or(DAffine2::IDENTITY),
-                                visible: parents.is_empty() && transform.is_some(),
+                                visible: parents.is_empty()
+                                    && transform.is_some()
+                                    && masks.iter().all(Mask::ready),
                                 conditions: parents.clone(),
                             });
                         }
@@ -691,7 +727,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         || child.has_tag_name("Select")
                         || child.has_tag_name("GaugeText")
                     {
-                        stack.push((child, x, y, parents.clone(), motion.clone()));
+                        stack.push((child, x, y, parents.clone(), motion.clone(), masks.clone()));
                     }
                 }
             }
@@ -736,6 +772,9 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             continue;
         };
         for layer in &mut canvas.layers {
+            for mask in &mut layer.masks {
+                mask.rebase(conditions.len());
+            }
             for motion in &mut layer.motion {
                 motion.rebase(conditions.len());
             }
@@ -1776,5 +1815,44 @@ mod tests {
             !image.update(&mut host),
             "rotation must clamp at the expression maximum"
         );
+    }
+
+    #[test]
+    fn shifts_artwork_within_fixed_mask_and_preserves_mask_colors() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=8,8\npixel_size=8,8\ntexture=$screen\nbackground_color=10,20,30\ngauge00=example!masked,0,0").unwrap();
+        std::fs::write(module.join("masked.xml"), r#"<Gauge><Size X="8" Y="8"/><Element><FloatPosition>1,1</FloatPosition><Element><FloatPosition>3,3</FloatPosition><Image Name="strip.bmp"/><MaskImage Name="mask.bmp"><Axis>1,0</Axis></MaskImage><Shift><Scale>1,0</Scale><Expression><Minimum>-2</Minimum><Maximum>0</Maximum><Script>(L:Value)</Script></Expression><FailureTable><Failure/></FailureTable></Shift></Element></Element></Gauge>"#).unwrap();
+        for (name, pixels) in [
+            ("strip.bmp", [255, 0, 0, 0, 255, 0, 0, 0, 255]),
+            ("mask.bmp", [0, 0, 0, 1, 1, 1, 255, 255, 0]),
+        ] {
+            let mut bytes = Vec::new();
+            image::codecs::bmp::BmpEncoder::new(&mut bytes)
+                .encode(&pixels, 3, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            std::fs::write(module.join(name), bytes).unwrap();
+        }
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_elements, 0);
+        let mut host = TestHost(0.0);
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(5, 4).0, [255, 0, 0, 255]);
+        assert_eq!(image.image.get_pixel(6, 4).0, [255, 255, 0, 255]);
+        assert_eq!(image.image.get_pixel(7, 4).0, [10, 20, 30, 255]);
+        host.0 = -1.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(4, 4).0, [10, 20, 30, 255]);
+        assert_eq!(image.image.get_pixel(5, 4).0, [0, 255, 0, 255]);
+        assert_eq!(image.image.get_pixel(6, 4).0, [255, 255, 0, 255]);
+        assert!(!image.update(&mut host));
+        host.0 = -2.0;
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(5, 4).0, [0, 0, 255, 255]);
+        host.0 = -10.0;
+        assert!(!image.update(&mut host));
     }
 }

@@ -122,6 +122,61 @@ fn renders_live_engine_text_readouts() {
 
 #[test]
 #[ignore = "requires a GPU, desktop and original turbine aircraft"]
+fn renders_masked_attitude_horizon() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(1.0)
+        {
+            continue;
+        }
+        let mut pictures = Vec::new();
+        for (name, variables) in [
+            (
+                "level",
+                [
+                    "A:ATTITUDE INDICATOR PITCH DEGREES,degrees=0",
+                    "A:ATTITUDE INDICATOR BANK DEGREES,radians=0",
+                ],
+            ),
+            (
+                "attitude",
+                [
+                    "A:ATTITUDE INDICATOR PITCH DEGREES,degrees=-20",
+                    "A:ATTITUDE INDICATOR BANK DEGREES,degrees=-30",
+                ],
+            ),
+        ] {
+            pictures.push(capture_after(
+                &path,
+                true,
+                &variables,
+                Some("TOGGLE_MASTER_BATTERY"),
+                1,
+                &temp.path().join(format!("horizon-{name}.png")),
+            ));
+        }
+        assert!(
+            pictures[0]
+                .pixels()
+                .zip(pictures[1].pixels())
+                .filter(|(a, b)| a != b)
+                .count()
+                > 100,
+            "attitude horizon did not reach cockpit pixels"
+        );
+        count += 1;
+    }
+    assert!(count > 0);
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original turbine aircraft"]
 fn renders_cockpit_power_from_battery_switch_events() {
     let temp = tempfile::tempdir().unwrap();
     let mut count = 0;
