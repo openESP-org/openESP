@@ -3,6 +3,7 @@ use ini::{Ini, ParseError, ParseOption};
 
 pub mod aircraft;
 pub mod camera;
+pub mod contact;
 pub mod electrical;
 pub mod engine;
 pub mod loading;
