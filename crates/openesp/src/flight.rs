@@ -28,7 +28,7 @@ pub struct Flight {
     previous: State,
     previous_cg: DVec3,
     flaps: Vec<f64>,
-    spoilers: f64,
+    spoiler_surfaces: [f64; 2],
     spoiler_extension_time: f64,
     auto_spoiler_available: bool,
     auto_spoiler_min_speed: f64,
@@ -131,7 +131,7 @@ impl Flight {
             current,
             previous: current,
             flaps: Vec::new(),
-            spoilers: 0.0,
+            spoiler_surfaces: [0.0; 2],
             spoiler_extension_time,
             auto_spoiler_available,
             auto_spoiler_min_speed,
@@ -348,6 +348,7 @@ impl Flight {
                 variables.set_number("SPOILERS HANDLE POSITION", "percent over 100", 1.0);
             }
         }
+        let flap_handle = variables.flap_handle_fraction();
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -377,23 +378,26 @@ impl Flight {
             (0.0..=1.0).contains(&spoiler_handle),
             "invalid spoiler handle"
         );
-        let target = if self.model.has_spoilers() {
-            spoiler_handle
-        } else {
-            0.0
-        };
+        let aileron = control("AILERON LEFT DEFLECTION PCT")?;
+        let targets = self
+            .model
+            .spoiler_targets(spoiler_handle, aileron, flap_handle);
         let travel = if self.spoiler_extension_time > 0.0 {
             dt / self.spoiler_extension_time
         } else {
             1.0
         };
-        self.spoilers += (target - self.spoilers).clamp(-travel, travel);
+        for (surface, target) in self.spoiler_surfaces.iter_mut().zip(targets) {
+            *surface += (target - *surface).clamp(-travel, travel);
+        }
+        let spoilers = (self.spoiler_surfaces[0] + self.spoiler_surfaces[1]) * 0.5;
         let controls = Controls {
             elevator: control("ELEVATOR DEFLECTION PCT")?,
-            aileron: control("AILERON LEFT DEFLECTION PCT")?,
+            aileron,
             rudder: control("RUDDER DEFLECTION PCT")?,
             elevator_trim: control("ELEVATOR TRIM PCT")?,
-            spoilers: self.spoilers,
+            spoilers,
+            spoiler_difference: self.spoiler_surfaces[0] - self.spoiler_surfaces[1],
             gear: self.gear.extension(),
         };
         let ground_controls = GroundControls {
@@ -409,8 +413,11 @@ impl Flight {
             "radians",
             controls.elevator_trim * self.model.elevator_trim_limit(),
         );
-        for name in ["SPOILERS LEFT POSITION", "SPOILERS RIGHT POSITION"] {
-            variables.set_number(name, "percent over 100", self.spoilers);
+        for (name, position) in ["SPOILERS LEFT POSITION", "SPOILERS RIGHT POSITION"]
+            .into_iter()
+            .zip(self.spoiler_surfaces)
+        {
+            variables.set_number(name, "percent over 100", position);
         }
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
@@ -873,6 +880,123 @@ mod tests {
     use esp_script::Value;
 
     #[test]
+    #[ignore = "requires original aircraft with spoilerons"]
+    fn spoilerons_follow_aileron_direction_and_add_roll_moment() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("airplane_geometry", "spoilerons_available")
+                .unwrap()
+                .unwrap_or(0.0)
+                == 0.0
+                || data
+                    .configuration
+                    .number("airplane_geometry", "min_flaps_for_spoilerons")
+                    .unwrap()
+                    .unwrap_or(0.0)
+                    > 0.0
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 200.0, 5000.0, 0.5, true).unwrap();
+            let mut gated_data = FlightData::load(&path, 0).unwrap();
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let mut changed = false;
+            let source = source
+                .lines()
+                .map(|line| {
+                    if line
+                        .split('=')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("min_flaps_for_spoilerons")
+                    {
+                        changed = true;
+                        "min_flaps_for_spoilerons=0.5".to_owned()
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(changed);
+            gated_data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let gated = Aerodynamics::from_data(&gated_data).unwrap();
+            assert_eq!(gated.spoiler_targets(0.0, 1.0, 0.0), [0.0; 2]);
+            assert!(gated.spoiler_targets(0.0, 1.0, 0.5)[1] > 0.0);
+            let mut vars = controls(&data);
+            vars.set_number("AILERON LEFT DEFLECTION PCT", "percent", 25.0);
+            for _ in 0..60 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(flight.spoiler_surfaces, [0.0, 0.0]);
+            vars.set_number("AILERON LEFT DEFLECTION PCT", "percent", 100.0);
+            for _ in 0..60 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(flight.spoiler_surfaces[1] > 0.0 && flight.spoiler_surfaces[0] == 0.0);
+            let reference = |name| Reference::new('A', name, Some("percent over 100"));
+            let left = vars
+                .read(&reference("SPOILERS LEFT POSITION"))
+                .unwrap()
+                .number()
+                .unwrap();
+            let right = vars
+                .read(&reference("SPOILERS RIGHT POSITION"))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert_eq!([left, right], flight.spoiler_surfaces);
+            let mut base = Controls {
+                aileron: 1.0,
+                spoilers: (left + right) * 0.5,
+                ..Controls::default()
+            };
+            let flow = DVec3::X * 80.0;
+            let clean = flight
+                .model
+                .forces(
+                    flow,
+                    DVec3::ZERO,
+                    1.0,
+                    base,
+                    &flight.flaps,
+                    flight.loading.cg,
+                )
+                .unwrap();
+            base.spoiler_difference = left - right;
+            let asymmetric = flight
+                .model
+                .forces(
+                    flow,
+                    DVec3::ZERO,
+                    1.0,
+                    base,
+                    &flight.flaps,
+                    flight.loading.cg,
+                )
+                .unwrap();
+            assert!(asymmetric.moment.x > clean.moment.x);
+            vars.set_number("AILERON LEFT DEFLECTION PCT", "percent", -100.0);
+            for _ in 0..180 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(flight.spoiler_surfaces[0] > 0.0 && flight.spoiler_surfaces[1] < 1e-9);
+            vars.dispatch_event("SPOILERS_ON", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..180 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(flight.spoiler_surfaces.iter().all(|v| *v > 0.99));
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
     #[ignore = "requires an original aircraft with automatic spoilers"]
     fn automatic_spoilers_deploy_on_touchdown_and_retract_for_go_around() {
         let mut verified = 0;
@@ -915,7 +1039,12 @@ mod tests {
                 }
                 assert!(flight.on_ground);
                 if armed {
-                    assert!(flight.spoilers > 0.9);
+                    assert!(
+                        flight
+                            .spoiler_surfaces
+                            .iter()
+                            .all(|position| *position > 0.9)
+                    );
                     assert_eq!(
                         vars.read(&Reference::new(
                             'A',
@@ -957,9 +1086,14 @@ mod tests {
                     for _ in 0..180 {
                         flight.advance(1.0 / 60.0, &mut vars).unwrap();
                     }
-                    assert!(flight.spoilers < 1e-9);
+                    assert!(
+                        flight
+                            .spoiler_surfaces
+                            .iter()
+                            .all(|position| *position < 1e-9)
+                    );
                 } else {
-                    assert_eq!(flight.spoilers, 0.0);
+                    assert_eq!(flight.spoiler_surfaces, [0.0; 2]);
                 }
             }
             verified += 1;
@@ -1240,7 +1374,12 @@ mod tests {
             for _ in 0..30 {
                 dirty.advance(1.0 / 60.0, &mut dirty_vars).unwrap();
             }
-            assert!(dirty.spoilers < 1e-9);
+            assert!(
+                dirty
+                    .spoiler_surfaces
+                    .iter()
+                    .all(|position| *position < 1e-9)
+            );
             verified += 1;
         }
         assert!(verified > 0);

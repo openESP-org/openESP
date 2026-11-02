@@ -77,6 +77,13 @@ impl Variables {
         self.flaps.iter().flat_map(|flaps| flaps.angles())
     }
 
+    pub fn flap_handle_fraction(&self) -> f64 {
+        self.flaps
+            .as_ref()
+            .and_then(|flaps| flaps.read("FLAPS HANDLE PERCENT"))
+            .map_or(0.0, |(value, _)| value)
+    }
+
     pub fn configure_flaps(
         &mut self,
         definitions: &[esp_formats::cfg::aircraft::FlapSet],

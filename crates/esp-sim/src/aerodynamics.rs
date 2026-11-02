@@ -23,6 +23,9 @@ pub struct Aerodynamics {
     elevator_trim: f64,
     elevator_trim_limit: f64,
     spoiler_limit: f64,
+    spoileron_gain: f64,
+    spoileron_threshold: f64,
+    spoileron_min_flaps: f64,
     aileron: f64,
     rudder: f64,
     incidence: f64,
@@ -40,6 +43,7 @@ pub struct Controls {
     pub rudder: f64,
     pub elevator_trim: f64,
     pub spoilers: f64,
+    pub spoiler_difference: f64,
     pub gear: f64,
 }
 
@@ -130,6 +134,10 @@ impl Aerodynamics {
             .number("airplane_geometry", "elevator_trim_limit")?
             .unwrap_or(0.0)
             .to_radians();
+        let spoilerons = config
+            .number("airplane_geometry", "spoilerons_available")?
+            .unwrap_or(0.0)
+            != 0.0;
         let result = Self {
             area,
             span,
@@ -158,6 +166,20 @@ impl Aerodynamics {
                 .number("airplane_geometry", "spoiler_limit")?
                 .unwrap_or(0.0)
                 .to_radians(),
+            spoileron_gain: if spoilerons {
+                config
+                    .number("airplane_geometry", "aileron_to_spoileron_gain")?
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            spoileron_threshold: config
+                .number("airplane_geometry", "min_ailerons_for_spoilerons")?
+                .unwrap_or(0.0)
+                .to_radians(),
+            spoileron_min_flaps: config
+                .number("airplane_geometry", "min_flaps_for_spoilerons")?
+                .unwrap_or(0.0),
             aileron: (geometry("aileron_up_limit")? + geometry("aileron_down_limit")?).to_radians()
                 * 0.5,
             rudder: geometry("rudder_limit")?.to_radians(),
@@ -181,7 +203,10 @@ impl Aerodynamics {
                     &result.rudder,
                     &result.elevator_trim,
                     &result.elevator_trim_limit,
-                    &result.spoiler_limit
+                    &result.spoiler_limit,
+                    &result.spoileron_gain,
+                    &result.spoileron_threshold,
+                    &result.spoileron_min_flaps
                 ])
                 .all(|angle| *angle >= 0.0),
             "invalid control surface limits"
@@ -219,7 +244,8 @@ impl Aerodynamics {
                 controls.elevator,
                 controls.aileron,
                 controls.rudder,
-                controls.elevator_trim
+                controls.elevator_trim,
+                controls.spoiler_difference
             ]
             .iter()
             .all(|n| n.is_finite() && n.abs() <= 1.0),
@@ -277,6 +303,7 @@ impl Aerodynamics {
             + c.side.cy_r * r;
         let roll = c.roll.cl_beta * beta
             + c.roll.cl_delta_aileron * aileron
+            + c.roll.cl_delta_spoiler * controls.spoiler_difference * self.spoiler_limit
             + c.roll.cl_delta_rudder * rudder
             + c.roll.cl_p * p * self.stability.x
             + c.roll.cl_r * r;
@@ -318,6 +345,20 @@ impl Aerodynamics {
 
     pub fn has_spoilers(&self) -> bool {
         self.spoiler_limit > 0.0
+    }
+
+    pub fn spoiler_targets(&self, handle: f64, aileron: f64, flap_handle: f64) -> [f64; 2] {
+        if !self.has_spoilers() {
+            return [0.0; 2];
+        }
+        let mut target = [handle; 2];
+        if flap_handle >= self.spoileron_min_flaps && self.spoileron_gain > 0.0 {
+            let angle = (aileron.abs() * self.aileron - self.spoileron_threshold).max(0.0)
+                * self.spoileron_gain;
+            let index = usize::from(aileron > 0.0);
+            target[index] = (target[index] + angle / self.spoiler_limit).min(1.0);
+        }
+        target
     }
 }
 
