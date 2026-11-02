@@ -141,6 +141,17 @@ impl Variables {
     }
 
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
+        if (0x10187..=0x1019c).contains(&id) {
+            let offset = id - 0x10187;
+            let action = match offset % 6 {
+                0 => "OFF",
+                1 => "RIGHT",
+                2 => "LEFT",
+                3 => "BOTH",
+                _ => return Err(Error::Unsupported(format!("key event {id:#x}"))),
+            };
+            return self.dispatch_event(&format!("MAGNETO{}_{action}", offset / 6 + 1), value);
+        }
         let name = match id {
             0x10018 => "STROBES_TOGGLE",
             0x1003b => "FLAPS_UP",
@@ -164,6 +175,10 @@ impl Variables {
             0x10180 => "MIXTURE2_SET",
             0x10181 => "MIXTURE3_SET",
             0x10182 => "MIXTURE4_SET",
+            0x101e7 => "MAGNETO_OFF",
+            0x101e8 => "MAGNETO_RIGHT",
+            0x101e9 => "MAGNETO_LEFT",
+            0x101ea => "MAGNETO_BOTH",
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
@@ -177,6 +192,11 @@ impl Variables {
             0x1033d => "TOGGLE_ALTERNATOR3",
             0x1033e => "TOGGLE_ALTERNATOR4",
             0x10346 => "TOGGLE_MASTER_BATTERY_ALTERNATOR",
+            0x1035f => "MAGNETO_SET_ACTUAL",
+            0x10360 => "MAGNETO1_SET",
+            0x10361 => "MAGNETO2_SET",
+            0x10362 => "MAGNETO3_SET",
+            0x10363 => "MAGNETO4_SET",
             0x10712 => "GENALT_BUS1_CONTACT_SET",
             0x10713 => "GENALT_BUS2_CONTACT_SET",
             0x10714 => "GENALT_BUS3_CONTACT_SET",
@@ -205,6 +225,23 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        if let Some(rest) = name.strip_prefix("MAGNETO") {
+            let (engine, action) = if let Some(rest) = rest.strip_prefix('_') {
+                (None, rest)
+            } else if let Some((index, action)) = rest.split_once('_') {
+                (
+                    Some(
+                        index
+                            .parse::<u32>()
+                            .map_err(|_| Error::Unsupported(format!("event {name}")))?,
+                    ),
+                    action,
+                )
+            } else {
+                return Err(Error::Unsupported(format!("event {name}")));
+            };
+            return self.magneto_event(engine, action, value);
+        }
         match name {
             "THROTTLE_FULL" | "THROTTLE_CUT" | "THROTTLE_INCR" | "THROTTLE_DECR"
             | "THROTTLE_SET" | "AXIS_THROTTLE_SET" => self.throttle_event(name, value, None),
@@ -350,6 +387,62 @@ impl Variables {
             }
             _ => Err(Error::Unsupported(format!("event {name}"))),
         }
+    }
+
+    fn magneto_event(
+        &mut self,
+        engine: Option<u32>,
+        action: &str,
+        value: f64,
+    ) -> Result<(), Error> {
+        if !value.is_finite() {
+            return Err(Error::Number);
+        }
+        let state = match action {
+            "OFF" => 0,
+            "RIGHT" => 1,
+            "LEFT" => 2,
+            "BOTH" => 3,
+            "SET" | "SET_ACTUAL" if value.fract() == 0.0 && (0.0..=3.0).contains(&value) => {
+                value as u8
+            }
+            _ => return Err(Error::Unsupported(format!("magneto action {action}"))),
+        };
+        let indices: Vec<_> = self
+            .engines
+            .iter()
+            .copied()
+            .filter(|i| engine.is_none_or(|e| e == *i))
+            .collect();
+        if indices.is_empty()
+            || indices.iter().any(|i| {
+                !self
+                    .values
+                    .contains_key(&('A', format!("RECIP ENG LEFT MAGNETO:{i}")))
+            })
+        {
+            return Err(Error::Unsupported(
+                "magneto controls are unavailable".into(),
+            ));
+        }
+        for index in indices {
+            self.set_number(
+                &format!("RECIP ENG LEFT MAGNETO:{index}"),
+                "bool",
+                f64::from(state & 2 != 0),
+            );
+            self.set_number(
+                &format!("RECIP ENG RIGHT MAGNETO:{index}"),
+                "bool",
+                f64::from(state & 1 != 0),
+            );
+            self.set_number(
+                &format!("RECIP ENG MAGNETO:{index}"),
+                "enum",
+                f64::from(state),
+            );
+        }
+        Ok(())
     }
 
     fn mixture_event(&mut self, name: &str, value: f64, engine: Option<u32>) -> Result<(), Error> {
@@ -499,6 +592,46 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_magnetos_preserve_other_engines_and_report_the_switch_position() {
+        let mut variables = Variables::default();
+        variables.configure_engines([1, 2].into_iter()).unwrap();
+        for index in [1, 2] {
+            for side in ["LEFT", "RIGHT"] {
+                variables.set_number(&format!("RECIP ENG {side} MAGNETO:{index}"), "bool", 1.0);
+            }
+        }
+        variables
+            .dispatch_key_event(0x1018e, Value::Number(0.0))
+            .unwrap();
+        let read = |variables: &mut Variables, name, unit| {
+            variables
+                .read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert_eq!(
+            read(&mut variables, "RECIP ENG RIGHT MAGNETO:2", "bool"),
+            1.0
+        );
+        assert_eq!(
+            read(&mut variables, "RECIP ENG LEFT MAGNETO:2", "bool"),
+            0.0
+        );
+        assert_eq!(
+            read(&mut variables, "RECIP ENG LEFT MAGNETO:1", "bool"),
+            1.0
+        );
+        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 1.0);
+        assert!(
+            variables
+                .dispatch_event("MAGNETO2_SET", Value::Number(4.0))
+                .is_err()
+        );
+        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 1.0);
+    }
 
     #[test]
     fn mixture_events_control_indexed_levers_and_reject_invalid_values() {

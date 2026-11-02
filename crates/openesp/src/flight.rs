@@ -133,6 +133,7 @@ impl Flight {
             variables.configure_engines(engines.indices())?;
             if engines.is_piston() {
                 for id in engines.indices() {
+                    variables.set_number(&format!("RECIP ENG MAGNETO:{id}"), "enum", 3.0);
                     variables.set_number(
                         &format!("GENERAL ENG MIXTURE LEVER POSITION:{id}"),
                         "percent",
@@ -664,6 +665,22 @@ mod tests {
             );
             variables
                 .dispatch_event("MIXTURE_RICH", Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_eq!(
+                read(&mut variables, "GENERAL ENG COMBUSTION:1", "bool"),
+                1.0
+            );
+            variables
+                .dispatch_key_event(0x10187, Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_eq!(
+                read(&mut variables, "GENERAL ENG COMBUSTION:1", "bool"),
+                0.0
+            );
+            variables
+                .dispatch_event("MAGNETO1_BOTH", Value::Number(0.0))
                 .unwrap();
             flight.advance(1.0 / 60.0, &mut variables).unwrap();
             assert_eq!(
