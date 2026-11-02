@@ -75,7 +75,13 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>, aircraft: &Aircraft) -> Result<Self> {
-        let instance = wgpu::Instance::default();
+        // Avoid initializing secondary GL drivers when using native GPU APIs.
+        // Some Windows GL drivers can fail even when DX12 was selected for
+        // rendering.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
