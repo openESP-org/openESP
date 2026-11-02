@@ -150,15 +150,26 @@ impl Variables {
             0x100df => "FLAPS_DECR",
             0x100d7 => "LANDING_LIGHTS_TOGGLE",
             0x100d8 => "PARKING_BRAKES",
+            0x100ed => "MIXTURE_SET",
+            0x100ee => "MIXTURE_RICH",
+            0x100ef => "MIXTURE_INCR",
+            0x100f0 => "MIXTURE_INCR_SMALL",
+            0x100f1 => "MIXTURE_DECR",
+            0x100f2 => "MIXTURE_LEAN",
             0x100fa => "SPOILERS_SET",
             0x10142 => "PITOT_HEAT_TOGGLE",
             0x10157 => "HEADING_BUG_INC",
             0x10158 => "HEADING_BUG_DEC",
+            0x1017f => "MIXTURE1_SET",
+            0x10180 => "MIXTURE2_SET",
+            0x10181 => "MIXTURE3_SET",
+            0x10182 => "MIXTURE4_SET",
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
             0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
             0x102f0 => "TOGGLE_FLIGHT_DIRECTOR",
+            0x102f4 => "AXIS_MIXTURE_SET",
             0x102f5 => "TOGGLE_AVIONICS_MASTER",
             0x1034b => "TOGGLE_NAV_LIGHTS",
             0x1033b => "TOGGLE_ALTERNATOR1",
@@ -205,6 +216,23 @@ impl Variables {
             "AXIS_THROTTLE2_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(2)),
             "AXIS_THROTTLE3_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(3)),
             "AXIS_THROTTLE4_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(4)),
+            "MIXTURE_SET" | "MIXTURE_RICH" | "MIXTURE_LEAN" | "MIXTURE_INCR"
+            | "MIXTURE_INCR_SMALL" | "MIXTURE_DECR" | "MIXTURE_DECR_SMALL" => {
+                self.mixture_event(name, value, None)
+            }
+            "AXIS_MIXTURE_SET" => self.mixture_event(name, value, Some(1)),
+            "MIXTURE1_SET" | "MIXTURE2_SET" | "MIXTURE3_SET" | "MIXTURE4_SET" => self
+                .mixture_event(
+                    "MIXTURE_SET",
+                    value,
+                    name.as_bytes().get(7).map(|n| u32::from(n - b'0')),
+                ),
+            "AXIS_MIXTURE1_SET" | "AXIS_MIXTURE2_SET" | "AXIS_MIXTURE3_SET"
+            | "AXIS_MIXTURE4_SET" => self.mixture_event(
+                "AXIS_MIXTURE_SET",
+                value,
+                name.as_bytes().get(12).map(|n| u32::from(n - b'0')),
+            ),
             "ENGINE_AUTO_SHUTDOWN" => {
                 for index in self.engines.clone() {
                     self.set_number(&format!("GENERAL ENG FUEL VALVE:{index}"), "bool", 0.0);
@@ -324,6 +352,47 @@ impl Variables {
         }
     }
 
+    fn mixture_event(&mut self, name: &str, value: f64, engine: Option<u32>) -> Result<(), Error> {
+        if !value.is_finite() {
+            return Err(Error::Number);
+        }
+        let indices: Vec<_> = self
+            .engines
+            .iter()
+            .copied()
+            .filter(|i| engine.is_none_or(|e| e == *i))
+            .collect();
+        if indices.is_empty()
+            || indices.iter().any(|i| {
+                !self
+                    .values
+                    .contains_key(&('A', format!("GENERAL ENG MIXTURE LEVER POSITION:{i}")))
+            })
+        {
+            return Err(Error::Unsupported(
+                "mixture controls are unavailable".into(),
+            ));
+        }
+        for index in indices {
+            let variable = format!("GENERAL ENG MIXTURE LEVER POSITION:{index}");
+            let current = self
+                .read(&Reference::new('A', &variable, Some("percent")))?
+                .number()?;
+            let position = match name {
+                "MIXTURE_RICH" => 100.0,
+                "MIXTURE_LEAN" => 0.0,
+                "MIXTURE_INCR" => current + 1.0,
+                "MIXTURE_INCR_SMALL" => current + 0.1,
+                "MIXTURE_DECR" => current - 1.0,
+                "MIXTURE_DECR_SMALL" => current - 0.1,
+                "AXIS_MIXTURE_SET" => (value + 16383.0) / 32766.0 * 100.0,
+                _ => value / 16383.0 * 100.0,
+            };
+            self.set_number(&variable, "percent", position.clamp(0.0, 100.0));
+        }
+        Ok(())
+    }
+
     fn throttle_event(&mut self, name: &str, value: f64, engine: Option<u32>) -> Result<(), Error> {
         if !value.is_finite() {
             return Err(Error::Number);
@@ -430,6 +499,50 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixture_events_control_indexed_levers_and_reject_invalid_values() {
+        let mut variables = Variables::default();
+        variables.configure_engines([1, 2].into_iter()).unwrap();
+        for index in [1, 2] {
+            variables.set_number(
+                &format!("GENERAL ENG MIXTURE LEVER POSITION:{index}"),
+                "percent",
+                100.0,
+            );
+        }
+        variables
+            .dispatch_key_event(0x10180, Value::Number(8191.5))
+            .unwrap();
+        let read = |variables: &mut Variables, index| {
+            variables
+                .read(&Reference::new(
+                    'A',
+                    &format!("GENERAL ENG MIXTURE LEVER POSITION:{index}"),
+                    Some("percent"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert_eq!(read(&mut variables, 1), 100.0);
+        assert_eq!(read(&mut variables, 2), 50.0);
+        variables
+            .dispatch_event("AXIS_MIXTURE1_SET", Value::Number(-16383.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, 1), 0.0);
+        assert!(
+            variables
+                .dispatch_event("MIXTURE_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(read(&mut variables, 2), 50.0);
+        variables
+            .dispatch_event("MIXTURE_RICH", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, 1), 100.0);
+        assert_eq!(read(&mut variables, 2), 100.0);
+    }
 
     #[test]
     fn legacy_engine_names_share_canonical_indexed_values() {

@@ -655,6 +655,22 @@ mod tests {
             assert!(read(&mut variables, "RECIP ENG BRAKE POWER:1", "horsepower") > 50.0);
             assert!(read(&mut variables, "RECIP ENG MANIFOLD PRESSURE:1", "inhg") > 20.0);
             variables
+                .dispatch_key_event(0x100f2, Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_eq!(
+                read(&mut variables, "GENERAL ENG COMBUSTION:1", "bool"),
+                0.0
+            );
+            variables
+                .dispatch_event("MIXTURE_RICH", Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_eq!(
+                read(&mut variables, "GENERAL ENG COMBUSTION:1", "bool"),
+                1.0
+            );
+            variables
                 .dispatch_event("ENGINE_AUTO_SHUTDOWN", Value::Number(0.0))
                 .unwrap();
             flight.advance(1.0 / 60.0, &mut variables).unwrap();
