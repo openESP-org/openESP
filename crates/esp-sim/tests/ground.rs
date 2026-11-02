@@ -49,6 +49,15 @@ fn original_aircraft_settle_on_their_configured_landing_gear() {
                             .wrench)
                     })
                     .unwrap();
+                gear.solve_friction(
+                    &mut state,
+                    &loading.mass,
+                    loading.cg,
+                    surface,
+                    Controls::default(),
+                    1.0 / 240.0,
+                )
+                .unwrap();
             }
             let output = gear
                 .forces(&state, loading.cg, surface, Controls::default())
@@ -83,6 +92,15 @@ fn original_aircraft_settle_on_their_configured_landing_gear() {
                             .wrench)
                     })
                     .unwrap();
+                gear.solve_friction(
+                    &mut coasting,
+                    &loading.mass,
+                    loading.cg,
+                    surface,
+                    Controls::default(),
+                    1.0 / 240.0,
+                )
+                .unwrap();
                 state
                     .advance(&loading.mass, 1.0 / 240.0, DVec3::Z * 9.80665, |s| {
                         Ok(gear
@@ -98,6 +116,18 @@ fn original_aircraft_settle_on_their_configured_landing_gear() {
                             .wrench)
                     })
                     .unwrap();
+                gear.solve_friction(
+                    &mut state,
+                    &loading.mass,
+                    loading.cg,
+                    surface,
+                    Controls {
+                        parking_brake: true,
+                        ..Controls::default()
+                    },
+                    1.0 / 240.0,
+                )
+                .unwrap();
             }
             assert!(
                 state.velocity.length() < 0.02,

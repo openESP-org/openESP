@@ -287,6 +287,14 @@ impl Flight {
                     Ok(loads)
                 },
             )?;
+            self.gear.solve_friction(
+                &mut next,
+                &self.loading.mass,
+                self.loading.cg,
+                TEST_SURFACE,
+                ground_controls,
+                dt / f64::from(steps),
+            )?;
             if let Some(impact) = self
                 .gear
                 .impact(&before, &next, self.loading.cg, TEST_SURFACE)
@@ -501,6 +509,45 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original wheeled aircraft and AIR flight data"]
+    fn parked_turbines_hold_the_airframe_stationary_against_idle_thrust() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut variables = controls(&data);
+            flight.configure_engines(&mut variables).unwrap();
+            variables
+                .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..600 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let origin = flight.current.position - flight.current.orientation * flight.loading.cg;
+            for _ in 0..600 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let after = flight.current.position - flight.current.orientation * flight.loading.cg;
+            let drift = (after - origin).truncate().length();
+            assert!(
+                drift < 0.001,
+                "{path:?}: parked airframe crept {drift} m under idle thrust"
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original wheeled aircraft and AIR flight data"]

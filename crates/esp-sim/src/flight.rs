@@ -5,7 +5,7 @@ use glam::{DMat3, DQuat, DVec3};
 pub struct MassProperties {
     kilograms: f64,
     pub(crate) inertia: DMat3,
-    inverse_inertia: DMat3,
+    pub(crate) inverse_inertia: DMat3,
 }
 
 impl MassProperties {

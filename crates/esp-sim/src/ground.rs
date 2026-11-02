@@ -1,12 +1,14 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use esp_assets::flight::FlightData;
 use esp_formats::cfg::{self, contact::ContactPoints};
 use glam::{DMat3, DVec3};
 
 use crate::{
-    flight::{State, Wrench},
+    flight::{MassProperties, State, Wrench},
     loading::WeightBalance,
 };
+
+mod friction;
 
 pub struct LandingGear {
     wheels: Vec<Wheel>,
@@ -245,41 +247,7 @@ impl LandingGear {
             if normal == 0.0 {
                 continue;
             }
-            let caster = (wheel.steering.abs() - std::f64::consts::PI).abs() < 1e-6;
-            let direction = if caster && velocity.truncate().length_squared() > 1e-12 {
-                DVec3::new(velocity.x, velocity.y, 0.0).normalize()
-            } else {
-                let angle = controls.steering * wheel.steering;
-                let forward = state.orientation * DVec3::new(angle.cos(), angle.sin(), 0.0);
-                DVec3::new(forward.x, forward.y, 0.0)
-                    .try_normalize()
-                    .context("wheel has no horizontal rolling direction")?
-            };
-            let lateral = DVec3::Z.cross(direction);
-            let brake = if wheel.brake_map == 0 {
-                0.0
-            } else if controls.parking_brake {
-                1.0
-            } else {
-                controls.brakes[wheel.brake_map as usize - 1]
-            };
-            let rolling =
-                surface.rolling_resistance + surface.tyre_friction * brake * self.brake_scale;
-            // Regularized Coulomb friction approaches its limit without a
-            // sign discontinuity at zero wheel speed. Surface coefficients are
-            // supplied by the scene rather than guessed from aircraft type.
-            let along = -normal * rolling * (velocity.dot(direction) / 0.25).tanh();
-            let across = if caster {
-                0.0
-            } else {
-                -normal * surface.tyre_friction * (velocity.dot(lateral) / 0.25).tanh()
-            };
-            let mut friction = direction * along + lateral * across;
-            let limit = normal * surface.tyre_friction;
-            if friction.length() > limit {
-                friction = friction.normalize() * limit;
-            }
-            let force = state.orientation.conjugate() * (friction - DVec3::Z * normal);
+            let force = state.orientation.conjugate() * (-DVec3::Z * normal);
             output.wrench.force += force;
             output.wrench.moment += arm.cross(force);
             output.on_ground = true;
@@ -292,6 +260,20 @@ impl LandingGear {
             "non-finite landing gear forces"
         );
         Ok(output)
+    }
+
+    /// Apply tyre impulses and their midpoint pose correction after integrating
+    /// the non-friction forces over `dt`.
+    pub fn solve_friction(
+        &self,
+        state: &mut State,
+        mass: &MassProperties,
+        cg: DVec3,
+        surface: Surface,
+        controls: Controls,
+        dt: f64,
+    ) -> Result<()> {
+        friction::solve(self, state, mass, cg, surface, controls, dt)
     }
 
     pub fn clearance(&self, state: &State, cg: DVec3, elevation: f64) -> f64 {
@@ -400,42 +382,56 @@ mod tests {
     #[test]
     fn braking_opposes_motion_and_respects_the_friction_circle() {
         let gear = tripod();
+        let mass =
+            MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
+                .unwrap();
         let mut state = State {
             position: DVec3::new(0.0, 0.0, -0.9),
             velocity: DVec3::new(15.0, 0.0, 0.0),
             ..State::default()
         };
-        let coasting = gear
-            .forces(&state, DVec3::ZERO, SURFACE, Controls::default())
-            .unwrap();
-        let braking = gear
-            .forces(
-                &state,
-                DVec3::ZERO,
-                SURFACE,
-                Controls {
-                    parking_brake: true,
-                    ..Controls::default()
-                },
-            )
-            .unwrap();
-        assert!(braking.wrench.force.x < coasting.wrench.force.x * 10.0);
+        let mut coasting = state;
+        let mut braking = state;
+        gear.solve_friction(
+            &mut coasting,
+            &mass,
+            DVec3::ZERO,
+            SURFACE,
+            Controls::default(),
+            1.0 / 240.0,
+        )
+        .unwrap();
+        gear.solve_friction(
+            &mut braking,
+            &mass,
+            DVec3::ZERO,
+            SURFACE,
+            Controls {
+                parking_brake: true,
+                ..Controls::default()
+            },
+            1.0 / 240.0,
+        )
+        .unwrap();
+        assert!(braking.velocity.x < coasting.velocity.x);
         state.velocity.y = 15.0;
-        let output = gear
-            .forces(
-                &state,
-                DVec3::ZERO,
-                SURFACE,
-                Controls {
-                    parking_brake: true,
-                    ..Controls::default()
-                },
-            )
-            .unwrap();
-        assert!(output.wrench.force.dot(state.velocity) < 0.0);
+        let initial = state;
+        gear.solve_friction(
+            &mut state,
+            &mass,
+            DVec3::ZERO,
+            SURFACE,
+            Controls {
+                parking_brake: true,
+                ..Controls::default()
+            },
+            1.0 / 240.0,
+        )
+        .unwrap();
+        let impulse = (state.velocity - initial.velocity) * mass.kilograms();
+        assert!(impulse.dot(initial.velocity) < 0.0);
         assert!(
-            output.wrench.force.truncate().length()
-                <= 300.0 * 9.80665 * SURFACE.tyre_friction + 1e-9
+            impulse.truncate().length() <= 300.0 * 9.80665 * SURFACE.tyre_friction / 240.0 + 1e-9
         );
     }
 
@@ -481,6 +477,88 @@ mod tests {
             gear.impact(&after, &after, DVec3::ZERO, SURFACE)
                 .unwrap()
                 .scrape
+        );
+    }
+
+    #[test]
+    fn tyre_impulses_dissipate_translation_and_rotation_energy() {
+        let gear = tripod();
+        let mass =
+            MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
+                .unwrap();
+        let energy = |s: &State| {
+            0.5 * mass.kilograms() * s.velocity.length_squared()
+                + 0.5 * s.angular_velocity.dot(mass.inertia * s.angular_velocity)
+        };
+        for index in 0..24 {
+            let i = f64::from(index);
+            let mut state = State {
+                position: -DVec3::Z * 0.9,
+                velocity: DVec3::new(5.0 * i - 40.0, 11.0 - i, 0.0),
+                angular_velocity: DVec3::new(0.17 * i - 2.0, 1.0 - 0.11 * i, 0.07 * i - 0.5),
+                ..State::default()
+            };
+            let before = energy(&state);
+            gear.solve_friction(
+                &mut state,
+                &mass,
+                DVec3::ZERO,
+                SURFACE,
+                Controls {
+                    steering: 0.4,
+                    brakes: [0.7, 0.1],
+                    parking_brake: false,
+                },
+                1.0 / 240.0,
+            )
+            .unwrap();
+            assert!(
+                energy(&state) <= before + 1e-8,
+                "tyre impulses added energy for case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_grip_holds_a_steady_force_and_yields_when_overloaded() {
+        let gear = tripod();
+        let mass =
+            MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
+                .unwrap();
+        let controls = Controls {
+            parking_brake: true,
+            ..Controls::default()
+        };
+        let mut state = State {
+            position: -DVec3::Z * 0.9,
+            ..State::default()
+        };
+        let step = |state: &mut State, push: f64| {
+            state
+                .advance(&mass, 1.0 / 240.0, DVec3::Z * 9.80665, |s| {
+                    let mut loads = gear.forces(s, DVec3::ZERO, SURFACE, controls)?.wrench;
+                    loads.force += DVec3::X * push;
+                    Ok(loads)
+                })
+                .unwrap();
+            gear.solve_friction(state, &mass, DVec3::ZERO, SURFACE, controls, 1.0 / 240.0)
+                .unwrap();
+        };
+        for _ in 0..2400 {
+            step(&mut state, 300.0);
+        }
+        let before = state.position;
+        for _ in 0..2400 {
+            step(&mut state, 300.0);
+        }
+        assert!(
+            (state.position - before).truncate().length() < 0.001,
+            "static tyre contact crept: {state:?}"
+        );
+        step(&mut state, 1_000_000.0);
+        assert!(
+            state.velocity.x > 1.0,
+            "overloaded brakes incorrectly pinned the aircraft"
         );
     }
 }
