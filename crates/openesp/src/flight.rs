@@ -30,6 +30,11 @@ pub struct Flight {
     flaps: Vec<f64>,
     spoilers: f64,
     spoiler_extension_time: f64,
+    auto_spoiler_available: bool,
+    auto_spoiler_min_speed: f64,
+    auto_spoiler_auto_retracts: bool,
+    spoiler_airborne: bool,
+    spoiler_auto_deployed: bool,
     gear: LandingGear,
     hydraulics: Option<Hydraulics>,
     on_ground: bool,
@@ -65,8 +70,22 @@ impl Flight {
             .configuration
             .number("airplane_geometry", "spoiler_extension_time")?
             .unwrap_or(0.0);
+        let auto_spoiler_available = data
+            .configuration
+            .number("airplane_geometry", "auto_spoiler_available")?
+            .unwrap_or(0.0)
+            != 0.0;
+        let auto_spoiler_min_speed = data
+            .configuration
+            .number("airplane_geometry", "auto_spoiler_min_speed")?
+            .unwrap_or(0.0);
+        let auto_spoiler_auto_retracts = data
+            .configuration
+            .number("airplane_geometry", "auto_spoiler_auto_retracts")?
+            .unwrap_or(1.0)
+            != 0.0;
         ensure!(
-            spoiler_extension_time >= 0.0,
+            spoiler_extension_time >= 0.0 && auto_spoiler_min_speed >= 0.0,
             "invalid spoiler extension time"
         );
         let weights = WeightBalance::from_config(&data.configuration)?;
@@ -114,6 +133,11 @@ impl Flight {
             flaps: Vec::new(),
             spoilers: 0.0,
             spoiler_extension_time,
+            auto_spoiler_available,
+            auto_spoiler_min_speed,
+            auto_spoiler_auto_retracts,
+            spoiler_airborne: !on_ground,
+            spoiler_auto_deployed: false,
             gear,
             hydraulics,
             on_ground,
@@ -125,6 +149,7 @@ impl Flight {
         variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
         variables.set_number("HYDRAULIC SWITCH", "bool", 0.0);
         variables.set_number("HYDRAULIC FAILURE", "bool", 0.0);
+        variables.set_number("SPOILERS ARMED", "bool", 0.0);
         variables.set_number("ELEVATOR TRIM POSITION", "radians", 0.0);
         for name in [
             "SPOILERS HANDLE POSITION",
@@ -272,6 +297,57 @@ impl Flight {
             .as_ref()
             .map(|h| h.update(variables))
             .transpose()?;
+        let armed = variables
+            .read(&Reference::new('A', "SPOILERS ARMED", Some("bool")))?
+            .number()?
+            != 0.0;
+        let mut throttles_idle = true;
+        if let Some(engines) = &self.engines {
+            for index in engines.indices() {
+                let position = variables
+                    .read(&Reference::new(
+                        'A',
+                        &format!("GENERAL ENG THROTTLE LEVER POSITION:{index}"),
+                        Some("percent over 100"),
+                    ))?
+                    .number()?;
+                throttles_idle &= position <= 0.05;
+            }
+        }
+        let ground_speed = self.current.velocity.truncate().length() * 3600.0 / 1852.0;
+        let handle = variables
+            .read(&Reference::new(
+                'A',
+                "SPOILERS HANDLE POSITION",
+                Some("percent over 100"),
+            ))?
+            .number()?;
+        ensure!((0.0..=1.0).contains(&handle), "invalid spoiler handle");
+        if self.spoiler_auto_deployed && handle < 1.0 {
+            self.spoiler_auto_deployed = false;
+        }
+        if self.spoiler_auto_deployed
+            && (!armed
+                || !throttles_idle
+                || (self.auto_spoiler_auto_retracts && ground_speed < self.auto_spoiler_min_speed))
+        {
+            self.spoiler_auto_deployed = false;
+            variables.set_number("SPOILERS HANDLE POSITION", "percent over 100", 0.0);
+        }
+        if !self.on_ground && !self.spoiler_auto_deployed {
+            self.spoiler_airborne = true;
+        }
+        if self.on_ground && self.spoiler_airborne {
+            self.spoiler_airborne = false;
+            if self.auto_spoiler_available
+                && armed
+                && throttles_idle
+                && ground_speed >= self.auto_spoiler_min_speed
+            {
+                self.spoiler_auto_deployed = true;
+                variables.set_number("SPOILERS HANDLE POSITION", "percent over 100", 1.0);
+            }
+        }
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -577,6 +653,11 @@ impl Flight {
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
         variables.set_number(
+            "AUTO SPOILERS AVAILABLE",
+            "bool",
+            f64::from(self.auto_spoiler_available),
+        );
+        variables.set_number(
             "IS GEAR RETRACTABLE",
             "bool",
             f64::from(self.gear.retractable()),
@@ -790,6 +871,101 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires an original aircraft with automatic spoilers"]
+    fn automatic_spoilers_deploy_on_touchdown_and_retract_for_go_around() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("airplane_geometry", "auto_spoiler_available")
+                .unwrap()
+                .unwrap_or(0.0)
+                == 0.0
+                || data
+                    .configuration
+                    .number("GeneralEngineData", "engine_type")
+                    .unwrap()
+                    != Some(1.0)
+            {
+                continue;
+            }
+            let mut ground = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            let mut ground_vars = controls(&data);
+            for _ in 0..600 {
+                ground.advance(1.0 / 60.0, &mut ground_vars).unwrap();
+            }
+            for mode in 0..3 {
+                let armed = mode != 0;
+                let mut flight =
+                    Flight::new(&data, 1.0, -ground.current.position.z + 0.5, 0.5, true).unwrap();
+                flight.current.velocity = DVec3::ZERO;
+                flight.current.orientation = ground.current.orientation;
+                flight.start_running(&data).unwrap();
+                let mut vars = controls(&data);
+                flight.configure_engines(&mut vars).unwrap();
+                if armed {
+                    vars.dispatch_key_event(0x1013d, Value::Number(0.0))
+                        .unwrap();
+                }
+                for _ in 0..900 {
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                }
+                assert!(flight.on_ground);
+                if armed {
+                    assert!(flight.spoilers > 0.9);
+                    assert_eq!(
+                        vars.read(&Reference::new(
+                            'A',
+                            "SPOILERS HANDLE POSITION",
+                            Some("percent over 100")
+                        ))
+                        .unwrap(),
+                        Value::Number(1.0)
+                    );
+                    if mode == 2 {
+                        vars.dispatch_event("SPOILERS_SET", Value::Number(8191.5))
+                            .unwrap();
+                        flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                        assert!(!flight.spoiler_auto_deployed);
+                        assert_eq!(
+                            vars.read(&Reference::new(
+                                'A',
+                                "SPOILERS HANDLE POSITION",
+                                Some("percent over 100")
+                            ))
+                            .unwrap(),
+                            Value::Number(0.5)
+                        );
+                        continue;
+                    }
+                    vars.dispatch_event("THROTTLE_FULL", Value::Number(0.0))
+                        .unwrap();
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                    assert!(!flight.spoiler_auto_deployed);
+                    assert_eq!(
+                        vars.read(&Reference::new(
+                            'A',
+                            "SPOILERS HANDLE POSITION",
+                            Some("percent over 100")
+                        ))
+                        .unwrap(),
+                        Value::Number(0.0)
+                    );
+                    for _ in 0..180 {
+                        flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                    }
+                    assert!(flight.spoilers < 1e-9);
+                } else {
+                    assert_eq!(flight.spoilers, 0.0);
+                }
+            }
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original hydraulic aircraft"]

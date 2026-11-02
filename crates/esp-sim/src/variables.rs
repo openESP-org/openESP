@@ -182,6 +182,7 @@ impl Variables {
             0x10142 => "PITOT_HEAT_TOGGLE",
             0x10157 => "HEADING_BUG_INC",
             0x10158 => "HEADING_BUG_DEC",
+            0x1013d => "SPOILERS_ARM_TOGGLE",
             0x1017f => "MIXTURE1_SET",
             0x10180 => "MIXTURE2_SET",
             0x10181 => "MIXTURE3_SET",
@@ -194,6 +195,9 @@ impl Variables {
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x10210 => "SPOILERS_ON",
             0x10211 => "SPOILERS_OFF",
+            0x10212 => "SPOILERS_ARM_ON",
+            0x10213 => "SPOILERS_ARM_OFF",
+            0x10214 => "SPOILERS_ARM_SET",
             0x10305 => "TOGGLE_HYDRAULIC_FAILURE",
             0x10498 => "HYDRAULIC_SWITCH_TOGGLE",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
@@ -390,6 +394,20 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
+            "SPOILERS_ARM_TOGGLE" => self.toggle("SPOILERS ARMED"),
+            "SPOILERS_ARM_ON" | "SPOILERS_ARM_OFF" | "SPOILERS_ARM_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                self.set_number(
+                    "SPOILERS ARMED",
+                    "bool",
+                    f64::from(
+                        name == "SPOILERS_ARM_ON" || (name == "SPOILERS_ARM_SET" && value != 0.0),
+                    ),
+                );
+                Ok(())
+            }
             "GEAR_TOGGLE" => self.toggle("GEAR HANDLE POSITION"),
             "GEAR_UP" | "GEAR_DOWN" | "GEAR_SET" => {
                 if !value.is_finite() {
@@ -1157,6 +1175,20 @@ mod tests {
                 .is_err()
         );
         assert_eq!(variables.read(&reference).unwrap(), Value::Number(100.0));
+        let armed = Reference::new('A', "SPOILERS ARMED", Some("bool"));
+        variables
+            .dispatch_key_event(0x10214, Value::Number(1.0))
+            .unwrap();
+        assert_eq!(variables.read(&armed).unwrap(), Value::Number(1.0));
+        variables
+            .dispatch_key_event(0x1013d, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(variables.read(&armed).unwrap(), Value::Number(0.0));
+        assert!(
+            variables
+                .dispatch_event("SPOILERS_ARM_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
     }
 
     #[test]
