@@ -435,7 +435,13 @@ mod tests {
             flight.configure_engines(&mut variables).unwrap();
             Flight::publish(&flight.current, &mut variables).unwrap();
             flight.publish_loading(&mut variables);
-            variables.set_number("CIRCUIT GENERAL PANEL ON", "bool", 1.0);
+            variables
+                .configure_electrical(
+                    &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                        .unwrap(),
+                    true,
+                )
+                .unwrap();
             variables.set('P', "UNITS OF MEASURE", Some("enum"), Value::Number(0.0));
             image.update(&mut variables);
             let scale_x =
@@ -476,6 +482,31 @@ mod tests {
                 "AIR-derived N1 did not change original readout pixels"
             );
             assert!(!image.update(&mut variables));
+            for event in [
+                "TOGGLE_MASTER_BATTERY",
+                "TOGGLE_ALTERNATOR1",
+                "TOGGLE_ALTERNATOR2",
+            ] {
+                variables.dispatch_event(event, Value::Number(0.0)).unwrap();
+            }
+            variables.update_electrical().unwrap();
+            assert!(image.update(&mut variables));
+            let off = crop(&image.image);
+            assert!(
+                !off.pixels()
+                    .any(|p| p.0[0] > 160 && p.0[1] > 160 && p.0[2] > 160),
+                "unpowered N1 readout remained lit"
+            );
+            variables
+                .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            variables.update_electrical().unwrap();
+            assert!(image.update(&mut variables));
+            assert_eq!(
+                crop(&image.image),
+                after,
+                "battery power did not restore the readout"
+            );
             count += 1;
         }
         assert!(count > 0);

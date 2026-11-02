@@ -40,13 +40,18 @@ fn capture_after(
 }
 
 fn capture_command(mut command: Command, output: &Path) -> image::RgbaImage {
-    let mut child = command.stdout(Stdio::null()).spawn().unwrap();
+    let arguments = format!("{:?}", command.get_args().collect::<Vec<_>>());
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(output.with_extension("log")).unwrap())
+        .spawn()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(
                 status.success(),
-                "render failed: {}",
+                "render failed ({status}) for {arguments}: {}",
                 std::fs::read_to_string(output.with_extension("log")).unwrap_or_default()
             );
             break;
@@ -109,6 +114,56 @@ fn renders_live_engine_text_readouts() {
         assert!(
             different > 10,
             "live N1 text did not reach cockpit pixels: {different}"
+        );
+        count += 1;
+    }
+    assert!(count > 0);
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original turbine aircraft"]
+fn renders_cockpit_power_from_battery_switch_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(1.0)
+        {
+            continue;
+        }
+        let mut frames = Vec::new();
+        for powered in [false, true] {
+            let screenshot = temp.path().join(format!("power-{powered}.png"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+            command
+                .arg("--aircraft")
+                .arg(&path)
+                .args([
+                    "--cockpit",
+                    "--variable",
+                    "A:TURB ENG N1:1,percent=70",
+                    "--frames",
+                    "3",
+                    "--screenshot",
+                ])
+                .arg(&screenshot);
+            if powered {
+                command.args(["--event", "TOGGLE_MASTER_BATTERY"]);
+            }
+            frames.push(capture_command(command, &screenshot));
+        }
+        let difference = frames[0]
+            .pixels()
+            .zip(frames[1].pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            difference > 100,
+            "battery switch did not power cockpit artwork: {difference}"
         );
         count += 1;
     }

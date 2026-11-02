@@ -15,6 +15,7 @@ pub mod texture;
 pub struct Aircraft {
     pub title: String,
     pub flaps: Vec<cfg::aircraft::FlapSet>,
+    pub electrical: cfg::electrical::Electrical,
     pub exterior: Model,
     pub interior: Option<Model>,
     pub panel: Option<panel::Panel>,
@@ -182,6 +183,7 @@ impl Aircraft {
         Ok(Self {
             title: variant.title.unwrap_or("Aircraft").into(),
             flaps: cfg::aircraft::flaps(&aircraft)?,
+            electrical: cfg::electrical::Electrical::from_config(&aircraft)?,
             exterior,
             interior,
             panel,

@@ -393,6 +393,10 @@ impl App {
                         flight.publish_loading(&mut self.variables);
                         flight.configure_engines(&mut self.variables)?;
                     }
+                    self.variables.configure_electrical(
+                        &aircraft.electrical,
+                        self.arguments.engines_running,
+                    )?;
                     self.apply_variable_overrides();
                     for panel in aircraft.panel_images.values_mut() {
                         panel.update_scripts(0.0, &mut self.variables)?;
@@ -488,6 +492,7 @@ impl App {
             }
             self.apply_variable_overrides();
         }
+        self.variables.update_electrical()?;
         self.variables.interpolate(frame.alpha)?;
         if let Some(flight) = &self.flight {
             Flight::publish(&flight.sample(frame.alpha)?, &mut self.variables)?;
@@ -868,6 +873,10 @@ mod tests {
             aircraft: Some(Aircraft {
                 title: "test".into(),
                 flaps: vec![],
+                electrical: esp_formats::cfg::electrical::Electrical::from_config(
+                    &esp_formats::cfg::Config::parse("").unwrap(),
+                )
+                .unwrap(),
                 exterior: empty_model(),
                 interior: None,
                 panel: Some(panel),

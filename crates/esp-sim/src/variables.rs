@@ -7,6 +7,7 @@ pub struct Variables {
     events: Vec<(String, Value)>,
     flaps: Option<crate::flaps::Flaps>,
     engines: Vec<u32>,
+    electrical: Option<crate::electrical::Electrical>,
 }
 
 struct Variable {
@@ -33,6 +34,26 @@ fn variable_name(category: char, name: &str) -> String {
 }
 
 impl Variables {
+    pub fn configure_electrical(
+        &mut self,
+        definition: &esp_formats::cfg::electrical::Electrical,
+        running: bool,
+    ) -> anyhow::Result<()> {
+        let electrical = crate::electrical::Electrical::new(definition.clone());
+        electrical.initialize(self, running);
+        self.electrical = Some(electrical);
+        self.update_electrical()
+    }
+
+    pub fn update_electrical(&mut self) -> anyhow::Result<()> {
+        if let Some(electrical) = self.electrical.take() {
+            let result = electrical.update(self);
+            self.electrical = Some(electrical);
+            result?;
+        }
+        Ok(())
+    }
+
     pub fn configure_engines(&mut self, indices: impl Iterator<Item = u32>) -> anyhow::Result<()> {
         let mut engines = indices.collect::<Vec<_>>();
         engines.sort_unstable();
@@ -66,6 +87,7 @@ impl Variables {
 
     pub fn advance(&mut self, dt: f64) -> anyhow::Result<()> {
         anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid simulation timestep");
+        self.update_electrical()?;
         let reference = Reference::new('A', "AIRSPEED INDICATED", Some("knots"));
         let airspeed = if self.values.contains_key(&('A', reference.name.clone())) {
             self.read(&reference)?.number()?
@@ -135,9 +157,25 @@ impl Variables {
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
+            0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
             0x102f0 => "TOGGLE_FLIGHT_DIRECTOR",
             0x102f5 => "TOGGLE_AVIONICS_MASTER",
             0x1034b => "TOGGLE_NAV_LIGHTS",
+            0x1033b => "TOGGLE_ALTERNATOR1",
+            0x1033c => "TOGGLE_ALTERNATOR2",
+            0x1033d => "TOGGLE_ALTERNATOR3",
+            0x1033e => "TOGGLE_ALTERNATOR4",
+            0x10346 => "TOGGLE_MASTER_BATTERY_ALTERNATOR",
+            0x10712 => "GENALT_BUS1_CONTACT_SET",
+            0x10713 => "GENALT_BUS2_CONTACT_SET",
+            0x10714 => "GENALT_BUS3_CONTACT_SET",
+            0x10715 => "GENALT_BUS4_CONTACT_SET",
+            0x10716 => "TOGGLE_GENALT_BUS1_CONTACT",
+            0x10717 => "TOGGLE_GENALT_BUS2_CONTACT",
+            0x10718 => "TOGGLE_GENALT_BUS3_CONTACT",
+            0x10719 => "TOGGLE_GENALT_BUS4_CONTACT",
+            0x1071a => "BATTERY_BUS_CONTACT_SET",
+            0x1071b => "TOGGLE_BATTERY_BUS_CONTACT",
             _ => return Err(Error::Unsupported(format!("key event {id:#x}"))),
         };
         self.dispatch_event(name, value)
@@ -181,6 +219,57 @@ impl Variables {
             "TOGGLE_FLIGHT_DIRECTOR" => self.toggle("AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
             "TOGGLE_MASTER_BATTERY" => self.toggle("ELECTRICAL MASTER BATTERY"),
             "TOGGLE_AVIONICS_MASTER" => self.toggle("AVIONICS MASTER SWITCH"),
+            "AVIONICS_MASTER_SET" => {
+                self.set_number("AVIONICS MASTER SWITCH", "bool", f64::from(value != 0.0));
+                Ok(())
+            }
+            "TOGGLE_MASTER_ALTERNATOR" | "TOGGLE_MASTER_BATTERY_ALTERNATOR" => {
+                if name == "TOGGLE_MASTER_BATTERY_ALTERNATOR" {
+                    self.toggle("ELECTRICAL MASTER BATTERY")?;
+                }
+                let generators = self
+                    .electrical
+                    .as_ref()
+                    .map(|e| e.engine_indices())
+                    .unwrap_or_else(|| self.engines.clone());
+                for index in generators {
+                    self.toggle(&format!("GENERAL ENG GENERATOR SWITCH:{index}"))?;
+                }
+                Ok(())
+            }
+            "TOGGLE_ALTERNATOR1" | "TOGGLE_ALTERNATOR2" | "TOGGLE_ALTERNATOR3"
+            | "TOGGLE_ALTERNATOR4" => {
+                let index = name.chars().last().unwrap();
+                self.toggle(&format!("GENERAL ENG GENERATOR SWITCH:{index}"))
+            }
+            "TOGGLE_BATTERY_BUS_CONTACT" => self.toggle("ELECTRICAL BATTERY BUS CONTACT SWITCH"),
+            "BATTERY_BUS_CONTACT_SET" => {
+                self.set_number(
+                    "ELECTRICAL BATTERY BUS CONTACT SWITCH",
+                    "bool",
+                    f64::from(value != 0.0),
+                );
+                Ok(())
+            }
+            "GENALT_BUS1_CONTACT_SET"
+            | "GENALT_BUS2_CONTACT_SET"
+            | "GENALT_BUS3_CONTACT_SET"
+            | "GENALT_BUS4_CONTACT_SET" => {
+                let index = name.as_bytes()[10] as char;
+                self.set_number(
+                    &format!("ELECTRICAL GENALT BUS CONTACT SWITCH:{index}"),
+                    "bool",
+                    f64::from(value != 0.0),
+                );
+                Ok(())
+            }
+            "TOGGLE_GENALT_BUS1_CONTACT"
+            | "TOGGLE_GENALT_BUS2_CONTACT"
+            | "TOGGLE_GENALT_BUS3_CONTACT"
+            | "TOGGLE_GENALT_BUS4_CONTACT" => {
+                let index = name.as_bytes()[17] as char;
+                self.toggle(&format!("ELECTRICAL GENALT BUS CONTACT SWITCH:{index}"))
+            }
             "TOGGLE_BEACON_LIGHTS" => self.toggle("LIGHT BEACON"),
             "TOGGLE_TAXI_LIGHTS" => self.toggle("LIGHT TAXI"),
             "TOGGLE_NAV_LIGHTS" => self.toggle("LIGHT NAV"),
