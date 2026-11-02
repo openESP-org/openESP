@@ -39,6 +39,10 @@ struct Wheel {
     maximum_compression: f64,
     steering: f64,
     brake_map: u32,
+    extension: f64,
+    extension_seconds: f64,
+    retraction_seconds: f64,
+    extension_limit: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -74,12 +78,57 @@ impl LandingGear {
         let state = *state;
         self.wheels.iter().map(move |wheel| {
             let arm = state.orientation * (wheel.position - cg);
-            let compression = (state.position.z + arm.z + surface.elevation).max(0.0);
+            let compression = if wheel.extension == 1.0 {
+                (state.position.z + arm.z + surface.elevation).max(0.0)
+            } else {
+                0.0
+            };
             (
                 wheel.index,
-                100.0 + 100.0 * (compression / wheel.maximum_compression).clamp(0.0, 1.0),
+                100.0
+                    * (wheel.extension + (compression / wheel.maximum_compression).clamp(0.0, 1.0)),
             )
         })
+    }
+
+    pub fn retractable(&self) -> bool {
+        self.wheels.iter().any(|w| w.retraction_seconds > 0.0)
+    }
+
+    pub fn extensions(&self) -> impl Iterator<Item = (u32, f64)> + '_ {
+        self.wheels
+            .iter()
+            .map(|wheel| (wheel.index, wheel.extension))
+    }
+
+    pub fn extension(&self) -> f64 {
+        self.wheels.iter().map(|w| w.extension).sum::<f64>() / self.wheels.len() as f64
+    }
+
+    pub fn advance(&mut self, down: bool, airspeed_knots: f64, dt: f64) -> Result<()> {
+        ensure!(
+            airspeed_knots.is_finite() && airspeed_knots >= 0.0 && dt.is_finite() && dt >= 0.0,
+            "invalid landing gear control"
+        );
+        for wheel in &mut self.wheels {
+            if wheel.retraction_seconds == 0.0 {
+                continue;
+            }
+            if down {
+                if wheel.extension_limit > 0.0 && airspeed_knots > wheel.extension_limit {
+                    continue;
+                }
+                let step = if wheel.extension_seconds > 0.0 {
+                    dt / wheel.extension_seconds
+                } else {
+                    1.0
+                };
+                wheel.extension = (wheel.extension + step).min(1.0);
+            } else {
+                wheel.extension = (wheel.extension - dt / wheel.retraction_seconds).max(0.0);
+            }
+        }
+        Ok(())
     }
 
     pub fn from_data(data: &FlightData) -> Result<Self> {
@@ -176,6 +225,10 @@ impl LandingGear {
                     * 0.3048,
                 steering: point.steering_degrees.to_radians(),
                 brake_map: point.brake_map,
+                extension: 1.0,
+                extension_seconds: point.extension_seconds,
+                retraction_seconds: point.retraction_seconds,
+                extension_limit: point.extension_limit_knots,
             });
         }
         let brake_scale = config.number("brakes", "toe_brakes_scale")?.unwrap_or(1.0);
@@ -195,6 +248,15 @@ impl LandingGear {
         surface: Surface,
     ) -> Option<Impact> {
         for contact in &self.contacts {
+            if !contact.scrape
+                && self
+                    .wheels
+                    .iter()
+                    .find(|w| w.index == contact.index)
+                    .is_some_and(|w| w.extension < 1.0)
+            {
+                continue;
+            }
             let arm = contact.position - cg;
             let old = (before.position + before.orientation * arm).z + surface.elevation;
             let new = (after.position + after.orientation * arm).z + surface.elevation;
@@ -250,6 +312,9 @@ impl LandingGear {
         );
         let mut output = Output::default();
         for wheel in &self.wheels {
+            if wheel.extension < 1.0 {
+                continue;
+            }
             let arm = wheel.position - cg;
             let world_arm = state.orientation * arm;
             let compression = state.position.z + world_arm.z + surface.elevation;
@@ -328,11 +393,47 @@ mod tests {
                 maximum_compression: 0.25,
                 steering: if i == 0 { 30.0_f64.to_radians() } else { 0.0 },
                 brake_map: i as u32,
+                extension: 1.0,
+                extension_seconds: 1.0,
+                retraction_seconds: 1.0,
+                extension_limit: 0.0,
             })
             .collect(),
             brake_scale: 1.0,
             contacts: vec![],
         }
+    }
+
+    #[test]
+    fn retracted_wheels_do_not_apply_ground_forces_and_obey_extension_limits() {
+        let mut gear = tripod();
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -0.9),
+            ..State::default()
+        };
+        assert!(
+            gear.forces(&state, DVec3::ZERO, SURFACE, Controls::default())
+                .unwrap()
+                .on_ground
+        );
+        for wheel in &mut gear.wheels {
+            wheel.extension_limit = 100.0;
+        }
+        gear.advance(false, 0.0, 1.0).unwrap();
+        assert!(
+            !gear
+                .forces(&state, DVec3::ZERO, SURFACE, Controls::default())
+                .unwrap()
+                .on_ground
+        );
+        gear.advance(true, 110.0, 1.0).unwrap();
+        assert_eq!(gear.extension(), 0.0);
+        gear.advance(true, 90.0, 1.0).unwrap();
+        assert!(
+            gear.forces(&state, DVec3::ZERO, SURFACE, Controls::default())
+                .unwrap()
+                .on_ground
+        );
     }
 
     const SURFACE: Surface = Surface {

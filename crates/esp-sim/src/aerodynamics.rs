@@ -40,6 +40,7 @@ pub struct Controls {
     pub rudder: f64,
     pub elevator_trim: f64,
     pub spoilers: f64,
+    pub gear: f64,
 }
 
 impl Curve {
@@ -229,6 +230,10 @@ impl Aerodynamics {
             "invalid spoiler position"
         );
         ensure!(
+            controls.gear.is_finite() && (0.0..=1.0).contains(&controls.gear),
+            "invalid gear position"
+        );
+        ensure!(
             flaps.len() == self.flaps.len() && flaps.iter().all(|n| n.is_finite()),
             "invalid flap deflections"
         );
@@ -261,7 +266,10 @@ impl Aerodynamics {
             + c.lift.cl_ih * self.incidence
             + c.pitch.cl_q * q;
         let cd = self.drag_scalar
-            * (c.drag.cd0 + c.drag.cd_flaps * flap.y + c.drag.cd_spoiler * spoiler)
+            * (c.drag.cd0
+                + c.drag.cd_flaps * flap.y
+                + c.drag.cd_spoiler * spoiler
+                + c.drag.cd_gear * controls.gear)
             + self.induced_drag * cl * cl;
         let cy = c.side.cy_beta * beta
             + c.side.cy_delta_rudder * rudder
@@ -277,6 +285,7 @@ impl Aerodynamics {
             + c.pitch.cm_de * elevator
             + c.pitch.cm_delta_trim * controls.elevator_trim * self.elevator_trim
             + c.pitch.cm_spoiler * spoiler
+            + c.pitch.cm_gear * controls.gear
             + c.pitch.cm_ih * self.incidence
             + c.pitch.cm_flap * flap.z
             + c.pitch.cm_q * q * self.stability.y;

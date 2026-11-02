@@ -118,6 +118,7 @@ impl Flight {
 
     pub fn configure_ground(variables: &mut Variables) {
         variables.set_number("ELEVATOR TRIM PCT", "percent", 0.0);
+        variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
         variables.set_number("ELEVATOR TRIM POSITION", "radians", 0.0);
         for name in [
             "SPOILERS HANDLE POSITION",
@@ -266,6 +267,12 @@ impl Flight {
                 .number()?)
         };
         let spoiler_handle = control("SPOILERS HANDLE POSITION")?;
+        let gear_handle = control("GEAR HANDLE POSITION")? != 0.0;
+        let air = Atmosphere::standard(-self.current.position.z)?;
+        let ias = air.calibrated_airspeed(self.current.air_velocity(DVec3::ZERO).length())?
+            * 3600.0
+            / 1852.0;
+        self.gear.advance(gear_handle || self.on_ground, ias, dt)?;
         ensure!(
             (0.0..=1.0).contains(&spoiler_handle),
             "invalid spoiler handle"
@@ -287,6 +294,7 @@ impl Flight {
             rudder: control("RUDDER DEFLECTION PCT")?,
             elevator_trim: control("ELEVATOR TRIM PCT")?,
             spoilers: self.spoilers,
+            gear: self.gear.extension(),
         };
         let ground_controls = GroundControls {
             steering: controls.rudder,
@@ -537,7 +545,16 @@ impl Flight {
 
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
-        variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
+        variables.set_number(
+            "IS GEAR RETRACTABLE",
+            "bool",
+            f64::from(self.gear.retractable()),
+        );
+        variables.set_number(
+            "GEAR TOTAL PCT EXTENDED",
+            "percent over 100",
+            self.gear.extension(),
+        );
         for (index, position) in
             self.gear
                 .animation_positions(&self.current, self.loading.cg, TEST_SURFACE)
@@ -547,7 +564,16 @@ impl Flight {
                 "keyframe",
                 position,
             );
-            variables.set_number(&format!("GEAR POSITION:{index}"), "enum", 2.0);
+        }
+        for (index, position) in self.gear.extensions() {
+            let state = if position == 0.0 {
+                1.0
+            } else if position == 1.0 {
+                2.0
+            } else {
+                0.0
+            };
+            variables.set_number(&format!("GEAR POSITION:{index}"), "enum", state);
             if let Some(name) = [
                 "GEAR CENTER POSITION",
                 "GEAR LEFT POSITION",
@@ -556,7 +582,7 @@ impl Flight {
             ]
             .get(index as usize)
             {
-                variables.set_number(name, "percent over 100", 1.0);
+                variables.set_number(name, "percent over 100", position);
             }
         }
         let fraction = if self.loading.fuel_capacity_gallons > 0.0 {
@@ -707,6 +733,57 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original fixed and retractable aircraft"]
+    fn landing_gear_retracts_and_extends_at_authored_rates() {
+        let mut retractable = 0;
+        let mut fixed = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, true).unwrap();
+            let mut vars = controls(&data);
+            vars.dispatch_key_event(0x10022, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..120 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            if flight.gear.retractable() {
+                let positions = flight.gear.extensions().collect::<Vec<_>>();
+                assert!(
+                    positions
+                        .iter()
+                        .all(|(_, position)| *position > 0.0 && *position < 1.0)
+                );
+                let contacts =
+                    esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration)
+                        .unwrap();
+                for (index, position) in positions {
+                    let wheel = contacts
+                        .points
+                        .iter()
+                        .find(|point| point.index == index)
+                        .unwrap();
+                    assert!((position - (1.0 - 2.0 / wheel.retraction_seconds)).abs() < 1e-8);
+                }
+                for _ in 0..480 {
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                }
+                assert!(flight.gear.extension() < 1e-9);
+                vars.dispatch_event("GEAR_DOWN", Value::Number(0.0))
+                    .unwrap();
+                for _ in 0..540 {
+                    flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                }
+                assert!((flight.gear.extension() - 1.0).abs() < 1e-9);
+                retractable += 1;
+            } else {
+                assert_eq!(flight.gear.extension(), 1.0);
+                fixed += 1;
+            }
+        }
+        assert!(retractable > 0 && fixed > 0);
+    }
 
     #[test]
     #[ignore = "requires original aircraft with wheel contacts"]

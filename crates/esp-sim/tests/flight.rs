@@ -33,6 +33,27 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
         };
         let base = forces(velocity, DVec3::ZERO, Controls::default());
         assert!(base.force.x < 0.0 && base.force.z < 0.0);
+        let contact_points =
+            esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration).unwrap();
+        if contact_points
+            .points
+            .iter()
+            .any(|point| point.class == 1 && point.retraction_seconds > 0.0)
+        {
+            let down = forces(
+                velocity,
+                DVec3::ZERO,
+                Controls {
+                    gear: 1.0,
+                    ..Controls::default()
+                },
+            );
+            assert!(
+                down.force.x < base.force.x,
+                "{}: gear did not increase drag",
+                path.display()
+            );
+        }
         let fast = forces(velocity * 2.0, DVec3::ZERO, Controls::default());
         assert!(fast.force.abs_diff_eq(base.force * 4.0, 1e-8));
         assert!(fast.moment.abs_diff_eq(base.moment * 4.0, 1e-8));

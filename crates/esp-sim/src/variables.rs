@@ -156,9 +156,13 @@ impl Variables {
         }
         let name = match id {
             0x10018 => "STROBES_TOGGLE",
+            0x10022 => "GEAR_TOGGLE",
             0x10035 => "SPOILERS_TOGGLE",
             0x1003b => "FLAPS_UP",
             0x10043 => "FLAPS_DOWN",
+            0x100a4 => "GEAR_SET",
+            0x1021f => "GEAR_UP",
+            0x10220 => "GEAR_DOWN",
             0x10047 => "ELEV_TRIM_DN",
             0x1004f => "ELEV_TRIM_UP",
             0x100aa => "ELEVATOR_TRIM_SET",
@@ -382,6 +386,18 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
+            "GEAR_TOGGLE" => self.toggle("GEAR HANDLE POSITION"),
+            "GEAR_UP" | "GEAR_DOWN" | "GEAR_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                self.set_number(
+                    "GEAR HANDLE POSITION",
+                    "bool",
+                    f64::from(name == "GEAR_DOWN" || (name == "GEAR_SET" && value != 0.0)),
+                );
+                Ok(())
+            }
             "ELEV_TRIM_UP" | "ELEV_TRIM_DN" | "ELEVATOR_TRIM_SET" | "AXIS_ELEV_TRIM_SET" => {
                 if !value.is_finite() {
                     return Err(Error::Number);

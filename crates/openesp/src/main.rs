@@ -750,6 +750,14 @@ impl ApplicationHandler for App {
                                         eprintln!("spoiler input: {error}");
                                     }
                                 }
+                                KeyCode::KeyG => {
+                                    if let Err(error) = self
+                                        .variables
+                                        .dispatch_event("GEAR_TOGGLE", Value::Number(0.0))
+                                    {
+                                        eprintln!("gear input: {error}");
+                                    }
+                                }
                                 _ => {}
                             }
                         }

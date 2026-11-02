@@ -31,6 +31,9 @@ pub(super) fn solve(
     let inverse_orientation = state.orientation.conjugate();
     let mut constraints = Vec::with_capacity(gear.wheels.len());
     for wheel in &gear.wheels {
+        if wheel.extension < 1.0 {
+            continue;
+        }
         let extended_arm = wheel.position - cg;
         let world_arm = state.orientation * extended_arm;
         let compression = state.position.z + world_arm.z + surface.elevation;
