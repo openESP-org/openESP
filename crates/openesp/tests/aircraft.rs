@@ -69,6 +69,53 @@ fn capture_command(mut command: Command, output: &Path) -> image::RgbaImage {
 }
 
 #[test]
+#[ignore = "requires a GPU, original engine XML gauges and their installed fonts"]
+fn renders_live_engine_text_readouts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(1.0)
+        {
+            continue;
+        }
+        let before = capture(
+            &path,
+            true,
+            &[
+                "A:CIRCUIT GENERAL PANEL ON,bool=1",
+                "A:TURB ENG N1:1,percent=25",
+            ],
+            &temp.path().join("idle.png"),
+        );
+        let after = capture(
+            &path,
+            true,
+            &[
+                "A:CIRCUIT GENERAL PANEL ON,bool=1",
+                "A:TURB ENG N1:1,percent=85",
+            ],
+            &temp.path().join("power.png"),
+        );
+        let different = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            different > 10,
+            "live N1 text did not reach cockpit pixels: {different}"
+        );
+        count += 1;
+    }
+    assert!(count > 0);
+}
+
+#[test]
 #[ignore = "requires a GPU, desktop and original turbine aircraft"]
 fn renders_powered_flight_with_live_engine_state_and_fuel_use() {
     let temp = tempfile::tempdir().unwrap();

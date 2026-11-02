@@ -14,6 +14,24 @@ struct Variable {
     value: Value,
 }
 
+fn variable_name(category: char, name: &str) -> String {
+    if category == 'A' && !name.contains(':') {
+        for prefix in ["TURB ENG", "RECIP ENG", "GENERAL ENG", "ENG", "PROP"] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                let count = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+                if count > 0
+                    && let Some(suffix) = rest[count..].strip_prefix(' ')
+                    && let Ok(index) = rest[..count].parse::<u32>()
+                    && index > 0
+                {
+                    return format!("{prefix} {suffix}:{index}");
+                }
+            }
+        }
+    }
+    name.into()
+}
+
 impl Variables {
     pub fn configure_engines(&mut self, indices: impl Iterator<Item = u32>) -> anyhow::Result<()> {
         let mut engines = indices.collect::<Vec<_>>();
@@ -74,7 +92,10 @@ impl Variables {
     pub fn set(&mut self, category: char, name: &str, unit: Option<&str>, value: Value) {
         let reference = Reference::new(category, name, unit);
         self.values.insert(
-            (reference.category, reference.name),
+            (
+                reference.category,
+                variable_name(reference.category, &reference.name),
+            ),
             Variable {
                 unit: reference.unit,
                 value,
@@ -230,10 +251,10 @@ impl Variables {
 impl Host for Variables {
     fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
         let local = reference.category == 'L' || reference.category == 'G';
-        let Some(variable) = self
-            .values
-            .get(&(reference.category, reference.name.clone()))
-        else {
+        let Some(variable) = self.values.get(&(
+            reference.category,
+            variable_name(reference.category, &reference.name),
+        )) else {
             if reference.category == 'A'
                 && let Some((value, unit)) = self
                     .flaps
@@ -304,6 +325,45 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_engine_names_share_canonical_indexed_values() {
+        let mut variables = Variables::default();
+        variables.set_number("TURB ENG N1:2", "percent", 82.5);
+        assert_eq!(
+            variables
+                .read(&Reference::new('A', "Turb eng2 N1", Some("percent")))
+                .unwrap()
+                .number()
+                .unwrap(),
+            82.5
+        );
+        variables.set_number("GENERAL ENG1 THROTTLE LEVER POSITION", "percent", 35.0);
+        let throttle = variables
+            .read(&Reference::new(
+                'A',
+                "GENERAL ENG THROTTLE LEVER POSITION:1",
+                Some("percent over 100"),
+            ))
+            .unwrap()
+            .number()
+            .unwrap();
+        assert!((throttle - 0.35).abs() < 1e-12);
+        variables.set('L', "TURB ENG1 N1", None, Value::Number(7.0));
+        assert_eq!(
+            variables
+                .read(&Reference::new('L', "TURB ENG1 N1", None))
+                .unwrap()
+                .number()
+                .unwrap(),
+            7.0
+        );
+        assert!(
+            variables
+                .read(&Reference::new('A', "TURB ENG0 N1", Some("percent")))
+                .is_err()
+        );
+    }
 
     #[test]
     fn throttle_events_share_indexed_engine_state_and_preserve_other_engines() {

@@ -5,6 +5,9 @@ use winnow::{
     token::{take_until, take_while},
 };
 
+mod format;
+pub use format::FormattedString;
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Error {
     #[error("invalid calculator syntax at byte {0}")]

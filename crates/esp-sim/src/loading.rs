@@ -37,6 +37,10 @@ fn parallel_axis(mass: f64, offset: DVec3) -> DMat3 {
 }
 
 impl WeightBalance {
+    pub fn tanks(&self) -> &[cfg::loading::Tank] {
+        &self.tanks
+    }
+
     pub fn from_config(config: &Config) -> Result<Self> {
         let weight = |key| -> Result<f64> {
             config

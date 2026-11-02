@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::{panel::Panel, texture::gauge_bitmap};
 
 mod rotation;
+mod text;
 use rotation::Motion;
 
 pub struct PanelImage {
@@ -93,6 +94,7 @@ struct Canvas {
 
 struct Layer {
     image: RgbaImage,
+    text: Option<text::Text>,
     motion: Vec<Motion>,
     transform: DAffine2,
     conditions: Vec<Requirement>,
@@ -312,6 +314,9 @@ impl PanelImage {
                             }
                         });
                 dirty |= visible != layer.visible;
+                if visible && let Some(text) = &mut layer.text {
+                    dirty |= text.update(&mut layer.image, host);
+                }
                 if let Some(transform) = transform {
                     dirty |= visible && layer.transform != transform;
                     layer.transform = transform;
@@ -654,16 +659,37 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     let transform = rotation::transform(&motion, &conditions);
                     layers.push(Layer {
                         image: bitmap,
+                        text: None,
                         motion,
                         transform: transform.unwrap_or(DAffine2::IDENTITY),
                         visible: parents.is_empty() && transform.is_some(),
                         conditions: parents.clone(),
                     });
                 }
+                if node.has_tag_name("GaugeText") {
+                    match text::Text::parse(node, (w, h)) {
+                        Ok((text, image)) => {
+                            let transform = rotation::transform(&motion, &conditions);
+                            layers.push(Layer {
+                                image,
+                                text: Some(text),
+                                motion: motion.clone(),
+                                transform: transform.unwrap_or(DAffine2::IDENTITY),
+                                visible: parents.is_empty() && transform.is_some(),
+                                conditions: parents.clone(),
+                            });
+                        }
+                        Err(error) => {
+                            eprintln!("gauge text {}: {error:#}", gauge.reference);
+                            omitted_elements += 1;
+                        }
+                    }
+                }
                 for child in node.children().filter(|c| c.is_element()).rev() {
                     if child.has_tag_name("Element")
                         || child.has_tag_name("Image")
                         || child.has_tag_name("Select")
+                        || child.has_tag_name("GaugeText")
                     {
                         stack.push((child, x, y, parents.clone(), motion.clone()));
                     }
@@ -925,6 +951,49 @@ fn collect_mouse_areas(
 mod tests {
     use super::*;
     use esp_script::{Error, Reference, Value};
+
+    #[test]
+    #[ignore = "requires the gauge's installed Arial font"]
+    fn gauge_text_repaints_changed_values_and_restores_hidden_background() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        std::fs::create_dir_all(directory.join("example")).unwrap();
+        std::fs::write(directory.join("panel.cfg"),"[VCockpit01]\nsize_mm=100,30\npixel_size=100,30\ntexture=$text\ngauge00=example!text,0,0,100,30\nbackground_color=2,3,4").unwrap();
+        std::fs::write(directory.join("example/text.xml"),r#"<Gauge><Size X="100" Y="30"/><Element><Visibility>(L:Visible)</Visibility><GaugeText><Size>100,30</Size><FontFace>Arial</FontFace><FontHeight>22</FontHeight><FontColor>cyan</FontColor><Transparent>True</Transparent><HorizontalAlign>RIGHT</HorizontalAlign><GaugeString>%((L:Value))%!4.1f!</GaugeString></GaugeText></Element></Gauge>"#).unwrap();
+        struct TextHost {
+            visible: f64,
+            value: f64,
+        }
+        impl Host for TextHost {
+            fn read(&mut self, r: &Reference) -> Result<Value, Error> {
+                Ok(Value::Number(if r.name == "VISIBLE" {
+                    self.visible
+                } else {
+                    self.value
+                }))
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$text").unwrap().unwrap();
+        assert_eq!(image.omitted_elements, 0);
+        let mut host = TextHost {
+            visible: 1.0,
+            value: 12.3,
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        assert!(before.pixels().any(|p| p.0[1] > 100 && p.0[2] > 100));
+        assert!(!image.update(&mut host));
+        host.value = 98.7;
+        assert!(image.update(&mut host));
+        assert_ne!(image.image, before);
+        host.visible = 0.0;
+        assert!(image.update(&mut host));
+        assert!(image.image.pixels().all(|p| p.0 == [2, 3, 4, 255]));
+    }
 
     struct TestHost(f64);
 

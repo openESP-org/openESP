@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+ab_glyph = "0.2"
+fontdb = "0.24"
 encoding_rs = "0.8"
 ddsfile = "0.6"
 dds-codec = { package = "dds", version = "0.2", default-features = false }
@@ -12,7 +14,7 @@ esp-formats = { path = "../esp-formats" }
 esp-script = { path = "../esp-script" }
 glam = "0.30"
 image = { version = "0.25", default-features = false, features = ["bmp"] }
-imageproc = { version = "0.27", default-features = false }
+imageproc = { version = "0.27", default-features = false, features = ["text"] }
 rayon = "1"
 roxmltree = "0.21"
 

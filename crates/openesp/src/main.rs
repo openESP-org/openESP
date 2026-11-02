@@ -778,6 +778,7 @@ fn main() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
+    variables.set('P', "UNITS OF MEASURE", Some("enum"), Value::Number(0.0));
     variables.set_number("AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool", 0.0);
     variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 0.0);
     let mut app = App {
