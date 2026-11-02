@@ -272,7 +272,16 @@ impl Flight {
         let ias = air.calibrated_airspeed(self.current.air_velocity(DVec3::ZERO).length())?
             * 3600.0
             / 1852.0;
-        self.gear.advance(gear_handle || self.on_ground, ias, dt)?;
+        let gear_powered = match self.gear.system_type() {
+            Some(0) => control("CIRCUIT GEAR MOTOR ON")
+                .ok()
+                .is_some_and(|v| v != 0.0),
+            Some(4) => false,
+            _ => true,
+        };
+        if gear_powered {
+            self.gear.advance(gear_handle || self.on_ground, ias, dt)?;
+        }
         ensure!(
             (0.0..=1.0).contains(&spoiler_handle),
             "invalid spoiler handle"
@@ -733,6 +742,82 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original retractable aircraft"]
+    fn electric_gear_stops_without_power_and_resumes_when_power_returns() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let mut data = FlightData::load(&path, 0).unwrap();
+            if esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration)
+                .unwrap()
+                .gear_system_type
+                != Some(1)
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let mut changed = false;
+            let source = source
+                .lines()
+                .map(|line| {
+                    if line
+                        .split('=')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("gear_system_type")
+                    {
+                        changed = true;
+                        "gear_system_type=0".to_owned()
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(changed);
+            data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, true).unwrap();
+            let mut vars = controls(&data);
+            vars.configure_electrical(
+                &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+            vars.dispatch_event("GEAR_UP", Value::Number(0.0)).unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(flight.gear.extension(), 1.0);
+            vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let partial = flight.gear.extension();
+            assert!(partial > 0.0 && partial < 1.0);
+            vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(flight.gear.extension(), partial);
+            vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..480 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(flight.gear.extension(), 0.0);
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original fixed and retractable aircraft"]

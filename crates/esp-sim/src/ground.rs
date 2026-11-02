@@ -14,6 +14,7 @@ pub struct LandingGear {
     wheels: Vec<Wheel>,
     brake_scale: f64,
     contacts: Vec<Contact>,
+    system_type: Option<u32>,
 }
 
 struct Contact {
@@ -93,6 +94,10 @@ impl LandingGear {
 
     pub fn retractable(&self) -> bool {
         self.wheels.iter().any(|w| w.retraction_seconds > 0.0)
+    }
+
+    pub fn system_type(&self) -> Option<u32> {
+        self.system_type
     }
 
     pub fn extensions(&self) -> impl Iterator<Item = (u32, f64)> + '_ {
@@ -237,6 +242,7 @@ impl LandingGear {
             wheels,
             brake_scale,
             contacts: collision_contacts,
+            system_type: contacts.gear_system_type,
         })
     }
 
@@ -401,6 +407,7 @@ mod tests {
             .collect(),
             brake_scale: 1.0,
             contacts: vec![],
+            system_type: None,
         }
     }
 
