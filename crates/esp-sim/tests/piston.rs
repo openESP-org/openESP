@@ -2,7 +2,7 @@ use esp_assets::flight::FlightData;
 use esp_formats::air;
 use esp_sim::{
     atmosphere::Atmosphere,
-    piston::{Charge, PistonCycle},
+    piston::{Charge, Command, PistonCycle, Pistons},
     propeller::Propeller,
 };
 
@@ -102,6 +102,139 @@ fn original_piston_tables_drive_cycle_torque_and_propeller_equilibrium() {
             rpm,
             engine.shaft_power,
             prop.thrust
+        );
+        verified += 1;
+    }
+    assert!(verified > 0);
+}
+
+#[test]
+#[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
+fn original_piston_shaft_responds_to_controls_load_inertia_and_altitude() {
+    use glam::DVec3;
+    let sea = Atmosphere::standard(0.0).unwrap();
+    let high = Atmosphere::standard(4000.0).unwrap();
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let data = FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(0.0)
+            || data
+                .configuration
+                .number("propeller", "propeller_type")
+                .unwrap()
+                != Some(1.0)
+        {
+            continue;
+        }
+        let mut engine = Pistons::from_data(&data).unwrap();
+        engine.start_running(&sea, DVec3::ZERO).unwrap();
+        let idle = engine.output(0, &sea, DVec3::ZERO).unwrap();
+        assert!(idle.combustion && idle.rpm > 300.0 && idle.rpm < 1500.0);
+        assert!((idle.cycle.shaft_torque - idle.propeller.absorbed_torque).abs() < 1e-6);
+        let mut commands = engine
+            .indices()
+            .map(|_| Command {
+                throttle: 1.0,
+                ..Command::default()
+            })
+            .collect::<Vec<_>>();
+        let mut heavy_data = FlightData::load(&path, 0).unwrap();
+        let config = String::from_utf8(std::fs::read(path.join("aircraft.cfg")).unwrap()).unwrap();
+        // Change only the in-memory inertia definition, retaining all authored tables.
+        let old = data
+            .configuration
+            .number("propeller", "propeller_moi")
+            .unwrap()
+            .unwrap();
+        let config = config
+            .lines()
+            .map(|line| {
+                if line
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("propeller_moi")
+                {
+                    format!("propeller_moi={}", old * 4.0)
+                } else {
+                    line.into()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        heavy_data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
+        let mut heavy = Pistons::from_data(&heavy_data).unwrap();
+        heavy.start_running(&sea, DVec3::ZERO).unwrap();
+        engine
+            .advance(0.1, &sea, DVec3::ZERO, &commands, true)
+            .unwrap();
+        heavy
+            .advance(0.1, &sea, DVec3::ZERO, &commands, true)
+            .unwrap();
+        let response = engine.output(0, &sea, DVec3::ZERO).unwrap();
+        let slow = heavy.output(0, &sea, DVec3::ZERO).unwrap();
+        assert!(response.rpm > slow.rpm && slow.rpm > idle.rpm);
+        for _ in 0..240 {
+            engine
+                .advance(0.25, &sea, DVec3::ZERO, &commands, true)
+                .unwrap();
+            heavy
+                .advance(0.25, &sea, DVec3::ZERO, &commands, true)
+                .unwrap();
+        }
+        let full = engine.output(0, &sea, DVec3::ZERO).unwrap();
+        let steady_heavy = heavy.output(0, &sea, DVec3::ZERO).unwrap();
+        assert!(
+            (full.rpm - steady_heavy.rpm).abs() < 0.01,
+            "normal={}, heavy={}",
+            full.rpm,
+            steady_heavy.rpm
+        );
+        assert!(full.rpm > response.rpm && full.propeller.thrust > idle.propeller.thrust);
+        assert!((full.cycle.shaft_torque - full.propeller.absorbed_torque).abs() < 1e-6);
+        let windmilling = engine.output(0, &sea, DVec3::X * 120.0).unwrap();
+        assert!(windmilling.propeller.thrust < 0.0 && windmilling.propeller.absorbed_torque < 0.0);
+        // Full rich becomes excessively rich at altitude; leaning recovers power.
+        let rich = engine.output(0, &high, DVec3::ZERO).unwrap();
+        for command in &mut commands {
+            command.mixture = 0.45;
+        }
+        engine
+            .advance(0.0, &high, DVec3::ZERO, &commands, true)
+            .unwrap();
+        let lean = engine.output(0, &high, DVec3::ZERO).unwrap();
+        assert!(lean.cycle.gross_torque > rich.cycle.gross_torque);
+        assert!(lean.cycle.gross_torque < full.cycle.gross_torque);
+        for command in &mut commands {
+            command.mixture = 0.0;
+        }
+        engine
+            .advance(0.0, &sea, DVec3::ZERO, &commands, true)
+            .unwrap();
+        let cutoff = engine.output(0, &sea, DVec3::ZERO).unwrap();
+        assert_eq!(cutoff.rpm, full.rpm);
+        assert!(!cutoff.combustion);
+        assert_eq!(cutoff.fuel_kilograms_per_second, 0.0);
+        for _ in 0..120 {
+            engine
+                .advance(0.25, &sea, DVec3::ZERO, &commands, true)
+                .unwrap();
+        }
+        assert!(engine.output(0, &sea, DVec3::ZERO).unwrap().rpm < 1.0);
+        eprintln!(
+            "{}: idle {:.3} RPM; full {:.3} RPM, {:.3} N, {:.6} kg/s; 0.1 s normal/heavy {:.3}/{:.3} RPM",
+            path.display(),
+            idle.rpm,
+            full.rpm,
+            full.propeller.thrust,
+            full.fuel_kilograms_per_second,
+            response.rpm,
+            slow.rpm
         );
         verified += 1;
     }

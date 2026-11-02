@@ -5,6 +5,9 @@ use std::f64::consts::PI;
 
 use crate::lookup::Curve;
 
+mod engine;
+pub use engine::{Command, EngineOutput, Pistons};
+
 pub struct PistonCycle {
     efficiency: Curve,
     friction: Curve,
