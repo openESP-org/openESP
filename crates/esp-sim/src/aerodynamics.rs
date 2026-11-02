@@ -1,16 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
 use esp_formats::{
-    air::{
-        self,
-        parameters::LegacyParameters,
-        table::{Point, Table},
-    },
+    air::{self, parameters::LegacyParameters},
     cfg::Config,
 };
 use glam::DVec3;
 
-use crate::{flight::Wrench, loading::WeightBalance};
+use crate::{flight::Wrench, loading::WeightBalance, lookup::Curve};
 
 const FOOT: f64 = 0.3048;
 
@@ -41,33 +37,7 @@ pub struct Controls {
     pub rudder: f64,
 }
 
-struct Curve(Vec<Point>);
-
 impl Curve {
-    fn new(points: Vec<Point>) -> Result<Self> {
-        ensure!(
-            points.len() >= 2
-                && points
-                    .iter()
-                    .all(|p| p.input.is_finite() && p.output.is_finite())
-                && points.windows(2).all(|p| p[0].input < p[1].input),
-            "invalid aerodynamic curve"
-        );
-        Ok(Self(points))
-    }
-
-    fn sample(&self, input: f64) -> f64 {
-        let index = self.0.partition_point(|point| point.input < input);
-        if index == 0 {
-            return self.0[0].output;
-        }
-        if index == self.0.len() {
-            return self.0[index - 1].output;
-        }
-        let [a, b] = [self.0[index - 1], self.0[index]];
-        a.output + (b.output - a.output) * (input - a.input) / (b.input - a.input)
-    }
-
     fn gradient(&self) -> f64 {
         (self.sample(10f64.to_radians()) - self.sample(0.0)) / 10f64.to_radians()
     }
@@ -100,10 +70,7 @@ impl Aerodynamics {
             Ok(result)
         };
         let curve = |id| -> Result<Curve> {
-            let Some(Table::Curve(curve)) = record(id)?.table()? else {
-                anyhow::bail!("AIR record {id:#x} is not a curve");
-            };
-            Curve::new(curve.points).with_context(|| format!("AIR record {id:#x}"))
+            Curve::from_record(record(id)?).with_context(|| format!("AIR record {id:#x}"))
         };
         let lift = curve(0x404)?;
         let pitch = curve(0x473)?;
@@ -305,6 +272,7 @@ impl Aerodynamics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esp_formats::air::table::Point;
 
     #[test]
     fn interpolates_curves_and_clamps_to_defined_domain() {

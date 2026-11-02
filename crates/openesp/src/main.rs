@@ -39,9 +39,16 @@ struct Arguments {
     cockpit: bool,
     #[arg(
         long,
-        help = "Start an unpowered aircraft at this airspeed in knots, in the local test scene"
+        alias = "glide",
+        help = "Start in flight at this airspeed in knots, in the local test scene"
     )]
-    glide: Option<f64>,
+    airspeed: Option<f64>,
+    #[arg(
+        long,
+        requires = "airspeed",
+        help = "Start with the configured engines running at idle"
+    )]
+    engines_running: bool,
     #[arg(
         long,
         default_value_t = 1000.0,
@@ -51,13 +58,13 @@ struct Arguments {
     #[arg(
         long,
         default_value_t = 0.0,
-        requires = "glide",
+        requires = "airspeed",
         help = "Fill usable fuel tanks to this percentage for the airborne test"
     )]
     fuel_percent: f64,
     #[arg(
         long,
-        requires = "glide",
+        requires = "airspeed",
         help = "Load the aircraft's configured payload stations for the airborne test"
     )]
     payload: bool,
@@ -384,6 +391,7 @@ impl App {
                     if let Some(flight) = &self.flight {
                         Flight::publish(&flight.current, &mut self.variables)?;
                         flight.publish_loading(&mut self.variables);
+                        flight.configure_engines(&mut self.variables)?;
                     }
                     self.apply_variable_overrides();
                     for panel in aircraft.panel_images.values_mut() {
@@ -658,7 +666,7 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
-                        if !event.repeat {
+                        if !event.repeat || matches!(key, KeyCode::F2 | KeyCode::F3) {
                             match key {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Tab => {
@@ -682,6 +690,19 @@ impl ApplicationHandler for App {
                                         self.variables.dispatch_event(name, Value::Number(0.0))
                                     {
                                         eprintln!("flap input: {error}");
+                                    }
+                                }
+                                KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 => {
+                                    let event = match key {
+                                        KeyCode::F1 => "THROTTLE_CUT",
+                                        KeyCode::F2 => "THROTTLE_DECR",
+                                        KeyCode::F3 => "THROTTLE_INCR",
+                                        _ => "THROTTLE_FULL",
+                                    };
+                                    if let Err(error) =
+                                        self.variables.dispatch_event(event, Value::Number(0.0))
+                                    {
+                                        eprintln!("throttle input: {error}");
                                     }
                                 }
                                 _ => {}
@@ -732,7 +753,8 @@ fn main() -> Result<()> {
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;
     let fsx_root = arguments.fsx_root.clone();
-    let glide = arguments.glide;
+    let airspeed = arguments.airspeed;
+    let engines_running = arguments.engines_running;
     let height = arguments.height;
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
@@ -742,12 +764,14 @@ fn main() -> Result<()> {
         .spawn(move || {
             let loaded = (|| {
                 let aircraft = Aircraft::load_with_root(&path, variant, fsx_root.as_deref())?;
-                let flight = glide.map(|knots| {
+                let flight = airspeed.map(|knots| {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
-                    Flight::new(&data, knots, height,fuel_fraction,payload)
+                    let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
+                    if engines_running{flight.start_running(&data)?;}
+                    Ok::<_,anyhow::Error>(flight)
                 }).transpose()?;
                 if flight.is_some() {
-                    eprintln!("airborne test: no thrust, standard atmosphere; arrows control elevator/ailerons, Z/X rudder");
+                    eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder, F1-F4 throttle");
                 }
                 Ok((aircraft, flight))
             })();
@@ -783,6 +807,7 @@ fn main() -> Result<()> {
     EventLoop::new()?.run_app(&mut app)?;
     if let Some(flight) = &app.flight {
         eprintln!("flight state: {:?}", flight.current);
+        flight.report()?;
     }
     if let Some(error) = app.error {
         return Err(error);

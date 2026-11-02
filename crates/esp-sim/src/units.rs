@@ -20,10 +20,19 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "pounds" | "pound" => Some((5, 0.45359237)),
         "gallons" | "gallon" => Some((6, 0.003785411784)),
         "liters" | "liter" => Some((6, 0.001)),
+        "newtons" => Some((7, 1.0)),
+        "pounds force" => Some((7, 4.4482216152605)),
+        "kilograms per second" => Some((8, 1.0)),
+        "pounds per hour" => Some((8, 0.45359237 / 3600.0)),
         _ => None,
     };
     let (from_dimension, from_scale) = unit(from)?;
-    let (to_dimension, to_scale) = unit(to)?;
+    let (to_dimension, to_scale) =
+        unit(if from_dimension == 7 && matches!(to, "pounds" | "pound") {
+            "pounds force"
+        } else {
+            to
+        })?;
     if from_dimension != to_dimension {
         return None;
     }

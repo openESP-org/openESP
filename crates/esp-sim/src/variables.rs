@@ -6,6 +6,7 @@ pub struct Variables {
     values: HashMap<(char, String), Variable>,
     events: Vec<(String, Value)>,
     flaps: Option<crate::flaps::Flaps>,
+    engines: Vec<u32>,
 }
 
 struct Variable {
@@ -14,6 +15,25 @@ struct Variable {
 }
 
 impl Variables {
+    pub fn configure_engines(&mut self, indices: impl Iterator<Item = u32>) -> anyhow::Result<()> {
+        let mut engines = indices.collect::<Vec<_>>();
+        engines.sort_unstable();
+        anyhow::ensure!(
+            engines.iter().all(|i| *i > 0) && engines.windows(2).all(|p| p[0] != p[1]),
+            "invalid engine indices"
+        );
+        for index in &engines {
+            self.set_number(
+                &format!("GENERAL ENG THROTTLE LEVER POSITION:{index}"),
+                "percent",
+                0.0,
+            );
+            self.set_number(&format!("GENERAL ENG FUEL VALVE:{index}"), "bool", 1.0);
+        }
+        self.engines = engines;
+        Ok(())
+    }
+
     pub fn flap_angles(&self) -> impl Iterator<Item = f64> + '_ {
         self.flaps.iter().flat_map(|flaps| flaps.angles())
     }
@@ -116,6 +136,22 @@ impl Variables {
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
         match name {
+            "THROTTLE_FULL" | "THROTTLE_CUT" | "THROTTLE_INCR" | "THROTTLE_DECR"
+            | "THROTTLE_SET" | "AXIS_THROTTLE_SET" => self.throttle_event(name, value, None),
+            "THROTTLE1_SET" => self.throttle_event("THROTTLE_SET", value, Some(1)),
+            "THROTTLE2_SET" => self.throttle_event("THROTTLE_SET", value, Some(2)),
+            "THROTTLE3_SET" => self.throttle_event("THROTTLE_SET", value, Some(3)),
+            "THROTTLE4_SET" => self.throttle_event("THROTTLE_SET", value, Some(4)),
+            "AXIS_THROTTLE1_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(1)),
+            "AXIS_THROTTLE2_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(2)),
+            "AXIS_THROTTLE3_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(3)),
+            "AXIS_THROTTLE4_SET" => self.throttle_event("AXIS_THROTTLE_SET", value, Some(4)),
+            "ENGINE_AUTO_SHUTDOWN" => {
+                for index in self.engines.clone() {
+                    self.set_number(&format!("GENERAL ENG FUEL VALVE:{index}"), "bool", 0.0);
+                }
+                Ok(())
+            }
             "FLAPS_UP" | "FLAPS_DOWN" | "FLAPS_INCR" | "FLAPS_DECR" | "FLAPS_SET" => self
                 .flaps
                 .as_mut()
@@ -160,6 +196,34 @@ impl Variables {
             }
             _ => Err(Error::Unsupported(format!("event {name}"))),
         }
+    }
+
+    fn throttle_event(&mut self, name: &str, value: f64, engine: Option<u32>) -> Result<(), Error> {
+        if !value.is_finite() {
+            return Err(Error::Number);
+        }
+        if self.engines.is_empty() || engine.is_some_and(|i| !self.engines.contains(&i)) {
+            return Err(Error::Unsupported("engine controls are unavailable".into()));
+        }
+        for index in self
+            .engines
+            .clone()
+            .into_iter()
+            .filter(|i| engine.is_none_or(|e| e == *i))
+        {
+            let variable = format!("GENERAL ENG THROTTLE LEVER POSITION:{index}");
+            let reference = Reference::new('A', &variable, Some("percent"));
+            let position = match name {
+                "THROTTLE_FULL" => 100.0,
+                "THROTTLE_CUT" => 0.0,
+                "THROTTLE_INCR" => self.read(&reference)?.number()? + 1.0,
+                "THROTTLE_DECR" => self.read(&reference)?.number()? - 1.0,
+                "AXIS_THROTTLE_SET" => (value + 16383.0) / 32766.0 * 100.0,
+                _ => value / 16383.0 * 100.0,
+            };
+            self.set_number(&variable, "percent", position.clamp(0.0, 100.0));
+        }
+        Ok(())
     }
 }
 
@@ -240,6 +304,73 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throttle_events_share_indexed_engine_state_and_preserve_other_engines() {
+        let mut variables = Variables::default();
+        variables.configure_engines([1, 2].into_iter()).unwrap();
+        let read = |variables: &mut Variables, index| {
+            variables
+                .read(&Reference::new(
+                    'A',
+                    &format!("GENERAL ENG THROTTLE LEVER POSITION:{index}"),
+                    Some("percent"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_event("THROTTLE_FULL", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, 1), 100.0);
+        assert_eq!(read(&mut variables, 2), 100.0);
+        variables
+            .dispatch_event("AXIS_THROTTLE1_SET", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, 1), 50.0);
+        assert_eq!(read(&mut variables, 2), 100.0);
+        variables
+            .dispatch_event("THROTTLE2_SET", Value::Number(4095.75))
+            .unwrap();
+        assert_eq!(read(&mut variables, 2), 25.0);
+        assert!(
+            variables
+                .dispatch_event("THROTTLE_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(read(&mut variables, 2), 25.0);
+        variables
+            .dispatch_event("ENGINE_AUTO_SHUTDOWN", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "GENERAL ENG FUEL VALVE:1",
+                    Some("bool")
+                ))
+                .unwrap()
+                .number()
+                .unwrap(),
+            0.0
+        );
+        variables.set_number("TURB ENG JET THRUST:1", "newtons", 4.4482216152605 * 1000.0);
+        assert!(
+            (variables
+                .read(&Reference::new(
+                    'A',
+                    "TURB ENG JET THRUST:1",
+                    Some("pounds")
+                ))
+                .unwrap()
+                .number()
+                .unwrap()
+                - 1000.0)
+                .abs()
+                < 1e-9
+        );
+    }
     use esp_script::Program;
 
     #[test]

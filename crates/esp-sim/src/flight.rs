@@ -62,6 +62,13 @@ impl Default for State {
 }
 
 impl State {
+    pub fn rebase(&mut self, offset: DVec3) -> Result<()> {
+        ensure!(offset.is_finite(), "invalid aircraft reference offset");
+        self.position += self.orientation * offset;
+        self.velocity += self.orientation * self.angular_velocity.cross(offset);
+        Ok(())
+    }
+
     pub fn air_velocity(&self, wind: DVec3) -> DVec3 {
         self.orientation.conjugate() * (self.velocity - wind)
     }
@@ -173,6 +180,25 @@ impl State {
 mod tests {
     use super::*;
     use crate::time::STEP;
+
+    #[test]
+    fn rebasing_preserves_airframe_position_and_material_point_velocity() {
+        let mut state = State {
+            position: DVec3::splat(1e6),
+            velocity: DVec3::new(100.0, 2.0, -3.0),
+            orientation: DQuat::from_rotation_y(0.3),
+            angular_velocity: DVec3::new(0.1, 0.2, -0.3),
+        };
+        let before = state;
+        let offset = DVec3::new(0.5, -0.2, 0.1);
+        state.rebase(offset).unwrap();
+        assert!((state.position - state.orientation * offset).abs_diff_eq(before.position, 1e-9));
+        let point = DVec3::new(-4.0, 2.0, 1.0);
+        let velocity =
+            state.velocity + state.orientation * state.angular_velocity.cross(point - offset);
+        let expected = before.velocity + before.orientation * before.angular_velocity.cross(point);
+        assert!(velocity.abs_diff_eq(expected, 1e-12));
+    }
 
     fn mass() -> MassProperties {
         MassProperties::new(

@@ -69,6 +69,78 @@ fn capture_command(mut command: Command, output: &Path) -> image::RgbaImage {
 }
 
 #[test]
+#[ignore = "requires a GPU, desktop and original turbine aircraft"]
+fn renders_powered_flight_with_live_engine_state_and_fuel_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(1.0)
+        {
+            continue;
+        }
+        let initial_fuel = esp_formats::cfg::loading::tanks(&data.configuration)
+            .unwrap()
+            .iter()
+            .map(|t| t.capacity_gallons)
+            .sum::<f64>()
+            * 0.5;
+        let screenshot = temp.path().join(format!("powered-{count}.png"));
+        let log_path = screenshot.with_extension("log");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+        command
+            .arg("--aircraft")
+            .arg(path)
+            .args([
+                "--airspeed",
+                "200",
+                "--height",
+                "10000",
+                "--engines-running",
+                "--fuel-percent",
+                "50",
+                "--payload",
+                "--event",
+                "THROTTLE_FULL",
+                "--frames",
+                "180",
+                "--cockpit",
+                "--screenshot",
+            ])
+            .arg(&screenshot)
+            .stderr(std::fs::File::create(&log_path).unwrap());
+        capture_command(command, &screenshot);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        let remaining = log
+            .split("flight fuel: ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(remaining > 0.0 && remaining < initial_fuel);
+        for index in [1, 2] {
+            let engine = log.split(&format!("engine {index}: N1=")).nth(1).unwrap();
+            let n1 = engine
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            assert!(n1 > 0.0);
+        }
+        count += 1;
+    }
+    assert!(count > 0);
+}
+
+#[test]
 #[ignore = "requires a GPU, desktop and original aircraft AIR data"]
 fn renders_airborne_motion_with_opposite_control_inputs() {
     let temp = tempfile::tempdir().unwrap();

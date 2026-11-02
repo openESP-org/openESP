@@ -92,31 +92,30 @@ impl WeightBalance {
             fuel_fraction == 0.0 || self.tanks.iter().all(|t| t.unusable_gallons == 0.0),
             "loading tanks with unusable fuel is not simulated yet"
         );
-        let mut points = Vec::new();
-        if payload {
-            points.extend(
-                self.stations
-                    .iter()
-                    .map(|s| (s.pounds * POUND, self.datum + body(s.position_feet))),
-            );
-        }
-        let payload_kilograms = points.iter().map(|(mass, _)| mass).sum();
+        let stations = || {
+            self.stations
+                .iter()
+                .filter(|_| payload)
+                .map(|s| (s.pounds * POUND, self.datum + body(s.position_feet)))
+        };
+        let payload_kilograms = stations().map(|(mass, _)| mass).sum();
         let fuel_capacity_gallons = self.tanks.iter().map(|t| t.capacity_gallons).sum::<f64>();
-        points.extend(self.tanks.iter().map(|t| {
-            (
-                t.capacity_gallons * fuel_fraction * self.fuel_density * POUND,
-                self.datum + body(t.position_feet),
-            )
-        }));
-        let mass = self.empty.kilograms() + points.iter().map(|(mass, _)| mass).sum::<f64>();
+        let points = || {
+            stations().chain(self.tanks.iter().map(|t| {
+                (
+                    t.capacity_gallons * fuel_fraction * self.fuel_density * POUND,
+                    self.datum + body(t.position_feet),
+                )
+            }))
+        };
+        let mass = self.empty.kilograms() + points().map(|(mass, _)| mass).sum::<f64>();
         let cg = (self.empty_cg * self.empty.kilograms()
-            + points.iter().map(|(mass, pos)| pos * mass).sum::<DVec3>())
+            + points().map(|(mass, pos)| pos * mass).sum::<DVec3>())
             / mass;
         let inertia = self.empty.inertia
             + parallel_axis(self.empty.kilograms(), self.empty_cg - cg)
-            + points
-                .iter()
-                .map(|(mass, pos)| parallel_axis(*mass, *pos - cg))
+            + points()
+                .map(|(mass, pos)| parallel_axis(mass, pos - cg))
                 .sum::<DMat3>();
         Ok(Loading {
             mass: MassProperties::new(mass, inertia)?,

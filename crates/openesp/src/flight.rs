@@ -6,6 +6,7 @@ use esp_sim::{
     atmosphere::Atmosphere,
     flight::State,
     loading::{Loading, WeightBalance},
+    turbine::{Command, Turbines},
     variables::Variables,
 };
 use glam::{DMat3, DQuat, DVec3, EulerRot, Quat};
@@ -17,8 +18,13 @@ mod content;
 pub struct Flight {
     model: Aerodynamics,
     loading: Loading,
+    weights: WeightBalance,
+    payload: bool,
+    engines: Option<Turbines>,
+    commands: Vec<Command>,
     pub current: State,
     previous: State,
+    previous_cg: DVec3,
     flaps: Vec<f64>,
 }
 
@@ -35,8 +41,9 @@ impl Flight {
             "invalid airborne starting state"
         );
         let model = Aerodynamics::from_data(data)?;
-        let loading =
-            WeightBalance::from_config(&data.configuration)?.load(fuel_fraction, payload)?;
+        let weights = WeightBalance::from_config(&data.configuration)?;
+        let loading = weights.load(fuel_fraction, payload)?;
+        let previous_cg = loading.cg;
         Atmosphere::standard(height)?;
         let current = State {
             position: DVec3::new(0.0, 0.0, -height),
@@ -46,13 +53,74 @@ impl Flight {
         Ok(Self {
             model,
             loading,
+            weights,
+            payload,
+            engines: None,
+            commands: Vec::new(),
+            previous_cg,
             current,
             previous: current,
             flaps: Vec::new(),
         })
     }
 
+    pub fn start_running(&mut self, data: &FlightData) -> Result<()> {
+        ensure!(
+            self.loading.fuel_gallons > 0.0,
+            "cannot start running engines without fuel"
+        );
+        let mut engines = Turbines::from_data(data)?;
+        engines.start_running(
+            &Atmosphere::standard(-self.current.position.z)?,
+            self.current.velocity.length(),
+        )?;
+        self.engines = Some(engines);
+        Ok(())
+    }
+
+    pub fn configure_engines(&self, variables: &mut Variables) -> Result<()> {
+        if let Some(engines) = &self.engines {
+            variables.configure_engines(engines.indices())?;
+            self.publish_engines(variables)?;
+        }
+        Ok(())
+    }
+
+    pub fn publish_engines(&self, variables: &mut Variables) -> Result<()> {
+        let Some(engines) = &self.engines else {
+            return Ok(());
+        };
+        let air = Atmosphere::standard(-self.current.position.z)?;
+        for (index, id) in engines.indices().enumerate() {
+            let output = engines.output(index, &air, self.current.velocity.length())?;
+            for (name, unit, value) in [
+                ("TURB ENG N1", "percent", output.n1),
+                ("TURB ENG N2", "percent", output.n2),
+                ("TURB ENG JET THRUST", "newtons", output.net_thrust),
+                (
+                    "ENG FUEL FLOW PPH",
+                    "pounds per hour",
+                    output.fuel_kilograms_per_second / 0.45359237 * 3600.0,
+                ),
+                (
+                    "TURB ENG FUEL FLOW PPH",
+                    "pounds per hour",
+                    output.fuel_kilograms_per_second / 0.45359237 * 3600.0,
+                ),
+                (
+                    "GENERAL ENG COMBUSTION",
+                    "bool",
+                    f64::from(output.combustion),
+                ),
+            ] {
+                variables.set_number(&format!("{name}:{id}"), unit, value);
+            }
+        }
+        Ok(())
+    }
+
     pub fn advance(&mut self, dt: f64, variables: &mut Variables) -> Result<()> {
+        ensure!(dt.is_finite() && dt >= 0.0, "invalid aircraft timestep");
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -65,29 +133,114 @@ impl Flight {
         };
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
+        let mut fuel_used = 0.0;
+        let mut power_fraction = 1.0;
+        if let Some(engines) = &mut self.engines {
+            self.commands.clear();
+            for index in engines.indices() {
+                let throttle = variables
+                    .read(&Reference::new(
+                        'A',
+                        &format!("GENERAL ENG THROTTLE LEVER POSITION:{index}"),
+                        Some("percent over 100"),
+                    ))?
+                    .number()?;
+                let fuel_valve = variables
+                    .read(&Reference::new(
+                        'A',
+                        &format!("GENERAL ENG FUEL VALVE:{index}"),
+                        Some("bool"),
+                    ))?
+                    .number()?
+                    != 0.0;
+                self.commands.push(Command {
+                    throttle,
+                    fuel_valve,
+                });
+            }
+            let air = Atmosphere::standard(-self.current.position.z)?;
+            let speed = self.current.velocity.length();
+            engines.advance(
+                dt,
+                &air,
+                speed,
+                &self.commands,
+                self.loading.fuel_gallons > 0.0,
+            )?;
+            let mut rate = 0.0;
+            for (index, _) in engines.indices().enumerate() {
+                rate += engines
+                    .output(index, &air, speed)?
+                    .fuel_kilograms_per_second;
+            }
+            let available =
+                self.loading.fuel_gallons * self.loading.fuel_pounds_per_gallon * 0.45359237;
+            let demand = rate * dt;
+            fuel_used = demand.min(available);
+            if demand > 0.0 {
+                power_fraction = fuel_used / demand;
+            }
+        }
         let mut next = self.current;
         next.advance(&self.loading.mass, dt, DVec3::Z * 9.80665, |state| {
             let air = Atmosphere::standard(-state.position.z)?;
-            self.model.forces(
+            let mut loads = self.model.forces(
                 state.air_velocity(DVec3::ZERO),
                 state.angular_velocity,
                 air.density,
                 controls,
                 &self.flaps,
                 self.loading.cg,
-            )
+            )?;
+            if let Some(engines) = &self.engines {
+                let thrust = engines.wrench(
+                    &air,
+                    state.air_velocity(DVec3::ZERO),
+                    self.loading.cg,
+                    power_fraction,
+                )?;
+                loads.force += thrust.force;
+                loads.moment += thrust.moment;
+            }
+            Ok(loads)
         })?;
         ensure!(
             next.position.z < 0.0,
             "airborne test reached the ground; ground contact is not simulated yet"
         );
         self.previous = self.current;
+        self.previous_cg = self.loading.cg;
+        if fuel_used > 0.0 {
+            let remaining = (self.loading.fuel_gallons
+                - fuel_used / (self.loading.fuel_pounds_per_gallon * 0.45359237))
+                .max(0.0);
+            let loading = self
+                .weights
+                .load(remaining / self.loading.fuel_capacity_gallons, self.payload)?;
+            next.rebase(loading.cg - self.loading.cg)?;
+            self.loading = loading;
+            if remaining == 0.0
+                && let Some(engines) = &mut self.engines
+            {
+                engines.advance(
+                    0.0,
+                    &Atmosphere::standard(-next.position.z)?,
+                    next.velocity.length(),
+                    &self.commands,
+                    false,
+                )?;
+            }
+        }
         self.current = next;
+        self.publish_loading(variables);
+        self.publish_engines(variables)?;
         Ok(())
     }
 
     pub fn sample(&self, alpha: f64) -> Result<State> {
-        self.previous.interpolate(&self.current, alpha)
+        let mut previous = self.previous;
+        previous.rebase(self.loading.cg - self.previous_cg)?;
+        previous.interpolate(&self.current, alpha)
     }
 
     pub fn pose(&self, state: &State) -> (DVec3, Quat) {
@@ -118,6 +271,21 @@ impl Flight {
             "pounds",
             self.loading.fuel_pounds_per_gallon,
         );
+    }
+
+    pub fn report(&self) -> Result<()> {
+        eprintln!("flight fuel: {} gallons", self.loading.fuel_gallons);
+        if let Some(engines) = &self.engines {
+            let air = Atmosphere::standard(-self.current.position.z)?;
+            for (index, id) in engines.indices().enumerate() {
+                let output = engines.output(index, &air, self.current.velocity.length())?;
+                eprintln!(
+                    "engine {id}: N1={} N2={} thrust={}N fuel={}kg/s",
+                    output.n1, output.n2, output.net_thrust, output.fuel_kilograms_per_second
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
@@ -180,6 +348,132 @@ impl Flight {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn controls(data: &FlightData) -> Variables {
+        let mut variables = Variables::default();
+        variables
+            .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
+            .unwrap();
+        for name in [
+            "ELEVATOR DEFLECTION PCT",
+            "AILERON LEFT DEFLECTION PCT",
+            "RUDDER DEFLECTION PCT",
+        ] {
+            variables.set_number(name, "percent", 0.0);
+        }
+        variables
+    }
+
+    #[test]
+    #[ignore = "requires original jet AIR records and OPENESP_AIRCRAFT_PATHS"]
+    fn powered_flight_accelerates_burns_fuel_and_publishes_engine_instruments() {
+        let mut count = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let mut powered = Flight::new(&data, 200.0, 10000.0, 0.5, true).unwrap();
+            let mut glide = Flight::new(&data, 200.0, 10000.0, 0.5, true).unwrap();
+            powered.start_running(&data).unwrap();
+            let mut variables = controls(&data);
+            powered.configure_engines(&mut variables).unwrap();
+            variables
+                .dispatch_event("THROTTLE_FULL", esp_script::Value::Number(0.0))
+                .unwrap();
+            let initial_fuel = powered.loading.fuel_gallons;
+            let initial_mass = powered.loading.mass.kilograms();
+            let mut integrated_fuel = 0.0;
+            for _ in 0..600 {
+                powered.advance(1.0 / 60.0, &mut variables).unwrap();
+                glide.advance(1.0 / 60.0, &mut variables).unwrap();
+                for index in [1, 2] {
+                    integrated_fuel += variables
+                        .read(&Reference::new(
+                            'A',
+                            &format!("TURB ENG FUEL FLOW PPH:{index}"),
+                            Some("kilograms per second"),
+                        ))
+                        .unwrap()
+                        .number()
+                        .unwrap()
+                        / 60.0;
+                }
+            }
+            assert!(powered.current.position.x > glide.current.position.x + 5.0);
+            let consumed = (initial_fuel - powered.loading.fuel_gallons)
+                * powered.loading.fuel_pounds_per_gallon
+                * 0.45359237;
+            assert!(consumed > 0.0);
+            assert!((consumed - (initial_mass - powered.loading.mass.kilograms())).abs() < 1e-8);
+            assert!((consumed - integrated_fuel).abs() < 0.1);
+            let n1 = variables
+                .read(&Reference::new('A', "TURB ENG N1:1", Some("percent")))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!(n1 > 80.0);
+            eprintln!(
+                "{}: powered x={}m, glide x={}m, fuel used={}kg, N1={}%",
+                path.display(),
+                powered.current.position.x,
+                glide.current.position.x,
+                consumed,
+                n1
+            );
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+
+    #[test]
+    #[ignore = "requires original jet AIR records and OPENESP_AIRCRAFT_PATHS"]
+    fn fuel_exhaustion_extinguishes_combustion_without_negative_quantity() {
+        let mut count = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 200.0, 10000.0, 1e-8, false).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut variables = controls(&data);
+            flight.configure_engines(&mut variables).unwrap();
+            variables
+                .dispatch_event("THROTTLE_FULL", esp_script::Value::Number(0.0))
+                .unwrap();
+            for _ in 0..120 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert_eq!(flight.loading.fuel_gallons, 0.0);
+            for index in [1, 2] {
+                assert_eq!(
+                    variables
+                        .read(&Reference::new(
+                            'A',
+                            &format!("GENERAL ENG COMBUSTION:{index}"),
+                            Some("bool")
+                        ))
+                        .unwrap()
+                        .number()
+                        .unwrap(),
+                    0.0
+                );
+            }
+            count += 1;
+        }
+        assert!(count > 0);
+    }
 
     #[test]
     #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
