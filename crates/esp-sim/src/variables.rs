@@ -426,6 +426,27 @@ impl Variables {
             ));
         }
         for index in indices {
+            let state = if engine.is_some() && matches!(action, "LEFT" | "RIGHT") {
+                let left = self
+                    .read(&Reference::new(
+                        'A',
+                        &format!("RECIP ENG LEFT MAGNETO:{index}"),
+                        Some("bool"),
+                    ))?
+                    .number()?
+                    != 0.0;
+                let right = self
+                    .read(&Reference::new(
+                        'A',
+                        &format!("RECIP ENG RIGHT MAGNETO:{index}"),
+                        Some("bool"),
+                    ))?
+                    .number()?
+                    != 0.0;
+                (u8::from(right) | (u8::from(left) << 1)) ^ if action == "LEFT" { 2 } else { 1 }
+            } else {
+                state
+            };
             self.set_number(
                 &format!("RECIP ENG LEFT MAGNETO:{index}"),
                 "bool",
@@ -614,23 +635,23 @@ mod tests {
         };
         assert_eq!(
             read(&mut variables, "RECIP ENG RIGHT MAGNETO:2", "bool"),
-            1.0
+            0.0
         );
         assert_eq!(
             read(&mut variables, "RECIP ENG LEFT MAGNETO:2", "bool"),
-            0.0
+            1.0
         );
         assert_eq!(
             read(&mut variables, "RECIP ENG LEFT MAGNETO:1", "bool"),
             1.0
         );
-        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 1.0);
+        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 2.0);
         assert!(
             variables
                 .dispatch_event("MAGNETO2_SET", Value::Number(4.0))
                 .is_err()
         );
-        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 1.0);
+        assert_eq!(read(&mut variables, "RECIP ENG MAGNETO:2", "enum"), 2.0);
     }
 
     #[test]
