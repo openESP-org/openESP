@@ -11,6 +11,7 @@ mod lookup;
 pub mod picking;
 pub mod piston;
 pub mod propeller;
+pub mod propulsion;
 pub mod time;
 pub mod turbine;
 mod units;

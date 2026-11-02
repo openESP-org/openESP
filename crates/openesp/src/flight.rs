@@ -7,7 +7,7 @@ use esp_sim::{
     flight::State,
     ground::{Controls as GroundControls, LandingGear, Surface},
     loading::{Loading, WeightBalance},
-    turbine::{Command, Turbines},
+    propulsion::{Command, Output as EngineOutput, Propulsion},
     variables::Variables,
 };
 use glam::{DMat3, DQuat, DVec3, EulerRot, Quat};
@@ -21,7 +21,7 @@ pub struct Flight {
     loading: Loading,
     weights: WeightBalance,
     payload: bool,
-    engines: Option<Turbines>,
+    engines: Option<Propulsion>,
     commands: Vec<Command>,
     pub current: State,
     previous: State,
@@ -119,10 +119,10 @@ impl Flight {
             self.loading.fuel_gallons > 0.0,
             "cannot start running engines without fuel"
         );
-        let mut engines = Turbines::from_data(data)?;
+        let mut engines = Propulsion::from_data(data)?;
         engines.start_running(
             &Atmosphere::standard(-self.current.position.z)?,
-            self.current.velocity.length(),
+            self.current.air_velocity(DVec3::ZERO),
         )?;
         self.engines = Some(engines);
         Ok(())
@@ -131,6 +131,22 @@ impl Flight {
     pub fn configure_engines(&self, variables: &mut Variables) -> Result<()> {
         if let Some(engines) = &self.engines {
             variables.configure_engines(engines.indices())?;
+            if engines.is_piston() {
+                for id in engines.indices() {
+                    variables.set_number(
+                        &format!("GENERAL ENG MIXTURE LEVER POSITION:{id}"),
+                        "percent",
+                        100.0,
+                    );
+                    for side in ["LEFT", "RIGHT"] {
+                        variables.set_number(
+                            &format!("RECIP ENG {side} MAGNETO:{id}"),
+                            "bool",
+                            1.0,
+                        );
+                    }
+                }
+            }
             self.publish_engines(variables)?;
         }
         Ok(())
@@ -142,25 +158,51 @@ impl Flight {
         };
         let air = Atmosphere::standard(-self.current.position.z)?;
         for (index, id) in engines.indices().enumerate() {
-            let output = engines.output(index, &air, self.current.velocity.length())?;
+            let output = engines.output(index, &air, self.current.air_velocity(DVec3::ZERO))?;
+            match output {
+                EngineOutput::Turbine(output) => {
+                    for (name, unit, value) in [
+                        ("TURB ENG N1", "percent", output.n1),
+                        ("TURB ENG N2", "percent", output.n2),
+                        ("TURB ENG JET THRUST", "newtons", output.net_thrust),
+                        (
+                            "TURB ENG FUEL FLOW PPH",
+                            "pounds per hour",
+                            output.fuel_kilograms_per_second / 0.45359237 * 3600.0,
+                        ),
+                    ] {
+                        variables.set_number(&format!("{name}:{id}"), unit, value);
+                    }
+                }
+                EngineOutput::Piston(output) => {
+                    for (name, unit, value) in [
+                        ("GENERAL ENG RPM", "rpm", output.rpm),
+                        ("PROP RPM", "rpm", output.propeller.rpm),
+                        ("PROP ROTATION ANGLE", "radians", output.propeller_angle),
+                        ("PROP MAX RPM PERCENT", "percent", output.rpm_percent),
+                        ("PROP THRUST", "newtons", output.propeller.thrust),
+                        (
+                            "RECIP ENG MANIFOLD PRESSURE",
+                            "pascals",
+                            output.manifold_pressure,
+                        ),
+                        ("RECIP ENG BRAKE POWER", "watts", output.cycle.shaft_power),
+                        ("RECIP ENG FUEL AIR RATIO", "number", output.mixture_ratio),
+                    ] {
+                        variables.set_number(&format!("{name}:{id}"), unit, value);
+                    }
+                }
+            }
             for (name, unit, value) in [
-                ("TURB ENG N1", "percent", output.n1),
-                ("TURB ENG N2", "percent", output.n2),
-                ("TURB ENG JET THRUST", "newtons", output.net_thrust),
                 (
                     "ENG FUEL FLOW PPH",
                     "pounds per hour",
-                    output.fuel_kilograms_per_second / 0.45359237 * 3600.0,
-                ),
-                (
-                    "TURB ENG FUEL FLOW PPH",
-                    "pounds per hour",
-                    output.fuel_kilograms_per_second / 0.45359237 * 3600.0,
+                    output.fuel_kilograms_per_second() / 0.45359237 * 3600.0,
                 ),
                 (
                     "GENERAL ENG COMBUSTION",
                     "bool",
-                    f64::from(output.combustion),
+                    f64::from(output.combustion()),
                 ),
             ] {
                 variables.set_number(&format!("{name}:{id}"), unit, value);
@@ -214,25 +256,50 @@ impl Flight {
                     ))?
                     .number()?
                     != 0.0;
+                let (mixture, magnetos) = if engines.is_piston() {
+                    let mixture = variables
+                        .read(&Reference::new(
+                            'A',
+                            &format!("GENERAL ENG MIXTURE LEVER POSITION:{index}"),
+                            Some("percent over 100"),
+                        ))?
+                        .number()?;
+                    let mut magnetos = [false; 2];
+                    for (active, side) in magnetos.iter_mut().zip(["LEFT", "RIGHT"]) {
+                        *active = variables
+                            .read(&Reference::new(
+                                'A',
+                                &format!("RECIP ENG {side} MAGNETO:{index}"),
+                                Some("bool"),
+                            ))?
+                            .number()?
+                            != 0.0;
+                    }
+                    (mixture, magnetos)
+                } else {
+                    (1.0, [true; 2])
+                };
                 self.commands.push(Command {
                     throttle,
                     fuel_valve,
+                    mixture,
+                    magnetos,
                 });
             }
             let air = Atmosphere::standard(-self.current.position.z)?;
-            let speed = self.current.velocity.length();
+            let velocity = self.current.air_velocity(DVec3::ZERO);
             engines.advance(
                 dt,
                 &air,
-                speed,
+                velocity,
                 &self.commands,
                 self.loading.fuel_gallons > 0.0,
             )?;
             let mut rate = 0.0;
             for (index, _) in engines.indices().enumerate() {
                 rate += engines
-                    .output(index, &air, speed)?
-                    .fuel_kilograms_per_second;
+                    .output(index, &air, velocity)?
+                    .fuel_kilograms_per_second();
             }
             let available =
                 self.loading.fuel_gallons * self.loading.fuel_pounds_per_gallon * 0.45359237;
@@ -333,7 +400,7 @@ impl Flight {
                 engines.advance(
                     0.0,
                     &Atmosphere::standard(-next.position.z)?,
-                    next.velocity.length(),
+                    next.air_velocity(DVec3::ZERO),
                     &self.commands,
                     false,
                 )?;
@@ -433,11 +500,21 @@ impl Flight {
         if let Some(engines) = &self.engines {
             let air = Atmosphere::standard(-self.current.position.z)?;
             for (index, id) in engines.indices().enumerate() {
-                let output = engines.output(index, &air, self.current.velocity.length())?;
-                eprintln!(
-                    "engine {id}: N1={} N2={} thrust={}N fuel={}kg/s",
-                    output.n1, output.n2, output.net_thrust, output.fuel_kilograms_per_second
-                );
+                let output = engines.output(index, &air, self.current.air_velocity(DVec3::ZERO))?;
+                match output {
+                    EngineOutput::Turbine(output) => eprintln!(
+                        "engine {id}: N1={} N2={} thrust={}N fuel={}kg/s",
+                        output.n1, output.n2, output.net_thrust, output.fuel_kilograms_per_second
+                    ),
+                    EngineOutput::Piston(output) => eprintln!(
+                        "engine {id}: RPM={} prop_RPM={} power={}W thrust={}N fuel={}kg/s",
+                        output.rpm,
+                        output.propeller.rpm,
+                        output.cycle.shaft_power,
+                        output.propeller.thrust,
+                        output.fuel_kilograms_per_second
+                    ),
+                }
             }
         }
         Ok(())
@@ -509,6 +586,102 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original fixed-pitch piston aircraft and AIR flight data"]
+    fn piston_aircraft_idle_taxi_and_shutdown_follow_live_engine_state() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(0.0)
+                || data
+                    .configuration
+                    .number("propeller", "propeller_type")
+                    .unwrap()
+                    != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut variables = controls(&data);
+            flight.configure_engines(&mut variables).unwrap();
+            variables
+                .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..600 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let parked = flight.current.position;
+            for _ in 0..600 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert!((flight.current.position - parked).truncate().length() < 0.001);
+            let read = |variables: &mut Variables, name, unit| {
+                variables
+                    .read(&Reference::new('A', name, Some(unit)))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            let idle = read(&mut variables, "GENERAL ENG RPM:1", "rpm");
+            assert!(idle > 300.0 && idle < 1500.0);
+            assert_eq!(read(&mut variables, "GENERAL ENG1 RPM", "rpm"), idle);
+            assert_eq!(read(&mut variables, "PROP RPM:1", "rpm"), idle);
+            let angle = read(&mut variables, "PROP ROTATION ANGLE:1", "radians");
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_ne!(
+                read(&mut variables, "PROP ROTATION ANGLE:1", "radians"),
+                angle
+            );
+            assert!(read(&mut variables, "PROP MAX RPM PERCENT:1", "percent") > 0.0);
+            let fuel = flight.loading.fuel_gallons;
+            variables
+                .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            variables
+                .dispatch_event("THROTTLE_FULL", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..300 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert!(flight.current.velocity.x > 2.0);
+            assert!(flight.loading.fuel_gallons < fuel);
+            assert!(read(&mut variables, "GENERAL ENG RPM:1", "rpm") > idle);
+            assert!(read(&mut variables, "RECIP ENG BRAKE POWER:1", "horsepower") > 50.0);
+            assert!(read(&mut variables, "RECIP ENG MANIFOLD PRESSURE:1", "inhg") > 20.0);
+            variables
+                .dispatch_event("ENGINE_AUTO_SHUTDOWN", Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert_eq!(
+                read(&mut variables, "GENERAL ENG COMBUSTION:1", "bool"),
+                0.0
+            );
+            assert_eq!(
+                read(&mut variables, "ENG FUEL FLOW PPH:1", "pounds per hour"),
+                0.0
+            );
+            assert!(read(&mut variables, "PROP RPM:1", "rpm") > idle);
+            let fuel = flight.loading.fuel_gallons;
+            for _ in 0..120 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert_eq!(flight.loading.fuel_gallons, fuel);
+            eprintln!(
+                "{}: parked idle {:.2} RPM, taxi velocity {:?}",
+                path.display(),
+                idle,
+                flight.current.velocity
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original wheeled aircraft and AIR flight data"]

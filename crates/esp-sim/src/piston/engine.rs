@@ -32,6 +32,7 @@ struct Engine {
     position: DVec3,
     direction: DVec3,
     rpm: f64,
+    angle: f64,
     command: Command,
     fuel_available: bool,
 }
@@ -58,6 +59,8 @@ impl Default for Command {
 #[derive(Clone, Copy, Debug)]
 pub struct EngineOutput {
     pub rpm: f64,
+    pub rpm_percent: f64,
+    pub propeller_angle: f64,
     pub manifold_pressure: f64,
     pub mixture_ratio: f64,
     pub cycle: Output,
@@ -152,6 +155,7 @@ impl Pistons {
                         pitch.sin(),
                     ),
                     rpm: 0.0,
+                    angle: 0.0,
                     command: Command::default(),
                     fuel_available: false,
                 })
@@ -271,6 +275,8 @@ impl Pistons {
         };
         Ok(EngineOutput {
             rpm,
+            rpm_percent: rpm / self.cycle.maximum_rpm * 100.0,
+            propeller_angle: 0.0,
             manifold_pressure,
             mixture_ratio: ratio,
             cycle,
@@ -283,13 +289,15 @@ impl Pistons {
     pub fn output(&self, index: usize, air: &Atmosphere, velocity: DVec3) -> Result<EngineOutput> {
         ensure!(velocity.is_finite(), "invalid piston inlet velocity");
         let engine = self.engines.get(index).context("engine is absent")?;
-        self.sample(
+        let mut output = self.sample(
             engine.rpm,
             air,
             velocity.dot(engine.direction).max(0.0),
             engine.command,
             engine.fuel_available,
-        )
+        )?;
+        output.propeller_angle = engine.angle;
+        Ok(output)
     }
 
     pub fn start_running(&mut self, air: &Atmosphere, velocity: DVec3) -> Result<()> {
@@ -360,16 +368,29 @@ impl Pistons {
                 )
             };
             let mut rpm = self.engines[index].rpm;
+            let mut angle = self.engines[index].angle;
             for _ in 0..steps {
                 let a = derivative(rpm)?;
                 let b = derivative(rpm + h * a * 0.5)?;
                 let c = derivative(rpm + h * b * 0.5)?;
                 let d = derivative(rpm + h * c)?;
-                rpm = (rpm + h * (a + 2.0 * b + 2.0 * c + d) / 6.0).max(0.0);
+                let next = (rpm + h * (a + 2.0 * b + 2.0 * c + d) / 6.0).max(0.0);
+                angle = (angle
+                    + h * (rpm
+                        + 2.0 * (rpm + h * a * 0.5).max(0.0)
+                        + 2.0 * (rpm + h * b * 0.5).max(0.0)
+                        + (rpm + h * c).max(0.0))
+                        / 6.0
+                        * PI
+                        / 30.0
+                        / self.propeller.gear_reduction_ratio())
+                .rem_euclid(2.0 * PI);
+                rpm = next;
                 ensure!(rpm.is_finite(), "non-finite piston shaft speed");
             }
             let engine = &mut self.engines[index];
             engine.rpm = rpm;
+            engine.angle = angle;
             engine.command = command;
             engine.fuel_available = fuel_available;
         }

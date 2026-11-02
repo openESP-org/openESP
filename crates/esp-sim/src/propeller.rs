@@ -86,6 +86,10 @@ impl Propeller {
         self.inertia / self.reduction.powi(2)
     }
 
+    pub fn gear_reduction_ratio(&self) -> f64 {
+        self.reduction
+    }
+
     pub fn sample(&self, air: &Atmosphere, engine_rpm: f64, axial_speed: f64) -> Result<Output> {
         ensure!(
             engine_rpm.is_finite()
