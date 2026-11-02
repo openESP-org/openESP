@@ -11,6 +11,22 @@ use crate::{
 pub struct LandingGear {
     wheels: Vec<Wheel>,
     brake_scale: f64,
+    contacts: Vec<Contact>,
+}
+
+struct Contact {
+    index: u32,
+    position: DVec3,
+    damage_speed: f64,
+    scrape: bool,
+}
+
+#[derive(Debug)]
+pub struct Impact {
+    pub index: u32,
+    pub speed: f64,
+    pub damage_speed: f64,
+    pub scrape: bool,
 }
 
 struct Wheel {
@@ -77,6 +93,17 @@ impl LandingGear {
             .unwrap_or([0.0; 3]);
         let position =
             |p: [f64; 3]| DVec3::new(p[0] + datum[0], p[1] + datum[1], -p[2] - datum[2]) * 0.3048;
+        let collision_contacts = contacts
+            .points
+            .iter()
+            .filter(|p| p.class != 0)
+            .map(|p| Contact {
+                index: p.index,
+                position: position(p.position_feet),
+                damage_speed: p.impact_feet_per_minute * 0.3048 / 60.0,
+                scrape: p.class == 2,
+            })
+            .collect();
         let definitions = contacts
             .points
             .iter()
@@ -137,7 +164,37 @@ impl LandingGear {
         Ok(Self {
             wheels,
             brake_scale,
+            contacts: collision_contacts,
         })
+    }
+
+    pub fn impact(
+        &self,
+        before: &State,
+        after: &State,
+        cg: DVec3,
+        surface: Surface,
+    ) -> Option<Impact> {
+        for contact in &self.contacts {
+            let arm = contact.position - cg;
+            let old = (before.position + before.orientation * arm).z + surface.elevation;
+            let new = (after.position + after.orientation * arm).z + surface.elevation;
+            let speed = (before.velocity + before.orientation * before.angular_velocity.cross(arm))
+                .z
+                .max(0.0);
+            if new >= 0.0
+                && (contact.scrape
+                    || (old < 0.0 && contact.damage_speed > 0.0 && speed > contact.damage_speed))
+            {
+                return Some(Impact {
+                    index: contact.index,
+                    speed,
+                    damage_speed: contact.damage_speed,
+                    scrape: contact.scrape,
+                });
+            }
+        }
+        None
     }
 
     pub fn forces(
@@ -275,6 +332,7 @@ mod tests {
             })
             .collect(),
             brake_scale: 1.0,
+            contacts: vec![],
         }
     }
 
@@ -378,6 +436,51 @@ mod tests {
         assert!(
             output.wrench.force.truncate().length()
                 <= 300.0 * 9.80665 * SURFACE.tyre_friction + 1e-9
+        );
+    }
+
+    #[test]
+    fn swept_contacts_detect_hard_touchdowns_and_scrapes() {
+        let mut gear = tripod();
+        gear.contacts.push(Contact {
+            index: 0,
+            position: DVec3::Z,
+            damage_speed: 5.0,
+            scrape: false,
+        });
+        let before = State {
+            position: -DVec3::Z * 1.01,
+            velocity: DVec3::Z * 6.0,
+            ..State::default()
+        };
+        let after = State {
+            position: -DVec3::Z * 0.99,
+            velocity: DVec3::ZERO,
+            ..before
+        };
+        let impact = gear.impact(&before, &after, DVec3::ZERO, SURFACE).unwrap();
+        assert_eq!(impact.index, 0);
+        assert_eq!(
+            impact.speed, 6.0,
+            "collision must retain approach speed before suspension damping"
+        );
+        assert!(
+            gear.impact(
+                &State {
+                    velocity: DVec3::Z,
+                    ..before
+                },
+                &after,
+                DVec3::ZERO,
+                SURFACE
+            )
+            .is_none()
+        );
+        gear.contacts[0].scrape = true;
+        assert!(
+            gear.impact(&after, &after, DVec3::ZERO, SURFACE)
+                .unwrap()
+                .scrape
         );
     }
 }

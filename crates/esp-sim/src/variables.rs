@@ -277,6 +277,22 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
+            "AXIS_LEFT_BRAKE_SET" | "AXIS_RIGHT_BRAKE_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let side = if name == "AXIS_LEFT_BRAKE_SET" {
+                    "LEFT"
+                } else {
+                    "RIGHT"
+                };
+                self.set_number(
+                    &format!("BRAKE {side} POSITION"),
+                    "percent over 100",
+                    ((value + 16383.0) / 32766.0).clamp(0.0, 1.0),
+                );
+                Ok(())
+            }
             "SPOILERS_SET" => {
                 self.set_number(
                     "SPOILERS HANDLE POSITION",

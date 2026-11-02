@@ -298,6 +298,38 @@ fn renders_powered_flight_with_live_engine_state_and_fuel_use() {
 }
 
 #[test]
+#[ignore = "requires a GPU, desktop and original wheeled aircraft"]
+fn renders_aircraft_resting_on_configured_landing_gear() {
+    let temp = tempfile::tempdir().unwrap();
+    for (index, path) in content::aircraft_paths().iter().enumerate() {
+        let screenshot = temp.path().join(format!("ground-{index}.png"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+        command
+            .arg("--aircraft")
+            .arg(path)
+            .args([
+                "--airspeed",
+                "0",
+                "--height",
+                "0",
+                "--fuel-percent",
+                "50",
+                "--payload",
+                "--frames",
+                "180",
+                "--screenshot",
+            ])
+            .arg(&screenshot);
+        capture_command(command, &screenshot);
+        let log = std::fs::read_to_string(screenshot.with_extension("log")).unwrap();
+        assert!(
+            log.contains("flight ground: on_ground=true"),
+            "aircraft did not settle on its wheels: {log}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires a GPU, desktop and original aircraft AIR data"]
 fn renders_airborne_motion_with_opposite_control_inputs() {
     let temp = tempfile::tempdir().unwrap();

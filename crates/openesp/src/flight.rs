@@ -1,10 +1,11 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
 use esp_script::{Host, Reference};
 use esp_sim::{
     aerodynamics::{Aerodynamics, Controls},
     atmosphere::Atmosphere,
     flight::State,
+    ground::{Controls as GroundControls, LandingGear, Surface},
     loading::{Loading, WeightBalance},
     turbine::{Command, Turbines},
     variables::Variables,
@@ -26,7 +27,17 @@ pub struct Flight {
     previous: State,
     previous_cg: DVec3,
     flaps: Vec<f64>,
+    gear: LandingGear,
+    on_ground: bool,
 }
+
+// Physical surface properties of the local test grid. Scenery surfaces will
+// supply their own coefficients when terrain contact is connected.
+const TEST_SURFACE: Surface = Surface {
+    elevation: 0.0,
+    rolling_resistance: 0.02,
+    tyre_friction: 0.8,
+};
 
 impl Flight {
     pub fn new(
@@ -37,19 +48,46 @@ impl Flight {
         payload: bool,
     ) -> Result<Self> {
         ensure!(
-            knots.is_finite() && knots > 0.0 && height.is_finite() && height > 0.0,
-            "invalid airborne starting state"
+            knots.is_finite()
+                && knots >= 0.0
+                && height.is_finite()
+                && height >= 0.0
+                && (height == 0.0 || knots > 0.0),
+            "invalid flight starting state"
         );
         let model = Aerodynamics::from_data(data)?;
         let weights = WeightBalance::from_config(&data.configuration)?;
         let loading = weights.load(fuel_fraction, payload)?;
         let previous_cg = loading.cg;
         Atmosphere::standard(height)?;
-        let current = State {
+        let gear = LandingGear::from_data(data)?;
+        let mut current = State {
             position: DVec3::new(0.0, 0.0, -height),
             velocity: DVec3::X * (knots * 1852.0 / 3600.0),
             ..State::default()
         };
+        if height == 0.0 {
+            let pitch = data
+                .configuration
+                .number("contact_points", "static_pitch")?
+                .context("missing ground starting pitch")?
+                .to_radians();
+            let cg_height = data
+                .configuration
+                .number("contact_points", "static_cg_height")?
+                .context("missing ground starting height")?
+                * 0.3048;
+            current.position.z = -cg_height;
+            current.orientation = DQuat::from_rotation_y(pitch);
+        }
+        let on_ground = gear
+            .forces(
+                &current,
+                loading.cg,
+                TEST_SURFACE,
+                GroundControls::default(),
+            )?
+            .on_ground;
         Ok(Self {
             model,
             loading,
@@ -61,7 +99,19 @@ impl Flight {
             current,
             previous: current,
             flaps: Vec::new(),
+            gear,
+            on_ground,
         })
+    }
+
+    pub fn configure_ground(variables: &mut Variables) {
+        for name in [
+            "BRAKE LEFT POSITION",
+            "BRAKE RIGHT POSITION",
+            "BRAKE PARKING POSITION",
+        ] {
+            variables.set_number(name, "percent over 100", 0.0);
+        }
     }
 
     pub fn start_running(&mut self, data: &FlightData) -> Result<()> {
@@ -120,7 +170,10 @@ impl Flight {
     }
 
     pub fn advance(&mut self, dt: f64, variables: &mut Variables) -> Result<()> {
-        ensure!(dt.is_finite() && dt >= 0.0, "invalid aircraft timestep");
+        ensure!(
+            dt.is_finite() && (0.0..=0.25).contains(&dt),
+            "invalid aircraft timestep"
+        );
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -130,6 +183,14 @@ impl Flight {
             elevator: control("ELEVATOR DEFLECTION PCT")?,
             aileron: control("AILERON LEFT DEFLECTION PCT")?,
             rudder: control("RUDDER DEFLECTION PCT")?,
+        };
+        let ground_controls = GroundControls {
+            steering: controls.rudder,
+            brakes: [
+                control("BRAKE LEFT POSITION")?,
+                control("BRAKE RIGHT POSITION")?,
+            ],
+            parking_brake: control("BRAKE PARKING POSITION")? != 0.0,
         };
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
@@ -182,31 +243,70 @@ impl Flight {
             }
         }
         let mut next = self.current;
-        next.advance(&self.loading.mass, dt, DVec3::Z * 9.80665, |state| {
-            let air = Atmosphere::standard(-state.position.z)?;
-            let mut loads = self.model.forces(
-                state.air_velocity(DVec3::ZERO),
-                state.angular_velocity,
-                air.density,
-                controls,
-                &self.flaps,
-                self.loading.cg,
+        let max_step = if self
+            .gear
+            .clearance(&next, self.loading.cg, TEST_SURFACE.elevation)
+            < 10.0
+        {
+            1.0 / 240.0
+        } else {
+            1.0 / 60.0
+        };
+        let steps = (dt / max_step).ceil().max(1.0) as u32;
+        for _ in 0..steps {
+            let before = next;
+            next.advance(
+                &self.loading.mass,
+                dt / f64::from(steps),
+                DVec3::Z * 9.80665,
+                |state| {
+                    let air = Atmosphere::standard(-state.position.z)?;
+                    let mut loads = self.model.forces(
+                        state.air_velocity(DVec3::ZERO),
+                        state.angular_velocity,
+                        air.density,
+                        controls,
+                        &self.flaps,
+                        self.loading.cg,
+                    )?;
+                    if let Some(engines) = &self.engines {
+                        let thrust = engines.wrench(
+                            &air,
+                            state.air_velocity(DVec3::ZERO),
+                            self.loading.cg,
+                            power_fraction,
+                        )?;
+                        loads.force += thrust.force;
+                        loads.moment += thrust.moment;
+                    }
+                    let ground =
+                        self.gear
+                            .forces(state, self.loading.cg, TEST_SURFACE, ground_controls)?;
+                    loads.force += ground.wrench.force;
+                    loads.moment += ground.wrench.moment;
+                    Ok(loads)
+                },
             )?;
-            if let Some(engines) = &self.engines {
-                let thrust = engines.wrench(
-                    &air,
-                    state.air_velocity(DVec3::ZERO),
-                    self.loading.cg,
-                    power_fraction,
-                )?;
-                loads.force += thrust.force;
-                loads.moment += thrust.moment;
+            if let Some(impact) = self
+                .gear
+                .impact(&before, &next, self.loading.cg, TEST_SURFACE)
+            {
+                ensure!(
+                    !impact.scrape,
+                    "scrape contact {} reached the ground; scrape forces are not simulated yet",
+                    impact.index
+                );
+                anyhow::bail!(
+                    "ground impact at contact {}: {:.2} m/s exceeds configured {:.2} m/s damage threshold",
+                    impact.index,
+                    impact.speed,
+                    impact.damage_speed
+                );
             }
-            Ok(loads)
-        })?;
+        }
         ensure!(
             next.position.z < 0.0,
-            "airborne test reached the ground; ground contact is not simulated yet"
+            "aircraft center of gravity penetrated the ground"
         );
         self.previous = self.current;
         self.previous_cg = self.loading.cg;
@@ -232,6 +332,15 @@ impl Flight {
             }
         }
         self.current = next;
+        self.on_ground = self
+            .gear
+            .forces(
+                &self.current,
+                self.loading.cg,
+                TEST_SURFACE,
+                ground_controls,
+            )?
+            .on_ground;
         self.publish_loading(variables);
         self.publish_engines(variables)?;
         Ok(())
@@ -253,6 +362,7 @@ impl Flight {
     }
 
     pub fn publish_loading(&self, variables: &mut Variables) {
+        variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
         let fraction = if self.loading.fuel_capacity_gallons > 0.0 {
             self.loading.fuel_gallons / self.loading.fuel_capacity_gallons
         } else {
@@ -310,6 +420,7 @@ impl Flight {
     }
 
     pub fn report(&self) -> Result<()> {
+        eprintln!("flight ground: on_ground={}", self.on_ground);
         eprintln!("flight fuel: {} gallons", self.loading.fuel_gallons);
         if let Some(engines) = &self.engines {
             let air = Atmosphere::standard(-self.current.position.z)?;
@@ -382,7 +493,6 @@ impl Flight {
             "meters per second",
             state.velocity.truncate().length(),
         );
-        variables.set_number("SIM ON GROUND", "bool", 0.0);
         Ok(())
     }
 }
@@ -391,6 +501,86 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original wheeled aircraft and AIR flight data"]
+    fn ground_start_braking_and_landing_share_the_flight_model() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut variables = controls(&data);
+            let mut ground = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            for _ in 0..600 {
+                ground.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert!(ground.on_ground, "{path:?}");
+            assert!(
+                ground.current.velocity.length() < 0.03,
+                "{path:?}: {:?}",
+                ground.current
+            );
+            assert_eq!(
+                variables
+                    .read(&Reference::new('A', "SIM ON GROUND", Some("bool")))
+                    .unwrap(),
+                Value::Number(1.0)
+            );
+            ground.current.velocity = DVec3::X * 15.0;
+            variables
+                .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..600 {
+                ground.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert!(
+                ground.current.velocity.length() < 0.03,
+                "{path:?}: brakes did not stop flight state: {:?}",
+                ground.current
+            );
+            let mut landing =
+                Flight::new(&data, 1.0, -ground.current.position.z + 0.5, 0.5, true).unwrap();
+            landing.current.velocity = DVec3::ZERO;
+            landing.current.orientation = ground.current.orientation;
+            for _ in 0..1200 {
+                landing.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert!(
+                landing.on_ground,
+                "{path:?}: landing did not produce weight on wheels"
+            );
+            assert!(
+                landing.current.position.z < 0.0 && landing.current.velocity.length() < 0.03,
+                "{path:?}: landing did not settle: {:?}",
+                landing.current
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original wheeled aircraft and AIR flight data"]
+    fn brake_axis_events_turn_the_aircraft_toward_the_braked_side() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut variables = controls(&data);
+            let mut resting = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            for _ in 0..600 {
+                resting.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            for (event, sign) in [("AXIS_LEFT_BRAKE_SET", -1.0), ("AXIS_RIGHT_BRAKE_SET", 1.0)] {
+                let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+                flight.current = resting.current;
+                flight.current.velocity = DVec3::X * 15.0;
+                let mut variables = controls(&data);
+                variables
+                    .dispatch_event(event, Value::Number(16383.0))
+                    .unwrap();
+                for _ in 0..120 {
+                    flight.advance(1.0 / 60.0, &mut variables).unwrap();
+                }
+                let yaw = flight.current.orientation.to_euler(EulerRot::ZYX).0;
+                assert!(yaw * sign > 0.0001, "{path:?}: {event} produced yaw {yaw}");
+            }
+        }
+    }
 
     #[test]
     #[ignore = "requires original PFD artwork and installed gauge fonts"]
@@ -636,6 +826,7 @@ mod tests {
 
     fn controls(data: &FlightData) -> Variables {
         let mut variables = Variables::default();
+        Flight::configure_ground(&mut variables);
         variables
             .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
             .unwrap();
@@ -767,6 +958,7 @@ mod tests {
             let data = FlightData::load(&path, 0).unwrap();
             let mut flight = Flight::new(&data, 100.0, 1000.0, 0.0, false).unwrap();
             let mut variables = Variables::default();
+            Flight::configure_ground(&mut variables);
             variables
                 .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
                 .unwrap();
@@ -808,6 +1000,7 @@ mod tests {
             let mut low = Flight::new(&data, 150.0, 1000.0, 0.0, false).unwrap();
             let mut high = Flight::new(&data, 150.0, 10_000.0, 0.0, false).unwrap();
             let mut variables = Variables::default();
+            Flight::configure_ground(&mut variables);
             variables
                 .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
                 .unwrap();
@@ -848,6 +1041,7 @@ mod tests {
             assert!(full.loading.payload_kilograms > 0.0 && full.loading.fuel_gallons > 0.0);
             assert!(!full.loading.cg.abs_diff_eq(empty.loading.cg, 1e-6));
             let mut variables = Variables::default();
+            Flight::configure_ground(&mut variables);
             variables
                 .configure_flaps(&esp_formats::cfg::aircraft::flaps(&data.configuration).unwrap())
                 .unwrap();

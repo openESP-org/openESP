@@ -40,7 +40,7 @@ struct Arguments {
     #[arg(
         long,
         alias = "glide",
-        help = "Start in flight at this airspeed in knots, in the local test scene"
+        help = "Enable flight physics at this airspeed in knots in the local test scene"
     )]
     airspeed: Option<f64>,
     #[arg(
@@ -52,7 +52,7 @@ struct Arguments {
     #[arg(
         long,
         default_value_t = 1000.0,
-        help = "Airborne test starting height in meters above the test grid"
+        help = "Starting height in meters above the test grid; zero starts on the landing gear"
     )]
     height: f64,
     #[arg(
@@ -389,6 +389,7 @@ impl App {
                         eprintln!("flap system: {error}");
                     }
                     if let Some(flight) = &self.flight {
+                        Flight::configure_ground(&mut self.variables);
                         Flight::publish(&flight.current, &mut self.variables)?;
                         flight.publish_loading(&mut self.variables);
                         flight.configure_engines(&mut self.variables)?;
@@ -589,6 +590,11 @@ impl ApplicationHandler for App {
                     eprintln!("cockpit release: {error}");
                 }
                 self.cursor = None;
+                if self.keys.contains(&KeyCode::KeyB) {
+                    for name in ["BRAKE LEFT POSITION", "BRAKE RIGHT POSITION"] {
+                        self.variables.set_number(name, "percent over 100", 0.0);
+                    }
+                }
                 self.keys.clear();
                 self.mouse_look = false;
                 if let Some(window) = &self.window {
@@ -669,6 +675,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
+                    if key == KeyCode::KeyB {
+                        for name in ["BRAKE LEFT POSITION", "BRAKE RIGHT POSITION"] {
+                            self.variables.set_number(
+                                name,
+                                "percent over 100",
+                                f64::from(event.state == ElementState::Pressed),
+                            );
+                        }
+                    }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
                         if !event.repeat || matches!(key, KeyCode::F2 | KeyCode::F3) {
@@ -776,7 +791,7 @@ fn main() -> Result<()> {
                     Ok::<_,anyhow::Error>(flight)
                 }).transpose()?;
                 if flight.is_some() {
-                    eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder, F1-F4 throttle");
+                    eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder and steering, B brakes, F1-F4 throttle");
                 }
                 Ok((aircraft, flight))
             })();
