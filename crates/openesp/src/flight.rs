@@ -462,10 +462,10 @@ impl Flight {
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
         let mut new_loading = None;
-        let mut power_fraction = 1.0;
+        let mut power_fractions = Vec::new();
+        let mut selectors = Vec::new();
         if let Some(engines) = &mut self.engines {
             self.commands.clear();
-            let mut selectors = Vec::new();
             for index in engines.indices() {
                 let throttle = variables
                     .read(&Reference::new(
@@ -569,29 +569,48 @@ impl Flight {
                 self.loading.usable_fuel_gallons > 0.0,
             )?;
             let mass_per_gallon = self.loading.fuel_pounds_per_gallon * 0.45359237;
-            let mut demand = 0.0;
+            let mut demands = Vec::new();
             let mut loading = None;
             for (index, _) in engines.indices().enumerate() {
-                let requested = engines
-                    .output(index, &air, velocity)?
-                    .fuel_kilograms_per_second()
-                    * dt;
-                demand += requested;
-                if requested > 0.0 {
-                    let previous = loading.as_ref().unwrap_or(&self.loading);
-                    loading = Some(self.weights.burn_selected(
-                        previous,
-                        selectors[index],
-                        requested / mass_per_gallon,
-                        self.payload,
-                    )?);
-                }
+                demands.push(
+                    engines
+                        .output(index, &air, velocity)?
+                        .fuel_kilograms_per_second()
+                        * dt,
+                );
             }
-            let consumed = loading.as_ref().map_or(0.0, |value| {
-                (self.loading.fuel_gallons - value.fuel_gallons) * mass_per_gallon
-            });
-            if demand > 0.0 {
-                power_fraction = (consumed / demand).clamp(0.0, 1.0);
+            power_fractions.resize(demands.len(), 1.0);
+            for (index, &selector) in selectors.iter().enumerate() {
+                if selectors[..index].contains(&selector) {
+                    continue;
+                }
+                let demand: f64 = demands
+                    .iter()
+                    .zip(&selectors)
+                    .filter(|(_, route)| **route == selector)
+                    .map(|(&demand, _)| demand)
+                    .sum();
+                if demand == 0.0 {
+                    continue;
+                }
+                let previous = loading.as_ref().unwrap_or(&self.loading);
+                let requested = demand / mass_per_gallon;
+                let supplied = self
+                    .weights
+                    .selected_fuel(previous, selector)
+                    .min(requested);
+                let fraction = (supplied / requested).clamp(0.0, 1.0);
+                for (engine_fraction, &route) in power_fractions.iter_mut().zip(&selectors) {
+                    if route == selector {
+                        *engine_fraction = fraction;
+                    }
+                }
+                loading = Some(self.weights.burn_selected(
+                    previous,
+                    selector,
+                    requested,
+                    self.payload,
+                )?);
             }
             new_loading = loading;
         }
@@ -627,7 +646,7 @@ impl Flight {
                             &air,
                             state.air_velocity(DVec3::ZERO),
                             self.loading.cg,
-                            power_fraction,
+                            &power_fractions,
                         )?;
                         loads.force += thrust.force;
                         loads.moment += thrust.moment;
@@ -681,15 +700,21 @@ impl Flight {
         if let Some(loading) = new_loading {
             next.rebase(loading.cg - self.loading.cg)?;
             self.loading = loading;
-            if self.loading.usable_fuel_gallons == 0.0
-                && let Some(engines) = &mut self.engines
-            {
+            let mut exhausted = false;
+            for (command, &selector) in self.commands.iter_mut().zip(&selectors) {
+                if command.fuel_valve && self.weights.selected_fuel(&self.loading, selector) == 0.0
+                {
+                    command.fuel_valve = false;
+                    exhausted = true;
+                }
+            }
+            if exhausted && let Some(engines) = &mut self.engines {
                 engines.advance(
                     0.0,
                     &Atmosphere::standard(-next.position.z)?,
                     next.air_velocity(DVec3::ZERO),
                     &self.commands,
-                    false,
+                    self.loading.usable_fuel_gallons > 0.0,
                 )?;
             }
         }
@@ -2445,6 +2470,84 @@ mod tests {
             verified[kind] = true;
         }
         assert_eq!(verified, [true, true]);
+    }
+
+    #[test]
+    #[ignore = "requires original jet AIR records and OPENESP_AIRCRAFT_PATHS"]
+    fn starvation_on_one_route_does_not_reduce_other_engine_thrust() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let mut data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let source = source
+                .lines()
+                .map(|line| {
+                    if line
+                        .split('=')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("number_of_tank_selectors")
+                    {
+                        "number_of_tank_selectors=2"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let setup = || {
+                let mut flight = Flight::new(&data, 200.0, 10000.0, 0.5, false).unwrap();
+                flight.start_running(&data).unwrap();
+                let available = flight.weights.selected_fuel(&flight.loading, 2);
+                flight.loading = flight
+                    .weights
+                    .burn_selected(&flight.loading, 2, available - 1e-10, false)
+                    .unwrap();
+                let mut vars = controls(&data);
+                flight.configure_engines(&mut vars).unwrap();
+                vars.dispatch_event("FUEL_SELECTOR_LEFT", Value::Number(0.0))
+                    .unwrap();
+                vars.dispatch_event("FUEL_SELECTOR_2_RIGHT", Value::Number(0.0))
+                    .unwrap();
+                (flight, vars)
+            };
+            let (mut starved, mut starved_vars) = setup();
+            let (mut cutoff, mut cutoff_vars) = setup();
+            cutoff_vars
+                .dispatch_event("TOGGLE_FUEL_VALVE_ENG1", Value::Number(0.0))
+                .unwrap();
+            starved.advance(1.0 / 60.0, &mut starved_vars).unwrap();
+            cutoff.advance(1.0 / 60.0, &mut cutoff_vars).unwrap();
+            let difference = (starved.current.velocity - cutoff.current.velocity).length();
+            assert!(difference < 5e-5, "velocity difference {difference}");
+            for (index, expected) in [(1, 0.0), (2, 1.0)] {
+                assert_eq!(
+                    starved_vars
+                        .read(&Reference::new(
+                            'A',
+                            &format!("GENERAL ENG COMBUSTION:{index}"),
+                            Some("bool")
+                        ))
+                        .unwrap()
+                        .number()
+                        .unwrap(),
+                    expected
+                );
+            }
+            assert!(starved.weights.selected_fuel(&starved.loading, 3) > 0.0);
+            verified += 1;
+        }
+        assert!(verified > 0);
     }
 
     #[test]

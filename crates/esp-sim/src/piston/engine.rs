@@ -436,17 +436,21 @@ impl Pistons {
         air: &Atmosphere,
         velocity: DVec3,
         cg: DVec3,
-        power_fraction: f64,
+        power_fractions: &[f64],
     ) -> Result<Wrench> {
         ensure!(
-            cg.is_finite() && power_fraction.is_finite() && (0.0..=1.0).contains(&power_fraction),
+            cg.is_finite()
+                && power_fractions.len() == self.engines.len()
+                && power_fractions
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
             "invalid piston CG or power fraction"
         );
         let mut wrench = Wrench::default();
         for (index, engine) in self.engines.iter().enumerate() {
             let output = self.output(index, air, velocity)?;
             let thrust = if output.propeller.thrust > 0.0 {
-                output.propeller.thrust * power_fraction
+                output.propeller.thrust * power_fractions[index]
             } else {
                 output.propeller.thrust
             };

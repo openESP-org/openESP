@@ -265,13 +265,15 @@ impl Turbines {
         air: &Atmosphere,
         velocity: DVec3,
         cg: DVec3,
-        power_fraction: f64,
+        power_fractions: &[f64],
     ) -> Result<Wrench> {
         ensure!(
             velocity.is_finite()
                 && cg.is_finite()
-                && power_fraction.is_finite()
-                && (0.0..=1.0).contains(&power_fraction),
+                && power_fractions.len() == self.engines.len()
+                && power_fractions
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
             "invalid engine flow or CG"
         );
         let mut wrench = Wrench::default();
@@ -283,7 +285,7 @@ impl Turbines {
             } else {
                 DVec3::ZERO
             };
-            let force = engine.direction * output.gross_thrust * power_fraction - drag;
+            let force = engine.direction * output.gross_thrust * power_fractions[index] - drag;
             wrench.force += force;
             wrench.moment += (engine.position - cg).cross(force);
         }
