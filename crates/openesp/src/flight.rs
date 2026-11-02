@@ -105,6 +105,8 @@ impl Flight {
     }
 
     pub fn configure_ground(variables: &mut Variables) {
+        variables.set_number("ELEVATOR TRIM PCT", "percent", 0.0);
+        variables.set_number("ELEVATOR TRIM POSITION", "radians", 0.0);
         for name in [
             "BRAKE LEFT POSITION",
             "BRAKE RIGHT POSITION",
@@ -248,6 +250,7 @@ impl Flight {
             elevator: control("ELEVATOR DEFLECTION PCT")?,
             aileron: control("AILERON LEFT DEFLECTION PCT")?,
             rudder: control("RUDDER DEFLECTION PCT")?,
+            elevator_trim: control("ELEVATOR TRIM PCT")?,
         };
         let ground_controls = GroundControls {
             steering: controls.rudder,
@@ -257,6 +260,11 @@ impl Flight {
             ],
             parking_brake: control("BRAKE PARKING POSITION")? != 0.0,
         };
+        variables.set_number(
+            "ELEVATOR TRIM POSITION",
+            "radians",
+            controls.elevator_trim * self.model.elevator_trim_limit(),
+        );
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
         let mut fuel_used = 0.0;
@@ -638,6 +646,30 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original aircraft and AIR data"]
+    fn elevator_trim_events_change_flight_pitch() {
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let mut neutral = Flight::new(&data, 120.0, 2000.0, 0.5, true).unwrap();
+            let mut trimmed = Flight::new(&data, 120.0, 2000.0, 0.5, true).unwrap();
+            let mut base_vars = controls(&data);
+            let mut trim_vars = controls(&data);
+            trim_vars
+                .dispatch_key_event(0x100e6, Value::Number(8191.5))
+                .unwrap();
+            for _ in 0..60 {
+                neutral.advance(1.0 / 60.0, &mut base_vars).unwrap();
+                trimmed.advance(1.0 / 60.0, &mut trim_vars).unwrap();
+            }
+            assert!(
+                trimmed.current.angular_velocity.y > neutral.current.angular_velocity.y,
+                "{}",
+                path.display()
+            );
+        }
+    }
 
     #[test]
     #[ignore = "requires original fixed-pitch piston aircraft"]

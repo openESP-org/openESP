@@ -158,6 +158,10 @@ impl Variables {
             0x10018 => "STROBES_TOGGLE",
             0x1003b => "FLAPS_UP",
             0x10043 => "FLAPS_DOWN",
+            0x10047 => "ELEV_TRIM_DN",
+            0x1004f => "ELEV_TRIM_UP",
+            0x100aa => "ELEVATOR_TRIM_SET",
+            0x100e6 => "AXIS_ELEV_TRIM_SET",
             0x100a2 => "FLAPS_SET",
             0x100de => "FLAPS_INCR",
             0x100df => "FLAPS_DECR",
@@ -374,6 +378,25 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
+            "ELEV_TRIM_UP" | "ELEV_TRIM_DN" | "ELEVATOR_TRIM_SET" | "AXIS_ELEV_TRIM_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let reference = Reference::new('A', "ELEVATOR TRIM PCT", Some("percent"));
+                let current = self.read(&reference)?.number()?;
+                let position = match name {
+                    "ELEV_TRIM_UP" => current + 1.0,
+                    "ELEV_TRIM_DN" => current - 1.0,
+                    "AXIS_ELEV_TRIM_SET" => value / 16383.0 * 100.0,
+                    _ => value / 16383.0 * 200.0 - 100.0,
+                };
+                self.set_number(
+                    "ELEVATOR TRIM PCT",
+                    "percent",
+                    position.clamp(-100.0, 100.0),
+                );
+                Ok(())
+            }
             "AXIS_LEFT_BRAKE_SET" | "AXIS_RIGHT_BRAKE_SET" => {
                 if !value.is_finite() {
                     return Err(Error::Number);

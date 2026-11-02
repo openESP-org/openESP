@@ -47,6 +47,24 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
             )
             .unwrap();
         assert!(thin.force.abs_diff_eq(base.force * 0.5, 1e-8));
+        let trim_up = forces(
+            velocity,
+            DVec3::ZERO,
+            Controls {
+                elevator_trim: 0.5,
+                ..Controls::default()
+            },
+        );
+        let trim_down = forces(
+            velocity,
+            DVec3::ZERO,
+            Controls {
+                elevator_trim: -0.5,
+                ..Controls::default()
+            },
+        );
+        assert!(trim_up.moment.y > base.moment.y && trim_down.moment.y < base.moment.y);
+        assert!(trim_up.force.abs_diff_eq(base.force, 1e-8));
         assert!(
             forces(
                 velocity,

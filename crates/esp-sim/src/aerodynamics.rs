@@ -20,6 +20,8 @@ pub struct Aerodynamics {
     stability: DVec3,
     effectiveness: DVec3,
     elevator: [f64; 2],
+    elevator_trim: f64,
+    elevator_trim_limit: f64,
     aileron: f64,
     rudder: f64,
     incidence: f64,
@@ -35,6 +37,7 @@ pub struct Controls {
     pub elevator: f64,
     pub aileron: f64,
     pub rudder: f64,
+    pub elevator_trim: f64,
 }
 
 impl Curve {
@@ -120,6 +123,10 @@ impl Aerodynamics {
                 ])
             })
             .collect::<Result<Vec<_>>>()?;
+        let elevator_trim_limit = config
+            .number("airplane_geometry", "elevator_trim_limit")?
+            .unwrap_or(0.0)
+            .to_radians();
         let result = Self {
             area,
             span,
@@ -142,6 +149,8 @@ impl Aerodynamics {
                 geometry("elevator_up_limit")?.to_radians(),
                 geometry("elevator_down_limit")?.to_radians(),
             ],
+            elevator_trim: elevator_trim_limit * tuning(config, "elevator_trim_effectiveness")?,
+            elevator_trim_limit,
             aileron: (geometry("aileron_up_limit")? + geometry("aileron_down_limit")?).to_radians()
                 * 0.5,
             rudder: geometry("rudder_limit")?.to_radians(),
@@ -160,7 +169,12 @@ impl Aerodynamics {
             result
                 .elevator
                 .iter()
-                .chain([&result.aileron, &result.rudder])
+                .chain([
+                    &result.aileron,
+                    &result.rudder,
+                    &result.elevator_trim,
+                    &result.elevator_trim_limit
+                ])
                 .all(|angle| *angle >= 0.0),
             "invalid control surface limits"
         );
@@ -193,9 +207,14 @@ impl Aerodynamics {
             "invalid airflow"
         );
         ensure!(
-            [controls.elevator, controls.aileron, controls.rudder]
-                .iter()
-                .all(|n| n.is_finite() && n.abs() <= 1.0),
+            [
+                controls.elevator,
+                controls.aileron,
+                controls.rudder,
+                controls.elevator_trim
+            ]
+            .iter()
+            .all(|n| n.is_finite() && n.abs() <= 1.0),
             "invalid flight controls"
         );
         ensure!(
@@ -242,6 +261,7 @@ impl Aerodynamics {
         let pitch = c.pitch.cm0
             + self.pitch.sample(alpha)
             + c.pitch.cm_de * elevator
+            + c.pitch.cm_delta_trim * controls.elevator_trim * self.elevator_trim
             + c.pitch.cm_ih * self.incidence
             + c.pitch.cm_flap * flap.z
             + c.pitch.cm_q * q * self.stability.y;
@@ -266,6 +286,10 @@ impl Aerodynamics {
             "invalid aerodynamic forces"
         );
         Ok(Wrench { force, moment })
+    }
+
+    pub fn elevator_trim_limit(&self) -> f64 {
+        self.elevator_trim_limit
     }
 }
 

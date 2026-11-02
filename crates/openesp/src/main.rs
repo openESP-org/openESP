@@ -686,7 +686,12 @@ impl ApplicationHandler for App {
                     }
                     if event.state == ElementState::Pressed {
                         self.keys.insert(key);
-                        if !event.repeat || matches!(key, KeyCode::F2 | KeyCode::F3) {
+                        if !event.repeat
+                            || matches!(
+                                key,
+                                KeyCode::F2 | KeyCode::F3 | KeyCode::Numpad7 | KeyCode::Numpad1
+                            )
+                        {
                             match key {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Tab => {
@@ -723,6 +728,18 @@ impl ApplicationHandler for App {
                                         self.variables.dispatch_event(event, Value::Number(0.0))
                                     {
                                         eprintln!("throttle input: {error}");
+                                    }
+                                }
+                                KeyCode::Numpad7 | KeyCode::Numpad1 => {
+                                    let name = if key == KeyCode::Numpad7 {
+                                        "ELEV_TRIM_UP"
+                                    } else {
+                                        "ELEV_TRIM_DN"
+                                    };
+                                    if let Err(error) =
+                                        self.variables.dispatch_event(name, Value::Number(0.0))
+                                    {
+                                        eprintln!("trim input: {error}");
                                     }
                                 }
                                 _ => {}
