@@ -4,6 +4,7 @@ pub mod atmosphere;
 pub mod electrical;
 pub mod flaps;
 pub mod flight;
+pub mod ground;
 pub mod interaction;
 pub mod loading;
 mod lookup;
