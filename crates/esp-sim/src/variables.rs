@@ -179,6 +179,15 @@ impl Variables {
     }
 
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
+        if (0x103bd..=0x103c1).contains(&id) {
+            let offset = id - 0x103bd;
+            let name = if offset == 0 {
+                "TOGGLE_FUEL_VALVE_ALL".to_owned()
+            } else {
+                format!("TOGGLE_FUEL_VALVE_ENG{offset}")
+            };
+            return self.dispatch_event(&name, value);
+        }
         for (start, selector) in [(0x101a3, 1), (0x103d4, 2), (0x10401, 3), (0x10409, 4)] {
             if (start..start + 8).contains(&id) {
                 let action = [
@@ -313,6 +322,26 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        if name == "TOGGLE_FUEL_VALVE_ALL" {
+            if self.engines.is_empty() {
+                return Err(Error::Unsupported("fuel valves are unavailable".into()));
+            }
+            for index in self.engines.clone() {
+                self.toggle(&format!("GENERAL ENG FUEL VALVE:{index}"))?;
+            }
+            return Ok(());
+        }
+        if let Some(index) = name
+            .strip_prefix("TOGGLE_FUEL_VALVE_ENG")
+            .and_then(|index| index.parse::<u32>().ok())
+        {
+            if !self.engines.contains(&index) {
+                return Err(Error::Unsupported(format!(
+                    "fuel valve {index} is unavailable"
+                )));
+            }
+            return self.toggle(&format!("GENERAL ENG FUEL VALVE:{index}"));
+        }
         if let Some(rest) = name.strip_prefix("FUEL_SELECTOR_") {
             let (index, action) = if let Some((index, action)) = rest.split_once('_') {
                 if let Ok(index) = index.parse::<u32>() {
@@ -1013,6 +1042,65 @@ mod tests {
                 .number()
                 .unwrap(),
             0.0
+        );
+        variables
+            .dispatch_key_event(0x103be, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "GENERAL ENG FUEL VALVE:1",
+                    Some("bool")
+                ))
+                .unwrap()
+                .number()
+                .unwrap(),
+            1.0
+        );
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "GENERAL ENG FUEL VALVE:2",
+                    Some("bool")
+                ))
+                .unwrap()
+                .number()
+                .unwrap(),
+            0.0
+        );
+        variables
+            .dispatch_event("TOGGLE_FUEL_VALVE_ALL", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "GENERAL ENG FUEL VALVE:1",
+                    Some("bool")
+                ))
+                .unwrap()
+                .number()
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "GENERAL ENG FUEL VALVE:2",
+                    Some("bool")
+                ))
+                .unwrap()
+                .number()
+                .unwrap(),
+            1.0
+        );
+        assert!(
+            variables
+                .dispatch_event("TOGGLE_FUEL_VALVE_ENG3", Value::Number(0.0))
+                .is_err()
         );
         variables.set_number("TURB ENG JET THRUST:1", "newtons", 4.4482216152605 * 1000.0);
         assert!(

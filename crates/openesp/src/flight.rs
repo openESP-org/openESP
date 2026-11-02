@@ -1836,6 +1836,70 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires original piston aircraft and AIR flight data"]
+    fn fuel_valve_event_allows_restart_after_automatic_shutdown() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(0.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            vars.configure_electrical(
+                &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+            vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            vars.dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            vars.dispatch_event("ENGINE_AUTO_SHUTDOWN", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..1800 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let read = |vars: &mut Variables, name, unit| {
+                vars.read(&Reference::new('A', name, Some(unit)))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 0.0);
+            assert!(read(&mut vars, "GENERAL ENG RPM:1", "rpm") < 50.0);
+            vars.dispatch_key_event(0x103be, Value::Number(0.0))
+                .unwrap();
+            vars.dispatch_event("STARTER1_SET", Value::Number(1.0))
+                .unwrap();
+            for _ in 0..480 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            vars.dispatch_event("STARTER1_SET", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..120 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(read(&mut vars, "GENERAL ENG FUEL VALVE:1", "bool"), 1.0);
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            assert!(read(&mut vars, "GENERAL ENG RPM:1", "rpm") > 400.0);
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
     #[ignore = "requires original wheeled aircraft and AIR flight data"]
     fn parked_turbines_hold_the_airframe_stationary_against_idle_thrust() {
         let mut verified = 0;
@@ -2373,6 +2437,10 @@ mod tests {
             assert_eq!(combustion(&mut vars, 1), 0.0);
             if kind == 1 {
                 assert_eq!(combustion(&mut vars, 2), 1.0);
+                vars.dispatch_key_event(0x103bf, Value::Number(0.0))
+                    .unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                assert_eq!(combustion(&mut vars, 2), 0.0);
             }
             verified[kind] = true;
         }
