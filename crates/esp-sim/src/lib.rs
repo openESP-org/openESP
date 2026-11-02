@@ -9,6 +9,7 @@ pub mod interaction;
 pub mod loading;
 mod lookup;
 pub mod picking;
+pub mod piston;
 pub mod propeller;
 pub mod time;
 pub mod turbine;
