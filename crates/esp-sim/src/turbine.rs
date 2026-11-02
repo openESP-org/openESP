@@ -40,6 +40,7 @@ struct Engine {
 pub struct Command {
     pub throttle: f64,
     pub fuel_valve: bool,
+    pub starter: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -198,16 +199,34 @@ impl Turbines {
         );
         let travel = self.gain * (2048.0 / 60.0) * dt;
         for (i, command) in commands.iter().enumerate() {
-            let lit = self.engines[i].lit && fuel_available && command.fuel_valve;
+            let mach = speed / air.sound_speed;
+            let theta = air.temperature / 288.15 * (1.0 + 0.2 * mach * mach);
+            let current_n2 = self.spool.sample(self.engines[i].coordinate) * theta.sqrt();
+            // Starter torque and ignition thresholds are approximated until pneumatic
+            // supply and engine-specific start schedules are available.
+            let lit = (self.engines[i].lit || (command.starter && current_n2 >= 19.4))
+                && fuel_available
+                && command.fuel_valve;
             let target = if lit {
                 self.spool
                     .inverse(self.target_n2(command.throttle, air, speed))
+            } else if command.starter {
+                self.spool.inverse(25.0 / theta.sqrt())
             } else {
                 self.spool.0[0].input
             };
             let engine = &mut self.engines[i];
             engine.lit = lit;
-            engine.coordinate += (target - engine.coordinate).clamp(-travel, travel);
+            if command.starter && !lit {
+                let next_n2 = (current_n2 + dt).min(25.0);
+                let start_coordinate = self.spool.inverse(next_n2 / theta.sqrt());
+                engine.coordinate = engine
+                    .coordinate
+                    .max(start_coordinate)
+                    .min(target.max(engine.coordinate));
+            } else {
+                engine.coordinate += (target - engine.coordinate).clamp(-travel, travel);
+            }
         }
         Ok(())
     }

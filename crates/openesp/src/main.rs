@@ -824,8 +824,8 @@ fn main() -> Result<()> {
                     let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
                     if engines_running {
                         flight.start_running(&data)?;
-                    } else if let Err(error) = flight.prepare_piston(&data) {
-                        eprintln!("cold piston engine unavailable: {error:#}");
+                    } else if let Err(error) = flight.prepare_engines(&data) {
+                        eprintln!("cold engine unavailable: {error:#}");
                     }
                     Ok::<_,anyhow::Error>(flight)
                 }).transpose()?;

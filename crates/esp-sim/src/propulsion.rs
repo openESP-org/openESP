@@ -111,6 +111,7 @@ impl Propulsion {
                 commands.extend(controls.iter().map(|c| turbine::Command {
                     throttle: c.throttle,
                     fuel_valve: c.fuel_valve,
+                    starter: c.starter,
                 }));
                 model.advance(dt, air, velocity.length(), commands, fuel_available)
             }
