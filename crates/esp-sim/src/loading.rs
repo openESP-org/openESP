@@ -128,6 +128,76 @@ impl WeightBalance {
         self.load_tanks(quantities, payload)
     }
 
+    fn tank_priority(selector: u32, name: &str) -> Option<u8> {
+        match (selector, name) {
+            (1, _) => Some(0),
+            (2, "LeftTip") | (3, "RightTip") => Some(0),
+            (2, "LeftAux") | (3, "RightAux") => Some(1),
+            (2, "LeftMain") | (3, "RightMain") => Some(2),
+            (4, "LeftAux")
+            | (5, "RightAux")
+            | (6, "Center1")
+            | (7, "Center2")
+            | (8, "Center3")
+            | (9, "External1")
+            | (10, "External2")
+            | (11, "RightTip")
+            | (12, "LeftTip")
+            | (19, "LeftMain")
+            | (20, "RightMain") => Some(0),
+            (16, "LeftMain" | "RightMain") | (17, "External1" | "External2") => Some(0),
+            _ => None,
+        }
+    }
+
+    pub fn selected_fuel(&self, loading: &Loading, selector: u32) -> f64 {
+        self.tanks
+            .iter()
+            .zip(&loading.tank_gallons)
+            .filter(|(tank, _)| Self::tank_priority(selector, tank.name).is_some())
+            .map(|(tank, &quantity)| (quantity - tank.unusable_gallons).max(0.0))
+            .sum()
+    }
+
+    pub fn burn_selected(
+        &self,
+        loading: &Loading,
+        selector: u32,
+        gallons: f64,
+        payload: bool,
+    ) -> Result<Loading> {
+        ensure!(
+            gallons.is_finite() && gallons >= 0.0,
+            "invalid fuel consumption"
+        );
+        let mut quantities = loading.tank_gallons.clone();
+        let mut remaining = gallons;
+        for priority in 0..=2 {
+            let available: f64 = self
+                .tanks
+                .iter()
+                .zip(&quantities)
+                .filter(|(tank, _)| Self::tank_priority(selector, tank.name) == Some(priority))
+                .map(|(tank, &quantity)| (quantity - tank.unusable_gallons).max(0.0))
+                .sum();
+            if available == 0.0 {
+                continue;
+            }
+            let fraction = (remaining / available).min(1.0);
+            for (tank, quantity) in self.tanks.iter().zip(&mut quantities) {
+                if Self::tank_priority(selector, tank.name) == Some(priority) {
+                    if fraction == 1.0 {
+                        *quantity = quantity.min(tank.unusable_gallons);
+                    } else {
+                        *quantity -= (*quantity - tank.unusable_gallons).max(0.0) * fraction;
+                    }
+                }
+            }
+            remaining = (remaining - available).max(0.0);
+        }
+        self.load_tanks(quantities, payload)
+    }
+
     fn load_tanks(&self, quantities: Vec<f64>, payload: bool) -> Result<Loading> {
         ensure!(
             quantities.len() == self.tanks.len(),
@@ -237,5 +307,29 @@ mod tests {
         assert_eq!(exhausted.fuel_gallons, 3.0);
         assert!(exhausted.cg.y < 0.0);
         assert!((exhausted.mass.kilograms() - (1000.0 + 18.0) * POUND).abs() < 1e-10);
+    }
+
+    #[test]
+    fn selector_routes_fuel_in_priority_order_and_preserves_other_tanks() {
+        let source = "[weight_and_balance]\nempty_weight=1000\nempty_weight_roll_MOI=100\nempty_weight_pitch_MOI=200\nempty_weight_yaw_MOI=250\nempty_weight_coupled_MOI=0\nreference_datum_position=0,0,0\nempty_weight_CG_position=0,0,0\n[fuel]\nfuel_type=1\nlefttip=0,-8,0,1,0.5\nleftaux=0,-5,0,2,0\nleftmain=0,-2,0,3,0\nrightmain=0,2,0,3,0";
+        let weights = WeightBalance::from_config(&Config::parse(source).unwrap()).unwrap();
+        let full = weights.load(1.0, false).unwrap();
+        let left = weights.burn_selected(&full, 2, 2.0, false).unwrap();
+        let amount = |name| {
+            left.tank_gallons[weights
+                .tanks()
+                .iter()
+                .position(|tank| tank.name == name)
+                .unwrap()]
+        };
+        assert_eq!(amount("LeftTip"), 0.5);
+        assert_eq!(amount("LeftAux"), 1.0);
+        assert_eq!(amount("LeftMain"), 3.0);
+        assert_eq!(amount("RightMain"), 3.0);
+        assert_eq!(weights.selected_fuel(&left, 2), 4.0);
+        assert_eq!(weights.selected_fuel(&left, 0), 0.0);
+        let dry = weights.burn_selected(&left, 2, 100.0, false).unwrap();
+        assert_eq!(weights.selected_fuel(&dry, 2), 0.0);
+        assert_eq!(weights.selected_fuel(&dry, 3), 3.0);
     }
 }

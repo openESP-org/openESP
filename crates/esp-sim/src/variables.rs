@@ -16,6 +16,9 @@ struct Variable {
 }
 
 fn variable_name(category: char, name: &str) -> String {
+    if category == 'A' && name == "FUEL TANK SELECTOR" {
+        return "FUEL TANK SELECTOR:1".into();
+    }
     if category == 'A' && !name.contains(':') {
         for prefix in ["TURB ENG", "RECIP ENG", "GENERAL ENG", "ENG", "PROP"] {
             if let Some(rest) = name.strip_prefix(prefix) {
@@ -71,6 +74,12 @@ impl Variables {
         }
         self.engines = engines;
         Ok(())
+    }
+
+    pub fn configure_fuel_selectors(&mut self, count: u32) {
+        for index in 1..=count {
+            self.set_number(&format!("FUEL TANK SELECTOR:{index}"), "enum", 1.0);
+        }
     }
 
     pub fn flap_angles(&self) -> impl Iterator<Item = f64> + '_ {
@@ -170,6 +179,31 @@ impl Variables {
     }
 
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
+        for (start, selector) in [(0x101a3, 1), (0x103d4, 2), (0x10401, 3), (0x10409, 4)] {
+            if (start..start + 8).contains(&id) {
+                let action = [
+                    "OFF",
+                    "ALL",
+                    "LEFT",
+                    "RIGHT",
+                    "LEFT_AUX",
+                    "RIGHT_AUX",
+                    "CENTER",
+                    "SET",
+                ][(id - start) as usize];
+                return self.dispatch_event(&format!("FUEL_SELECTOR_{selector}_{action}"), value);
+            }
+        }
+        if (0x1046d..=0x10474).contains(&id) {
+            let offset = id - 0x1046d;
+            let action = if offset < 4 {
+                "LEFT_MAIN"
+            } else {
+                "RIGHT_MAIN"
+            };
+            return self
+                .dispatch_event(&format!("FUEL_SELECTOR_{}_{action}", offset % 4 + 1), value);
+        }
         if (0x10187..=0x1019e).contains(&id) {
             let offset = id - 0x10187;
             let action = match offset % 6 {
@@ -279,6 +313,45 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        if let Some(rest) = name.strip_prefix("FUEL_SELECTOR_") {
+            let (index, action) = if let Some((index, action)) = rest.split_once('_') {
+                if let Ok(index) = index.parse::<u32>() {
+                    (index, action)
+                } else {
+                    (1, rest)
+                }
+            } else {
+                (1, rest)
+            };
+            let selector = match action {
+                "OFF" => 0,
+                "ALL" => 1,
+                "LEFT" | "LEFT_MAIN" => 2,
+                "RIGHT" | "RIGHT_MAIN" => 3,
+                "LEFT_AUX" => 4,
+                "RIGHT_AUX" => 5,
+                "CENTER" => 6,
+                "SET"
+                    if value.is_finite()
+                        && value.fract() == 0.0
+                        && (0.0..=20.0).contains(&value) =>
+                {
+                    value as u32
+                }
+                _ => return Err(Error::Unsupported(format!("event {name}"))),
+            };
+            if (13..=15).contains(&selector) || selector == 18 {
+                return Err(Error::Unsupported(format!(
+                    "fuel selector position {selector}"
+                )));
+            }
+            let key = format!("FUEL TANK SELECTOR:{index}");
+            if !self.values.contains_key(&('A', key.clone())) {
+                return Err(Error::Unsupported("fuel selector is unavailable".into()));
+            }
+            self.set_number(&key, "enum", f64::from(selector));
+            return Ok(());
+        }
         if let Some(index) = name
             .strip_prefix("STARTER")
             .and_then(|s| s.strip_suffix("_SET"))
@@ -1243,4 +1316,41 @@ mod tests {
         );
         assert_eq!(variables.read(&reference).unwrap(), Value::Number(351.0));
     }
+}
+#[test]
+fn fuel_selector_events_preserve_index_and_reject_unsupported_routes() {
+    let mut variables = Variables::default();
+    variables.configure_fuel_selectors(2);
+    variables
+        .dispatch_key_event(0x101a5, Value::Number(0.0))
+        .unwrap();
+    variables
+        .dispatch_event("FUEL_SELECTOR_2_SET", Value::Number(3.0))
+        .unwrap();
+    assert_eq!(
+        variables
+            .read(&Reference::new('A', "FUEL TANK SELECTOR", Some("enum")))
+            .unwrap()
+            .number()
+            .unwrap(),
+        2.0
+    );
+    assert_eq!(
+        variables
+            .read(&Reference::new('A', "FUEL TANK SELECTOR:2", Some("enum")))
+            .unwrap()
+            .number()
+            .unwrap(),
+        3.0
+    );
+    assert!(
+        variables
+            .dispatch_event("FUEL_SELECTOR_SET", Value::Number(13.0))
+            .is_err()
+    );
+    assert!(
+        variables
+            .dispatch_event("FUEL_SELECTOR_3_OFF", Value::Number(0.0))
+            .is_err()
+    );
 }
