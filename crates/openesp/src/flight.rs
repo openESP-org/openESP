@@ -154,6 +154,7 @@ impl Flight {
                         if running { 3.0 } else { 0.0 },
                     );
                     variables.set_number(&format!("GENERAL ENG STARTER:{id}"), "bool", 0.0);
+                    variables.set_number(&format!("GENERAL ENG STARTER ACTIVE:{id}"), "bool", 0.0);
                     variables.set_number(
                         &format!("GENERAL ENG MIXTURE LEVER POSITION:{id}"),
                         "percent",
@@ -198,6 +199,7 @@ impl Flight {
                 EngineOutput::Piston(output) => {
                     for (name, unit, value) in [
                         ("GENERAL ENG RPM", "rpm", output.rpm),
+                        ("GENERAL ENG PCT MAX RPM", "percent", output.rpm_percent),
                         ("PROP RPM", "rpm", output.propeller.rpm),
                         ("PROP ROTATION ANGLE", "radians", output.propeller_angle),
                         ("PROP MAX RPM PERCENT", "percent", output.rpm_percent),
@@ -318,7 +320,13 @@ impl Flight {
                         .ok()
                         .and_then(|v| v.number().ok())
                         .is_some_and(|v| v != 0.0);
-                    requested && powered
+                    let active = requested && powered;
+                    variables.set_number(
+                        &format!("GENERAL ENG STARTER ACTIVE:{index}"),
+                        "bool",
+                        f64::from(active),
+                    );
+                    active
                 } else {
                     false
                 };
@@ -633,6 +641,56 @@ mod tests {
 
     #[test]
     #[ignore = "requires original fixed-pitch piston aircraft"]
+    fn piston_aircraft_accelerates_and_lifts_off_from_the_ground() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(0.0)
+                || data
+                    .configuration
+                    .number("propeller", "propeller_type")
+                    .unwrap()
+                    != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            vars.dispatch_event("THROTTLE_FULL", Value::Number(0.0))
+                .unwrap();
+            let mut lifted = false;
+            for _ in 0..3600 {
+                if flight.current.velocity.x > 28.0 {
+                    vars.set_number("ELEVATOR DEFLECTION PCT", "percent", 35.0);
+                }
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+                if !flight.on_ground
+                    && flight.current.position.z < -3.0
+                    && flight.current.velocity.z < 0.0
+                {
+                    lifted = true;
+                    break;
+                }
+            }
+            assert!(
+                lifted,
+                "{}: failed to lift off: {:?}",
+                path.display(),
+                flight.current
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
+    #[ignore = "requires original fixed-pitch piston aircraft"]
     fn cold_piston_start_requires_electrical_power_and_continues_after_release() {
         let mut verified = 0;
         for path in content::aircraft_paths() {
@@ -677,6 +735,7 @@ mod tests {
                     .unwrap()
             };
             assert_eq!(read(&mut vars, "GENERAL ENG RPM:1", "rpm"), 0.0);
+            assert_eq!(read(&mut vars, "GENERAL ENG STARTER ACTIVE:1", "bool"), 0.0);
             vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
                 .unwrap();
             for _ in 0..480 {
@@ -685,6 +744,7 @@ mod tests {
             }
             let rpm = read(&mut vars, "GENERAL ENG RPM:1", "rpm");
             assert!(rpm > 400.0, "rpm={rpm}");
+            assert_eq!(read(&mut vars, "GENERAL ENG STARTER ACTIVE:1", "bool"), 1.0);
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
             vars.dispatch_key_event(0x1018c, Value::Number(0.0))
                 .unwrap();
@@ -692,6 +752,7 @@ mod tests {
                 vars.update_electrical().unwrap();
                 flight.advance(1.0 / 60.0, &mut vars).unwrap();
             }
+            assert_eq!(read(&mut vars, "GENERAL ENG STARTER ACTIVE:1", "bool"), 0.0);
             assert!(read(&mut vars, "GENERAL ENG RPM:1", "rpm") > 400.0);
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
             verified += 1;
