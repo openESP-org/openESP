@@ -493,6 +493,13 @@ impl Flight {
                 ground_controls,
                 dt / f64::from(steps),
             )?;
+            self.gear.advance_wheel_motion(
+                &next,
+                self.loading.cg,
+                TEST_SURFACE,
+                ground_controls,
+                dt / f64::from(steps),
+            )?;
             if let Some(impact) = self
                 .gear
                 .impact(&before, &next, self.loading.cg, TEST_SURFACE)
@@ -607,6 +614,32 @@ impl Flight {
             .get(index as usize)
             {
                 variables.set_number(name, "percent over 100", position);
+            }
+        }
+        for wheel in self.gear.wheel_motion() {
+            variables.set_number(
+                &format!("WHEEL ROTATION ANGLE:{}", wheel.index),
+                "radians",
+                wheel.rotation,
+            );
+            variables.set_number(&format!("WHEEL RPM:{}", wheel.index), "rpm", wheel.rpm);
+            variables.set_number(
+                &format!("GEAR STEER ANGLE:{}", wheel.index),
+                "radians",
+                wheel.steer_angle,
+            );
+            if let Some(side) = ["CENTER", "LEFT", "RIGHT", "AUX"].get(wheel.index as usize) {
+                variables.set_number(
+                    &format!("{side} WHEEL ROTATION ANGLE"),
+                    "radians",
+                    wheel.rotation,
+                );
+                variables.set_number(&format!("{side} WHEEL RPM"), "rpm", wheel.rpm);
+                variables.set_number(
+                    &format!("GEAR {side} STEER ANGLE"),
+                    "radians",
+                    wheel.steer_angle,
+                );
             }
         }
         let fraction = if self.loading.fuel_capacity_gallons > 0.0 {
@@ -1245,6 +1278,15 @@ mod tests {
                 flight.advance(1.0 / 60.0, &mut variables).unwrap();
             }
             assert!(flight.current.velocity.x > 2.0);
+            assert!(read(&mut variables, "CENTER WHEEL RPM", "rpm") > 0.0);
+            assert_eq!(
+                read(&mut variables, "CENTER WHEEL ROTATION ANGLE", "radians"),
+                read(&mut variables, "WHEEL ROTATION ANGLE:0", "radians")
+            );
+            variables.set_number("RUDDER DEFLECTION PCT", "percent", 50.0);
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            assert!(read(&mut variables, "GEAR CENTER STEER ANGLE", "degrees") > 0.0);
+            variables.set_number("RUDDER DEFLECTION PCT", "percent", 0.0);
             assert!(flight.loading.fuel_gallons < fuel);
             assert!(read(&mut variables, "GENERAL ENG RPM:1", "rpm") > idle);
             assert!(read(&mut variables, "RECIP ENG BRAKE POWER:1", "horsepower") > 50.0);

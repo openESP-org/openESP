@@ -44,6 +44,18 @@ struct Wheel {
     extension_seconds: f64,
     retraction_seconds: f64,
     extension_limit: f64,
+    radius: f64,
+    rotation: f64,
+    angular_speed: f64,
+    steer_angle: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WheelMotion {
+    pub index: u32,
+    pub rotation: f64,
+    pub rpm: f64,
+    pub steer_angle: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -104,6 +116,66 @@ impl LandingGear {
         self.wheels
             .iter()
             .map(|wheel| (wheel.index, wheel.extension))
+    }
+
+    pub fn wheel_motion(&self) -> impl Iterator<Item = WheelMotion> + '_ {
+        self.wheels.iter().map(|wheel| WheelMotion {
+            index: wheel.index,
+            rotation: wheel.rotation,
+            rpm: wheel.angular_speed * 30.0 / std::f64::consts::PI,
+            steer_angle: wheel.steer_angle,
+        })
+    }
+
+    /// Kinematic wheel animation follows rolling contact. Wheel rotational
+    /// inertia and tyre slip are not part of the contact solver yet.
+    pub fn advance_wheel_motion(
+        &mut self,
+        state: &State,
+        cg: DVec3,
+        surface: Surface,
+        controls: Controls,
+        dt: f64,
+    ) -> Result<()> {
+        ensure!(dt.is_finite() && dt >= 0.0, "invalid wheel timestep");
+        self.forces(state, cg, surface, controls)?;
+        for wheel in &mut self.wheels {
+            let arm = wheel.position - cg;
+            let world_arm = state.orientation * arm;
+            let compression = state.position.z + world_arm.z + surface.elevation;
+            let contact = wheel.extension == 1.0 && compression >= 0.0;
+            let velocity = state.velocity + state.orientation * state.angular_velocity.cross(arm);
+            let caster = (wheel.steering - std::f64::consts::PI).abs() < 1e-6;
+            let body_velocity = state.orientation.conjugate() * velocity;
+            wheel.steer_angle = if caster && velocity.truncate().length_squared() > 1e-12 {
+                body_velocity.y.atan2(body_velocity.x)
+            } else if caster {
+                wheel.steer_angle
+            } else {
+                controls.steering * wheel.steering
+            };
+            if contact && wheel.radius > 0.0 {
+                let direction = state.orientation
+                    * DVec3::new(wheel.steer_angle.cos(), wheel.steer_angle.sin(), 0.0);
+                if let Some(direction) = DVec3::new(direction.x, direction.y, 0.0).try_normalize() {
+                    let brake = if wheel.brake_map == 0 {
+                        0.0
+                    } else if controls.parking_brake {
+                        1.0
+                    } else {
+                        controls.brakes[wheel.brake_map as usize - 1]
+                    };
+                    wheel.angular_speed = if brake >= 1.0 {
+                        0.0
+                    } else {
+                        velocity.dot(direction) / wheel.radius
+                    };
+                }
+            }
+            wheel.rotation =
+                (wheel.rotation + wheel.angular_speed * dt).rem_euclid(std::f64::consts::TAU);
+        }
+        Ok(())
     }
 
     pub fn extension(&self) -> f64 {
@@ -234,6 +306,10 @@ impl LandingGear {
                 extension_seconds: point.extension_seconds,
                 retraction_seconds: point.retraction_seconds,
                 extension_limit: point.extension_limit_knots,
+                radius: point.wheel_radius_feet * 0.3048,
+                rotation: 0.0,
+                angular_speed: 0.0,
+                steer_angle: 0.0,
             });
         }
         let brake_scale = config.number("brakes", "toe_brakes_scale")?.unwrap_or(1.0);
@@ -403,6 +479,10 @@ mod tests {
                 extension_seconds: 1.0,
                 retraction_seconds: 1.0,
                 extension_limit: 0.0,
+                radius: 0.3,
+                rotation: 0.0,
+                angular_speed: 0.0,
+                steer_angle: 0.0,
             })
             .collect(),
             brake_scale: 1.0,
@@ -441,6 +521,36 @@ mod tests {
                 .unwrap()
                 .on_ground
         );
+    }
+
+    #[test]
+    fn wheel_animation_uses_contact_velocity_radius_steering_and_brakes() {
+        let mut gear = tripod();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -0.9),
+            velocity: DVec3::X * 3.0,
+            ..State::default()
+        };
+        gear.advance_wheel_motion(&state, DVec3::ZERO, SURFACE, Controls::default(), 0.1)
+            .unwrap();
+        let wheels = gear.wheel_motion().collect::<Vec<_>>();
+        assert!((wheels[0].rotation - 1.0).abs() < 1e-12);
+        assert!((wheels[0].rpm - 10.0 * 30.0 / std::f64::consts::PI).abs() < 1e-10);
+        let steering = Controls {
+            steering: 0.5,
+            parking_brake: true,
+            ..Controls::default()
+        };
+        gear.advance_wheel_motion(&state, DVec3::ZERO, SURFACE, steering, 0.1)
+            .unwrap();
+        let wheels = gear.wheel_motion().collect::<Vec<_>>();
+        assert!((wheels[0].steer_angle - 15.0_f64.to_radians()).abs() < 1e-12);
+        assert!(wheels[0].rpm > 0.0);
+        assert_eq!(wheels[1].rpm, 0.0);
+        state.position.z = -2.0;
+        gear.advance_wheel_motion(&state, DVec3::ZERO, SURFACE, Controls::default(), 0.1)
+            .unwrap();
+        assert_eq!(gear.wheel_motion().nth(1).unwrap().rpm, 0.0);
     }
 
     const SURFACE: Surface = Surface {
