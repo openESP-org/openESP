@@ -12,9 +12,9 @@ use crate::{
     propeller::{self, Propeller},
 };
 
-/// Warm, naturally aspirated four-stroke engines with fixed-pitch propellers.
-/// Oil viscosity is held at its warm reference value; starter, thermal and
-/// propeller gyroscopic/reaction loads are not connected yet.
+/// Naturally aspirated four-stroke engines with fixed-pitch propellers.
+/// Oil viscosity is held at its warm reference value; thermal and propeller
+/// gyroscopic/reaction loads are not connected yet.
 pub struct Pistons {
     cycle: PistonCycle,
     propeller: Propeller,
@@ -24,6 +24,7 @@ pub struct Pistons {
     mixture_consumption: Curve,
     automatic_mixture: bool,
     automatic_ignition: bool,
+    starter_torque: f64,
     engines: Vec<Engine>,
 }
 
@@ -43,6 +44,7 @@ pub struct Command {
     pub mixture: f64,
     pub fuel_valve: bool,
     pub magnetos: [bool; 2],
+    pub starter: bool,
 }
 
 impl Default for Command {
@@ -52,6 +54,7 @@ impl Default for Command {
             mixture: 1.0,
             fuel_valve: true,
             magnetos: [true; 2],
+            starter: false,
         }
     }
 }
@@ -100,6 +103,13 @@ fn curve(config: &cfg::Config, key: &str, defaults: &[(f64, f64)]) -> Result<Cur
 impl Pistons {
     pub fn from_data(data: &FlightData) -> Result<Self> {
         let config = &data.configuration;
+        ensure!(
+            config
+                .number("GeneralEngineData", "starter_type")?
+                .unwrap_or(0.0)
+                == 0.0,
+            "only electric piston starters are implemented yet"
+        );
         for key in [
             "turbocharged",
             "supercharged",
@@ -162,8 +172,21 @@ impl Pistons {
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(!engines.is_empty(), "aircraft has no configured engines");
+        let cycle = PistonCycle::from_data(data)?;
+        let rated_power = config
+            .number("piston_engine", "max_rated_hp")?
+            .context("missing piston rated power")?
+            * 745.69987158227;
+        let starter_scalar = config
+            .number("piston_engine", "normalized_starter_torque")?
+            .unwrap_or(0.3);
+        ensure!(
+            rated_power > 0.0 && starter_scalar >= 0.0,
+            "invalid starter power or torque scalar"
+        );
+        let starter_torque = starter_scalar * rated_power / (cycle.maximum_rpm * PI / 30.0);
         Ok(Self {
-            cycle: PistonCycle::from_data(data)?,
+            cycle,
             propeller: Propeller::from_data(data)?,
             manifold,
             mixture: curve(
@@ -213,6 +236,7 @@ impl Pistons {
                 .number("piston_engine", "auto_ignition")?
                 .unwrap_or(0.0)
                 != 0.0,
+            starter_torque,
             engines,
         })
     }
@@ -244,7 +268,10 @@ impl Pistons {
             self.mixture.sample(command.mixture) * 1.225 / air.density
         };
         let ignition = self.automatic_ignition || command.magnetos.iter().any(|v| *v);
-        let combustion = rpm > 0.0 && ignition && self.mixture_efficiency.sample(ratio) > 0.0;
+        // Approximate minimum cranking speed until ignition timing is simulated.
+        let combustion = rpm >= self.cycle.maximum_rpm * 0.04
+            && ignition
+            && self.mixture_efficiency.sample(ratio) > 0.0;
         let ignition_efficiency = if self.automatic_ignition || command.magnetos.iter().all(|v| *v)
         {
             1.0
@@ -309,7 +336,7 @@ impl Pistons {
                 let output = self.sample(rpm, air, speed, Command::default(), true)?;
                 Ok(output.cycle.shaft_torque - output.propeller.absorbed_torque)
             };
-            let (mut lo, mut hi) = (1e-6, self.cycle.maximum_rpm * 2.0);
+            let (mut lo, mut hi) = (self.cycle.maximum_rpm * 0.04, self.cycle.maximum_rpm * 2.0);
             ensure!(
                 torque(lo)? > 0.0 && torque(hi)? < 0.0,
                 "no running piston idle equilibrium"
@@ -361,7 +388,14 @@ impl Pistons {
             let derivative = |rpm: f64| -> Result<f64> {
                 let output = self.sample(rpm.max(0.0), air, speed, command, fuel_available)?;
                 Ok(
-                    (output.cycle.shaft_torque - output.propeller.absorbed_torque)
+                    (output.cycle.shaft_torque - output.propeller.absorbed_torque
+                        + if command.starter {
+                            self.starter_torque
+                                * (1.0 - rpm.max(0.0) / (self.cycle.maximum_rpm * 0.15))
+                                    .clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        })
                         / self.propeller.engine_shaft_inertia()
                         * 30.0
                         / PI,

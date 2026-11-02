@@ -141,13 +141,15 @@ impl Variables {
     }
 
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
-        if (0x10187..=0x1019c).contains(&id) {
+        if (0x10187..=0x1019e).contains(&id) {
             let offset = id - 0x10187;
             let action = match offset % 6 {
                 0 => "OFF",
                 1 => "RIGHT",
                 2 => "LEFT",
                 3 => "BOTH",
+                4 => "START",
+                5 => return self.dispatch_event(&format!("STARTER{}_SET", offset / 6 + 1), value),
                 _ => return Err(Error::Unsupported(format!("key event {id:#x}"))),
             };
             return self.dispatch_event(&format!("MAGNETO{}_{action}", offset / 6 + 1), value);
@@ -179,6 +181,7 @@ impl Variables {
             0x101e8 => "MAGNETO_RIGHT",
             0x101e9 => "MAGNETO_LEFT",
             0x101ea => "MAGNETO_BOTH",
+            0x101eb => "MAGNETO_START",
             0x102bf => "TOGGLE_BEACON_LIGHTS",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
@@ -186,6 +189,10 @@ impl Variables {
             0x102f0 => "TOGGLE_FLIGHT_DIRECTOR",
             0x102f4 => "AXIS_MIXTURE_SET",
             0x102f5 => "TOGGLE_AVIONICS_MASTER",
+            0x102fc => "TOGGLE_STARTER1",
+            0x102fd => "TOGGLE_STARTER2",
+            0x102fe => "TOGGLE_STARTER3",
+            0x102ff => "TOGGLE_STARTER4",
             0x1034b => "TOGGLE_NAV_LIGHTS",
             0x1033b => "TOGGLE_ALTERNATOR1",
             0x1033c => "TOGGLE_ALTERNATOR2",
@@ -225,6 +232,31 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        if let Some(index) = name
+            .strip_prefix("STARTER")
+            .and_then(|s| s.strip_suffix("_SET"))
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            if !value.is_finite() {
+                return Err(Error::Number);
+            }
+            let key = format!("GENERAL ENG STARTER:{index}");
+            if !self.values.contains_key(&('A', key.clone())) {
+                return Err(Error::Unsupported("starter is unavailable".into()));
+            }
+            self.set_number(&key, "bool", f64::from(value != 0.0));
+            return Ok(());
+        }
+        if let Some(index) = name
+            .strip_prefix("TOGGLE_STARTER")
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            let key = format!("GENERAL ENG STARTER:{index}");
+            if !self.values.contains_key(&('A', key.clone())) {
+                return Err(Error::Unsupported("starter is unavailable".into()));
+            }
+            return self.toggle(&key);
+        }
         if let Some(rest) = name.strip_prefix("MAGNETO") {
             let (engine, action) = if let Some(rest) = rest.strip_prefix('_') {
                 (None, rest)
@@ -402,7 +434,7 @@ impl Variables {
             "OFF" => 0,
             "RIGHT" => 1,
             "LEFT" => 2,
-            "BOTH" => 3,
+            "BOTH" | "START" => 3,
             "SET" | "SET_ACTUAL" if value.fract() == 0.0 && (0.0..=3.0).contains(&value) => {
                 value as u8
             }
@@ -462,6 +494,9 @@ impl Variables {
                 "enum",
                 f64::from(state),
             );
+            if action == "START" {
+                self.toggle(&format!("GENERAL ENG STARTER:{index}"))?;
+            }
         }
         Ok(())
     }

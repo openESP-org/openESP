@@ -128,12 +128,32 @@ impl Flight {
         Ok(())
     }
 
+    pub fn prepare_piston(&mut self, data: &FlightData) -> Result<()> {
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")?
+            == Some(0.0)
+        {
+            self.engines = Some(Propulsion::from_data(data)?);
+        }
+        Ok(())
+    }
+
     pub fn configure_engines(&self, variables: &mut Variables) -> Result<()> {
         if let Some(engines) = &self.engines {
             variables.configure_engines(engines.indices())?;
             if engines.is_piston() {
-                for id in engines.indices() {
-                    variables.set_number(&format!("RECIP ENG MAGNETO:{id}"), "enum", 3.0);
+                let air = Atmosphere::standard(-self.current.position.z)?;
+                for (index, id) in engines.indices().enumerate() {
+                    let running = engines
+                        .output(index, &air, self.current.air_velocity(DVec3::ZERO))?
+                        .combustion();
+                    variables.set_number(
+                        &format!("RECIP ENG MAGNETO:{id}"),
+                        "enum",
+                        if running { 3.0 } else { 0.0 },
+                    );
+                    variables.set_number(&format!("GENERAL ENG STARTER:{id}"), "bool", 0.0);
                     variables.set_number(
                         &format!("GENERAL ENG MIXTURE LEVER POSITION:{id}"),
                         "percent",
@@ -143,7 +163,7 @@ impl Flight {
                         variables.set_number(
                             &format!("RECIP ENG {side} MAGNETO:{id}"),
                             "bool",
-                            1.0,
+                            f64::from(running),
                         );
                     }
                 }
@@ -280,11 +300,34 @@ impl Flight {
                 } else {
                     (1.0, [true; 2])
                 };
+                let starter = if engines.is_piston() {
+                    let requested = variables
+                        .read(&Reference::new(
+                            'A',
+                            &format!("GENERAL ENG STARTER:{index}"),
+                            Some("bool"),
+                        ))?
+                        .number()?
+                        != 0.0;
+                    let powered = variables
+                        .read(&Reference::new(
+                            'A',
+                            &format!("CIRCUIT STARTER ON:{index}"),
+                            Some("bool"),
+                        ))
+                        .ok()
+                        .and_then(|v| v.number().ok())
+                        .is_some_and(|v| v != 0.0);
+                    requested && powered
+                } else {
+                    false
+                };
                 self.commands.push(Command {
                     throttle,
                     fuel_valve,
                     mixture,
                     magnetos,
+                    starter,
                 });
             }
             let air = Atmosphere::standard(-self.current.position.z)?;
@@ -587,6 +630,74 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original fixed-pitch piston aircraft"]
+    fn cold_piston_start_requires_electrical_power_and_continues_after_release() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(0.0)
+                || data
+                    .configuration
+                    .number("propeller", "propeller_type")
+                    .unwrap()
+                    != Some(1.0)
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.prepare_piston(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            vars.configure_electrical(
+                &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+            vars.dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+                .unwrap();
+            vars.dispatch_event("MAGNETO1_BOTH", Value::Number(0.0))
+                .unwrap();
+            vars.dispatch_key_event(0x1018c, Value::Number(1.0))
+                .unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let read = |vars: &mut Variables, name, unit| {
+                vars.read(&Reference::new('A', name, Some(unit)))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            assert_eq!(read(&mut vars, "GENERAL ENG RPM:1", "rpm"), 0.0);
+            vars.dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..480 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let rpm = read(&mut vars, "GENERAL ENG RPM:1", "rpm");
+            assert!(rpm > 400.0, "rpm={rpm}");
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            vars.dispatch_key_event(0x1018c, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..120 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert!(read(&mut vars, "GENERAL ENG RPM:1", "rpm") > 400.0);
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original fixed-pitch piston aircraft and AIR flight data"]

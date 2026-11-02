@@ -21,6 +21,7 @@ pub struct Command {
     pub fuel_valve: bool,
     pub mixture: f64,
     pub magnetos: [bool; 2],
+    pub starter: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +102,7 @@ impl Propulsion {
                     fuel_valve: c.fuel_valve,
                     mixture: c.mixture,
                     magnetos: c.magnetos,
+                    starter: c.starter,
                 }));
                 model.advance(dt, air, velocity, commands, fuel_available)
             }

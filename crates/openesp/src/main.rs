@@ -787,7 +787,11 @@ fn main() -> Result<()> {
                 let flight = airspeed.map(|knots| {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
                     let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
-                    if engines_running{flight.start_running(&data)?;}
+                    if engines_running {
+                        flight.start_running(&data)?;
+                    } else if let Err(error) = flight.prepare_piston(&data) {
+                        eprintln!("cold piston engine unavailable: {error:#}");
+                    }
                     Ok::<_,anyhow::Error>(flight)
                 }).transpose()?;
                 if flight.is_some() {
