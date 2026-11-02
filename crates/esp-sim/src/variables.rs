@@ -156,6 +156,7 @@ impl Variables {
         }
         let name = match id {
             0x10018 => "STROBES_TOGGLE",
+            0x10035 => "SPOILERS_TOGGLE",
             0x1003b => "FLAPS_UP",
             0x10043 => "FLAPS_DOWN",
             0x10047 => "ELEV_TRIM_DN",
@@ -187,6 +188,8 @@ impl Variables {
             0x101ea => "MAGNETO_BOTH",
             0x101eb => "MAGNETO_START",
             0x102bf => "TOGGLE_BEACON_LIGHTS",
+            0x10210 => "SPOILERS_ON",
+            0x10211 => "SPOILERS_OFF",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
             0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
@@ -198,6 +201,7 @@ impl Variables {
             0x102fe => "TOGGLE_STARTER3",
             0x102ff => "TOGGLE_STARTER4",
             0x1034b => "TOGGLE_NAV_LIGHTS",
+            0x1034e => "AXIS_SPOILER_SET",
             0x1033b => "TOGGLE_ALTERNATOR1",
             0x1033c => "TOGGLE_ALTERNATOR2",
             0x1033d => "TOGGLE_ALTERNATOR3",
@@ -413,11 +417,36 @@ impl Variables {
                 );
                 Ok(())
             }
-            "SPOILERS_SET" => {
+            "SPOILERS_SET" | "AXIS_SPOILER_SET" | "SPOILERS_ON" | "SPOILERS_OFF"
+            | "SPOILERS_TOGGLE" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let position = match name {
+                    "SPOILERS_ON" => 100.0,
+                    "SPOILERS_OFF" => 0.0,
+                    "SPOILERS_TOGGLE" => {
+                        let reference =
+                            Reference::new('A', "SPOILERS HANDLE POSITION", Some("percent"));
+                        if self
+                            .read(&reference)
+                            .ok()
+                            .and_then(|v| v.number().ok())
+                            .unwrap_or(0.0)
+                            > 0.0
+                        {
+                            0.0
+                        } else {
+                            100.0
+                        }
+                    }
+                    "AXIS_SPOILER_SET" => (value + 16383.0) * 100.0 / 32766.0,
+                    _ => value * 100.0 / 16383.0,
+                };
                 self.set_number(
                     "SPOILERS HANDLE POSITION",
                     "percent",
-                    value.clamp(0.0, 16383.0) * 100.0 / 16383.0,
+                    position.clamp(0.0, 100.0),
                 );
                 Ok(())
             }

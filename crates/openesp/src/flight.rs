@@ -27,6 +27,8 @@ pub struct Flight {
     previous: State,
     previous_cg: DVec3,
     flaps: Vec<f64>,
+    spoilers: f64,
+    spoiler_extension_time: f64,
     gear: LandingGear,
     on_ground: bool,
 }
@@ -56,6 +58,14 @@ impl Flight {
             "invalid flight starting state"
         );
         let model = Aerodynamics::from_data(data)?;
+        let spoiler_extension_time = data
+            .configuration
+            .number("airplane_geometry", "spoiler_extension_time")?
+            .unwrap_or(0.0);
+        ensure!(
+            spoiler_extension_time >= 0.0,
+            "invalid spoiler extension time"
+        );
         let weights = WeightBalance::from_config(&data.configuration)?;
         let loading = weights.load(fuel_fraction, payload)?;
         let previous_cg = loading.cg;
@@ -99,6 +109,8 @@ impl Flight {
             current,
             previous: current,
             flaps: Vec::new(),
+            spoilers: 0.0,
+            spoiler_extension_time,
             gear,
             on_ground,
         })
@@ -107,6 +119,13 @@ impl Flight {
     pub fn configure_ground(variables: &mut Variables) {
         variables.set_number("ELEVATOR TRIM PCT", "percent", 0.0);
         variables.set_number("ELEVATOR TRIM POSITION", "radians", 0.0);
+        for name in [
+            "SPOILERS HANDLE POSITION",
+            "SPOILERS LEFT POSITION",
+            "SPOILERS RIGHT POSITION",
+        ] {
+            variables.set_number(name, "percent over 100", 0.0);
+        }
         for name in [
             "BRAKE LEFT POSITION",
             "BRAKE RIGHT POSITION",
@@ -246,11 +265,28 @@ impl Flight {
                 .read(&Reference::new('A', name, Some("percent over 100")))?
                 .number()?)
         };
+        let spoiler_handle = control("SPOILERS HANDLE POSITION")?;
+        ensure!(
+            (0.0..=1.0).contains(&spoiler_handle),
+            "invalid spoiler handle"
+        );
+        let target = if self.model.has_spoilers() {
+            spoiler_handle
+        } else {
+            0.0
+        };
+        let travel = if self.spoiler_extension_time > 0.0 {
+            dt / self.spoiler_extension_time
+        } else {
+            1.0
+        };
+        self.spoilers += (target - self.spoilers).clamp(-travel, travel);
         let controls = Controls {
             elevator: control("ELEVATOR DEFLECTION PCT")?,
             aileron: control("AILERON LEFT DEFLECTION PCT")?,
             rudder: control("RUDDER DEFLECTION PCT")?,
             elevator_trim: control("ELEVATOR TRIM PCT")?,
+            spoilers: self.spoilers,
         };
         let ground_controls = GroundControls {
             steering: controls.rudder,
@@ -265,6 +301,9 @@ impl Flight {
             "radians",
             controls.elevator_trim * self.model.elevator_trim_limit(),
         );
+        for name in ["SPOILERS LEFT POSITION", "SPOILERS RIGHT POSITION"] {
+            variables.set_number(name, "percent over 100", self.spoilers);
+        }
         self.flaps.clear();
         self.flaps.extend(variables.flap_angles());
         let mut fuel_used = 0.0;
@@ -646,6 +685,59 @@ impl Flight {
 mod tests {
     use super::*;
     use esp_script::Value;
+
+    #[test]
+    #[ignore = "requires original aircraft with configured spoilers"]
+    fn spoiler_handle_moves_surfaces_and_changes_aircraft_forces() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let limit = data
+                .configuration
+                .number("airplane_geometry", "spoiler_limit")
+                .unwrap()
+                .unwrap_or(0.0);
+            let time = data
+                .configuration
+                .number("airplane_geometry", "spoiler_extension_time")
+                .unwrap()
+                .unwrap_or(0.0);
+            if limit <= 0.0 || time <= 0.5 {
+                continue;
+            }
+            let mut clean = Flight::new(&data, 200.0, 5000.0, 0.5, true).unwrap();
+            let mut dirty = Flight::new(&data, 200.0, 5000.0, 0.5, true).unwrap();
+            let mut clean_vars = controls(&data);
+            let mut dirty_vars = controls(&data);
+            dirty_vars
+                .dispatch_key_event(0x10210, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..30 {
+                clean.advance(1.0 / 60.0, &mut clean_vars).unwrap();
+                dirty.advance(1.0 / 60.0, &mut dirty_vars).unwrap();
+            }
+            let left = dirty_vars
+                .read(&Reference::new(
+                    'A',
+                    "SPOILERS LEFT POSITION",
+                    Some("percent over 100"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap();
+            assert!((left - 0.5 / time).abs() < 1e-9);
+            assert!(dirty.current.velocity.x < clean.current.velocity.x);
+            dirty_vars
+                .dispatch_key_event(0x10211, Value::Number(0.0))
+                .unwrap();
+            for _ in 0..30 {
+                dirty.advance(1.0 / 60.0, &mut dirty_vars).unwrap();
+            }
+            assert!(dirty.spoilers < 1e-9);
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
 
     #[test]
     #[ignore = "requires original aircraft and AIR data"]

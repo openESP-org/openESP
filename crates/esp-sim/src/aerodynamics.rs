@@ -22,6 +22,7 @@ pub struct Aerodynamics {
     elevator: [f64; 2],
     elevator_trim: f64,
     elevator_trim_limit: f64,
+    spoiler_limit: f64,
     aileron: f64,
     rudder: f64,
     incidence: f64,
@@ -38,6 +39,7 @@ pub struct Controls {
     pub aileron: f64,
     pub rudder: f64,
     pub elevator_trim: f64,
+    pub spoilers: f64,
 }
 
 impl Curve {
@@ -151,6 +153,10 @@ impl Aerodynamics {
             ],
             elevator_trim: elevator_trim_limit * tuning(config, "elevator_trim_effectiveness")?,
             elevator_trim_limit,
+            spoiler_limit: config
+                .number("airplane_geometry", "spoiler_limit")?
+                .unwrap_or(0.0)
+                .to_radians(),
             aileron: (geometry("aileron_up_limit")? + geometry("aileron_down_limit")?).to_radians()
                 * 0.5,
             rudder: geometry("rudder_limit")?.to_radians(),
@@ -173,7 +179,8 @@ impl Aerodynamics {
                     &result.aileron,
                     &result.rudder,
                     &result.elevator_trim,
-                    &result.elevator_trim_limit
+                    &result.elevator_trim_limit,
+                    &result.spoiler_limit
                 ])
                 .all(|angle| *angle >= 0.0),
             "invalid control surface limits"
@@ -218,6 +225,10 @@ impl Aerodynamics {
             "invalid flight controls"
         );
         ensure!(
+            controls.spoilers.is_finite() && (0.0..=1.0).contains(&controls.spoilers),
+            "invalid spoiler position"
+        );
+        ensure!(
             flaps.len() == self.flaps.len() && flaps.iter().all(|n| n.is_finite()),
             "invalid flap deflections"
         );
@@ -243,11 +254,14 @@ impl Aerodynamics {
                 sum + DVec3::from_array(*scalars) * angle
             });
         let c = &self.coefficients;
+        let spoiler = controls.spoilers * self.spoiler_limit;
         let cl = self.lift_scalar * (self.lift.sample(alpha) + c.lift.cl_flaps * flap.x)
+            + c.lift.cl_spoiler * spoiler
             + c.lift.cl_de * elevator
             + c.lift.cl_ih * self.incidence
             + c.pitch.cl_q * q;
-        let cd = self.drag_scalar * (c.drag.cd0 + c.drag.cd_flaps * flap.y)
+        let cd = self.drag_scalar
+            * (c.drag.cd0 + c.drag.cd_flaps * flap.y + c.drag.cd_spoiler * spoiler)
             + self.induced_drag * cl * cl;
         let cy = c.side.cy_beta * beta
             + c.side.cy_delta_rudder * rudder
@@ -262,6 +276,7 @@ impl Aerodynamics {
             + self.pitch.sample(alpha)
             + c.pitch.cm_de * elevator
             + c.pitch.cm_delta_trim * controls.elevator_trim * self.elevator_trim
+            + c.pitch.cm_spoiler * spoiler
             + c.pitch.cm_ih * self.incidence
             + c.pitch.cm_flap * flap.z
             + c.pitch.cm_q * q * self.stability.y;
@@ -290,6 +305,10 @@ impl Aerodynamics {
 
     pub fn elevator_trim_limit(&self) -> f64 {
         self.elevator_trim_limit
+    }
+
+    pub fn has_spoilers(&self) -> bool {
+        self.spoiler_limit > 0.0
     }
 }
 

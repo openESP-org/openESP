@@ -742,6 +742,14 @@ impl ApplicationHandler for App {
                                         eprintln!("trim input: {error}");
                                     }
                                 }
+                                KeyCode::Slash => {
+                                    if let Err(error) = self
+                                        .variables
+                                        .dispatch_event("SPOILERS_TOGGLE", Value::Number(0.0))
+                                    {
+                                        eprintln!("spoiler input: {error}");
+                                    }
+                                }
                                 _ => {}
                             }
                         }
