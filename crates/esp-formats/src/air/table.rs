@@ -34,7 +34,7 @@ pub enum Table<'a> {
 impl<'a> Record<'a> {
     pub fn table(&self) -> Result<Option<Table<'a>>, Error> {
         match self.id {
-            0x1502..=0x1504 | 0x1506 | 0x1507 => {
+            0x511 | 0x512 | 0x1502..=0x1504 | 0x1506 | 0x1507 => {
                 let mut reader = Cursor::new(self.data);
                 let [rows, columns] =
                     <[u32; 2]>::read_le(&mut reader).map_err(|_| self.size_error(8))?;
@@ -67,6 +67,7 @@ impl<'a> Record<'a> {
             | 0x460
             | 0x464
             | 0x473
+            | 0x506..=0x509
             | 0x1505
             | 0x1524 => {
                 let mut reader = Cursor::new(self.data);
@@ -143,7 +144,7 @@ mod tests {
         .concat();
         for id in [
             0x341, 0x342, 0x343, 0x400, 0x401, 0x404, 0x451, 0x456, 0x460, 0x464, 0x473, 0x1505,
-            0x1524,
+            0x1524, 0x506, 0x507, 0x508, 0x509,
         ] {
             let Some(Table::Curve(curve)) = record(id, &data).table().unwrap() else {
                 panic!("missing curve {id:#x}");
@@ -234,7 +235,7 @@ mod tests {
             vec![0xbb; 80],
         ]
         .concat();
-        for id in [0x1502, 0x1503, 0x1504, 0x1506, 0x1507] {
+        for id in [0x511, 0x512, 0x1502, 0x1503, 0x1504, 0x1506, 0x1507] {
             let Some(Table::Surface(surface)) = record(id, &data).table().unwrap() else {
                 panic!("missing surface {id:#x}");
             };
