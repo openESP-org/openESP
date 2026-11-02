@@ -22,6 +22,8 @@ pub struct Loading {
     pub empty_kilograms: f64,
     pub payload_kilograms: f64,
     pub fuel_gallons: f64,
+    pub usable_fuel_gallons: f64,
+    pub tank_gallons: Vec<f64>,
     pub fuel_capacity_gallons: f64,
     pub fuel_pounds_per_gallon: f64,
 }
@@ -92,9 +94,44 @@ impl WeightBalance {
             fuel_fraction == 0.0 || !self.tanks.is_empty(),
             "aircraft has no fuel tanks"
         );
+        let quantities = self
+            .tanks
+            .iter()
+            .map(|tank| (tank.capacity_gallons + tank.unusable_gallons) * fuel_fraction)
+            .collect();
+        self.load_tanks(quantities, payload)
+    }
+
+    pub fn burn(&self, loading: &Loading, gallons: f64, payload: bool) -> Result<Loading> {
         ensure!(
-            fuel_fraction == 0.0 || self.tanks.iter().all(|t| t.unusable_gallons == 0.0),
-            "loading tanks with unusable fuel is not simulated yet"
+            gallons.is_finite() && gallons >= 0.0,
+            "invalid fuel consumption"
+        );
+        let available = loading.usable_fuel_gallons;
+        let fraction = if available > 0.0 {
+            (gallons / available).min(1.0)
+        } else {
+            0.0
+        };
+        let quantities = loading
+            .tank_gallons
+            .iter()
+            .zip(&self.tanks)
+            .map(|(&quantity, tank)| {
+                if fraction == 1.0 {
+                    quantity.min(tank.unusable_gallons)
+                } else {
+                    quantity - (quantity - tank.unusable_gallons).max(0.0) * fraction
+                }
+            })
+            .collect();
+        self.load_tanks(quantities, payload)
+    }
+
+    fn load_tanks(&self, quantities: Vec<f64>, payload: bool) -> Result<Loading> {
+        ensure!(
+            quantities.len() == self.tanks.len(),
+            "invalid tank quantities"
         );
         let stations = || {
             self.stations
@@ -103,11 +140,22 @@ impl WeightBalance {
                 .map(|s| (s.pounds * POUND, self.datum + body(s.position_feet)))
         };
         let payload_kilograms = stations().map(|(mass, _)| mass).sum();
-        let fuel_capacity_gallons = self.tanks.iter().map(|t| t.capacity_gallons).sum::<f64>();
+        let fuel_capacity_gallons = self
+            .tanks
+            .iter()
+            .map(|t| t.capacity_gallons + t.unusable_gallons)
+            .sum::<f64>();
+        let fuel_gallons = quantities.iter().sum();
+        let usable_fuel_gallons = self
+            .tanks
+            .iter()
+            .zip(&quantities)
+            .map(|(tank, &quantity)| (quantity - tank.unusable_gallons).max(0.0))
+            .sum();
         let points = || {
-            stations().chain(self.tanks.iter().map(|t| {
+            stations().chain(self.tanks.iter().zip(&quantities).map(|(t, &quantity)| {
                 (
-                    t.capacity_gallons * fuel_fraction * self.fuel_density * POUND,
+                    quantity * self.fuel_density * POUND,
                     self.datum + body(t.position_feet),
                 )
             }))
@@ -126,7 +174,9 @@ impl WeightBalance {
             cg,
             empty_kilograms: self.empty.kilograms(),
             payload_kilograms,
-            fuel_gallons: fuel_capacity_gallons * fuel_fraction,
+            fuel_gallons,
+            usable_fuel_gallons,
+            tank_gallons: quantities,
             fuel_capacity_gallons,
             fuel_pounds_per_gallon: self.fuel_density,
         })
@@ -169,9 +219,23 @@ mod tests {
         assert!(weights.load(1.0, true).unwrap().mass.inertia.x_axis.z < 0.0);
         assert!(weights.load(-0.1, false).is_err());
         assert!(weights.load(f64::NAN, false).is_err());
-        let mut weights = weights;
-        weights.tanks[0].unusable_gallons = 1.0;
-        assert!(weights.load(0.0, false).is_ok());
-        assert!(weights.load(1.0, false).is_err());
+    }
+
+    #[test]
+    fn fuel_burn_preserves_unusable_quantities_and_their_mass() {
+        let mut weights = WeightBalance::from_config(&config()).unwrap();
+        weights.tanks[0].unusable_gallons = 2.0;
+        weights.tanks[1].unusable_gallons = 1.0;
+        let full = weights.load(1.0, false).unwrap();
+        assert_eq!(full.fuel_gallons, 23.0);
+        assert_eq!(full.usable_fuel_gallons, 20.0);
+        let half = weights.burn(&full, 10.0, false).unwrap();
+        assert_eq!(half.tank_gallons, [7.0, 6.0]);
+        let exhausted = weights.burn(&half, 100.0, false).unwrap();
+        assert_eq!(exhausted.tank_gallons, [2.0, 1.0]);
+        assert_eq!(exhausted.usable_fuel_gallons, 0.0);
+        assert_eq!(exhausted.fuel_gallons, 3.0);
+        assert!(exhausted.cg.y < 0.0);
+        assert!((exhausted.mass.kilograms() - (1000.0 + 18.0) * POUND).abs() < 1e-10);
     }
 }

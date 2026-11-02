@@ -179,7 +179,7 @@ impl Flight {
 
     pub fn start_running(&mut self, data: &FlightData) -> Result<()> {
         ensure!(
-            self.loading.fuel_gallons > 0.0,
+            self.loading.usable_fuel_gallons > 0.0,
             "cannot start running engines without fuel"
         );
         let mut engines = Propulsion::from_data(data)?;
@@ -536,7 +536,7 @@ impl Flight {
                 &air,
                 velocity,
                 &self.commands,
-                self.loading.fuel_gallons > 0.0,
+                self.loading.usable_fuel_gallons > 0.0,
             )?;
             let mut rate = 0.0;
             for (index, _) in engines.indices().enumerate() {
@@ -545,7 +545,7 @@ impl Flight {
                     .fuel_kilograms_per_second();
             }
             let available =
-                self.loading.fuel_gallons * self.loading.fuel_pounds_per_gallon * 0.45359237;
+                self.loading.usable_fuel_gallons * self.loading.fuel_pounds_per_gallon * 0.45359237;
             let demand = rate * dt;
             fuel_used = demand.min(available);
             if demand > 0.0 {
@@ -636,15 +636,16 @@ impl Flight {
         self.previous = self.current;
         self.previous_cg = self.loading.cg;
         if fuel_used > 0.0 {
-            let remaining = (self.loading.fuel_gallons
-                - fuel_used / (self.loading.fuel_pounds_per_gallon * 0.45359237))
-                .max(0.0);
-            let loading = self
-                .weights
-                .load(remaining / self.loading.fuel_capacity_gallons, self.payload)?;
+            let fuel_mass_per_gallon = self.loading.fuel_pounds_per_gallon * 0.45359237;
+            let consumed = if fuel_used >= self.loading.usable_fuel_gallons * fuel_mass_per_gallon {
+                self.loading.usable_fuel_gallons
+            } else {
+                fuel_used / fuel_mass_per_gallon
+            };
+            let loading = self.weights.burn(&self.loading, consumed, self.payload)?;
             next.rebase(loading.cg - self.loading.cg)?;
             self.loading = loading;
-            if remaining == 0.0
+            if self.loading.usable_fuel_gallons == 0.0
                 && let Some(engines) = &mut self.engines
             {
                 engines.advance(
@@ -759,12 +760,13 @@ impl Flight {
                 );
             }
         }
-        let fraction = if self.loading.fuel_capacity_gallons > 0.0 {
-            self.loading.fuel_gallons / self.loading.fuel_capacity_gallons
-        } else {
-            0.0
-        };
-        for tank in self.weights.tanks() {
+        for (tank, &quantity) in self.weights.tanks().iter().zip(&self.loading.tank_gallons) {
+            let capacity = tank.capacity_gallons + tank.unusable_gallons;
+            let fraction = if capacity > 0.0 {
+                quantity / capacity
+            } else {
+                0.0
+            };
             let label = match tank.name {
                 "Center1" => "CENTER",
                 "Center2" => "CENTER2",
@@ -779,16 +781,8 @@ impl Flight {
                 "External2" => "EXTERNAL2",
                 _ => continue,
             };
-            variables.set_number(
-                &format!("FUEL TANK {label} CAPACITY"),
-                "gallons",
-                tank.capacity_gallons,
-            );
-            variables.set_number(
-                &format!("FUEL TANK {label} QUANTITY"),
-                "gallons",
-                tank.capacity_gallons * fraction,
-            );
+            variables.set_number(&format!("FUEL TANK {label} CAPACITY"), "gallons", capacity);
+            variables.set_number(&format!("FUEL TANK {label} QUANTITY"), "gallons", quantity);
             variables.set_number(
                 &format!("FUEL TANK {label} LEVEL"),
                 "percent over 100",
@@ -2243,6 +2237,99 @@ mod tests {
                 glide.current.position.x,
                 consumed,
                 n1
+            );
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+
+    #[test]
+    #[ignore = "requires original jet AIR records and OPENESP_AIRCRAFT_PATHS"]
+    fn unusable_fuel_remains_after_engine_exhaustion() {
+        let mut count = 0;
+        for path in content::aircraft_paths() {
+            let mut data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let mut section = false;
+            let source = source
+                .lines()
+                .map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') {
+                        section = trimmed.eq_ignore_ascii_case("[fuel]");
+                    }
+                    if section
+                        && let Some((name, value)) = line.split_once('=')
+                        && [
+                            "center1",
+                            "center2",
+                            "center3",
+                            "leftmain",
+                            "leftaux",
+                            "lefttip",
+                            "rightmain",
+                            "rightaux",
+                            "righttip",
+                            "external1",
+                            "external2",
+                        ]
+                        .iter()
+                        .any(|tank| name.trim().eq_ignore_ascii_case(tank))
+                    {
+                        let value = value.split("//").next().unwrap();
+                        if let Some((fields, _)) = value.rsplit_once(',') {
+                            return format!("{name}={fields},1");
+                        }
+                    }
+                    line.to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let mut flight = Flight::new(&data, 200.0, 10000.0, 1.0, false).unwrap();
+            flight.start_running(&data).unwrap();
+            flight.loading = flight
+                .weights
+                .burn(
+                    &flight.loading,
+                    flight.loading.usable_fuel_gallons - 1e-7,
+                    false,
+                )
+                .unwrap();
+            let mut variables = controls(&data);
+            flight.configure_engines(&mut variables).unwrap();
+            for _ in 0..120 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            assert_eq!(flight.loading.usable_fuel_gallons, 0.0);
+            assert!(flight.loading.fuel_gallons > 0.0);
+            assert_eq!(
+                variables
+                    .read(&Reference::new(
+                        'A',
+                        "GENERAL ENG COMBUSTION:1",
+                        Some("bool")
+                    ))
+                    .unwrap()
+                    .number()
+                    .unwrap(),
+                0.0
+            );
+            assert_eq!(
+                variables
+                    .read(&Reference::new('A', "FUEL TOTAL QUANTITY", Some("gallons")))
+                    .unwrap()
+                    .number()
+                    .unwrap(),
+                flight.loading.fuel_gallons
             );
             count += 1;
         }
