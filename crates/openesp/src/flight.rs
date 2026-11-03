@@ -40,6 +40,7 @@ pub struct Flight {
     spoiler_auto_deployed: bool,
     gear: LandingGear,
     hydraulics: Option<Hydraulics>,
+    hydraulic_boost: [f64; 3],
     on_ground: bool,
 }
 
@@ -69,6 +70,19 @@ impl Flight {
         );
         let model = Aerodynamics::from_data(data)?;
         let hydraulics = Hydraulics::from_config(&data.configuration)?;
+        let boost = |key| -> Result<f64> {
+            let value = data
+                .configuration
+                .number("airplane_geometry", key)?
+                .unwrap_or(0.0);
+            ensure!((0.0..=1.0).contains(&value), "invalid {key}");
+            Ok(value)
+        };
+        let hydraulic_boost = [
+            boost("elevator_hydraulic_boost_percent")?,
+            boost("aileron_hydraulic_boost_percent")?,
+            boost("rudder_hydraulic_boost_percent")?,
+        ];
         let spoiler_extension_time = data
             .configuration
             .number("airplane_geometry", "spoiler_extension_time")?
@@ -170,6 +184,7 @@ impl Flight {
             spoiler_auto_deployed: false,
             gear,
             hydraulics,
+            hydraulic_boost,
             on_ground,
         })
     }
@@ -412,6 +427,20 @@ impl Flight {
             }
         }
         let flap_handle = variables.flap_handle_fraction();
+        let elevator_input = variables.control_input("ELEVATOR DEFLECTION PCT")?;
+        let aileron_input = variables.control_input("AILERON LEFT DEFLECTION PCT")?;
+        let right_input = if variables.has_control_input("AILERON RIGHT DEFLECTION PCT") {
+            variables.control_input("AILERON RIGHT DEFLECTION PCT")?
+        } else {
+            -aileron_input
+        };
+        let rudder_input = variables.control_input("RUDDER DEFLECTION PCT")?;
+        ensure!(
+            [elevator_input, aileron_input, right_input, rudder_input]
+                .iter()
+                .all(|value| value.is_finite() && (-1.0..=1.0).contains(value)),
+            "invalid flight control input"
+        );
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -441,7 +470,11 @@ impl Flight {
             (0.0..=1.0).contains(&spoiler_handle),
             "invalid spoiler handle"
         );
-        let aileron = control("AILERON LEFT DEFLECTION PCT")?;
+        let pressure = hydraulic_fraction.unwrap_or(1.0);
+        let authority = self
+            .hydraulic_boost
+            .map(|boost| 1.0 - boost * (1.0 - pressure));
+        let aileron = aileron_input * authority[1];
         let targets = self
             .model
             .spoiler_targets(spoiler_handle, aileron, flap_handle);
@@ -457,9 +490,9 @@ impl Flight {
         }
         let spoilers = (self.spoiler_surfaces[0] + self.spoiler_surfaces[1]) * 0.5;
         let controls = Controls {
-            elevator: control("ELEVATOR DEFLECTION PCT")?,
+            elevator: elevator_input * authority[0],
             aileron,
-            rudder: control("RUDDER DEFLECTION PCT")?,
+            rudder: rudder_input * authority[2],
             elevator_trim: control("ELEVATOR TRIM PCT")?,
             aileron_trim: control("AILERON TRIM PCT")?,
             rudder_trim: control("RUDDER TRIM PCT")?,
@@ -469,13 +502,19 @@ impl Flight {
             ground_height: None,
         };
         let ground_controls = GroundControls {
-            steering: controls.rudder,
+            steering: rudder_input,
             brakes: [
                 control("BRAKE LEFT POSITION")?,
                 control("BRAKE RIGHT POSITION")?,
             ],
             parking_brake: control("BRAKE PARKING POSITION")? != 0.0,
         };
+        variables.set_control_surfaces([
+            controls.elevator,
+            aileron,
+            right_input * authority[1],
+            controls.rudder,
+        ]);
         variables.set_number(
             "ELEVATOR TRIM POSITION",
             "radians",
@@ -1376,6 +1415,103 @@ mod tests {
             verified = true;
         }
         assert!(verified);
+    }
+
+    #[test]
+    #[ignore = "requires original hydraulic aircraft"]
+    fn hydraulic_boost_limits_surfaces_without_losing_pilot_input() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let mut data = FlightData::load(&path, 0).unwrap();
+            if esp_formats::cfg::contact::ContactPoints::from_config(&data.configuration)
+                .unwrap()
+                .gear_system_type
+                != Some(1)
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let source = source
+                .lines()
+                .flat_map(|line| {
+                    if line.trim().eq_ignore_ascii_case("[airplane_geometry]") {
+                        vec![
+                            line.to_owned(),
+                            "elevator_hydraulic_boost_percent=0.8".to_owned(),
+                            "aileron_hydraulic_boost_percent=0.5".to_owned(),
+                            "rudder_hydraulic_boost_percent=1.0".to_owned(),
+                        ]
+                    } else {
+                        vec![line.to_owned()]
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let mut flight = Flight::new(&data, 160.0, 5000.0, 0.5, false).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            for (name, value) in [
+                ("ELEVATOR DEFLECTION PCT", 50.0),
+                ("AILERON LEFT DEFLECTION PCT", 40.0),
+                ("AILERON RIGHT DEFLECTION PCT", -40.0),
+                ("RUDDER DEFLECTION PCT", 30.0),
+            ] {
+                vars.set_number(name, "percent", value);
+            }
+            let mut powered = Flight::new(&data, 160.0, 5000.0, 0.5, false).unwrap();
+            powered.start_running(&data).unwrap();
+            let mut powered_vars = controls(&data);
+            powered.configure_engines(&mut powered_vars).unwrap();
+            for (name, value) in [
+                ("ELEVATOR DEFLECTION PCT", 50.0),
+                ("AILERON LEFT DEFLECTION PCT", 40.0),
+                ("AILERON RIGHT DEFLECTION PCT", -40.0),
+                ("RUDDER DEFLECTION PCT", 30.0),
+            ] {
+                powered_vars.set_number(name, "percent", value);
+            }
+            vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                .unwrap();
+            powered.advance(1.0 / 60.0, &mut powered_vars).unwrap();
+            flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            assert!(
+                (powered.current.angular_velocity - flight.current.angular_velocity).length()
+                    > 1e-5
+            );
+            for _ in 0..60 {
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            let read = |vars: &mut Variables, name| {
+                vars.read(&Reference::new('A', name, Some("percent")))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            for (name, expected) in [
+                ("ELEVATOR DEFLECTION PCT", 10.0),
+                ("AILERON LEFT DEFLECTION PCT", 20.0),
+                ("AILERON RIGHT DEFLECTION PCT", -20.0),
+                ("RUDDER DEFLECTION PCT", 0.0),
+            ] {
+                assert!((read(&mut vars, name) - expected).abs() < 1e-9, "{name}");
+            }
+            assert_eq!(vars.control_input("ELEVATOR DEFLECTION PCT").unwrap(), 0.5);
+            vars.dispatch_key_event(0x10305, Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            for (name, expected) in [
+                ("ELEVATOR DEFLECTION PCT", 50.0),
+                ("AILERON LEFT DEFLECTION PCT", 40.0),
+                ("AILERON RIGHT DEFLECTION PCT", -40.0),
+                ("RUDDER DEFLECTION PCT", 30.0),
+            ] {
+                assert!((read(&mut vars, name) - expected).abs() < 1e-9, "{name}");
+            }
+            verified += 1;
+        }
+        assert!(verified > 0);
     }
 
     #[test]

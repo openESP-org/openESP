@@ -9,6 +9,7 @@ pub struct Variables {
     engines: Vec<u32>,
     electrical: Option<crate::electrical::Electrical>,
     throttle_lower_limit: f64,
+    control_surfaces: Option<[f64; 4]>,
 }
 
 struct Variable {
@@ -92,6 +93,31 @@ impl Variables {
         for index in 1..=count {
             self.set_number(&format!("FUEL TANK SELECTOR:{index}"), "enum", 1.0);
         }
+    }
+
+    pub fn control_input(&self, name: &str) -> Result<f64, Error> {
+        let variable = self
+            .values
+            .get(&('A', name.to_owned()))
+            .ok_or_else(|| Error::Variable(format!("A:{name}")))?;
+        if variable.unit.as_deref() == Some("percent over 100") {
+            return variable.value.number();
+        }
+        super::units::convert(
+            &variable.value,
+            variable.unit.as_deref(),
+            Some("percent over 100"),
+        )
+        .ok_or_else(|| Error::Variable(format!("unsupported control unit for {name}")))?
+        .number()
+    }
+
+    pub fn has_control_input(&self, name: &str) -> bool {
+        self.values.contains_key(&('A', name.to_owned()))
+    }
+
+    pub fn set_control_surfaces(&mut self, surfaces: [f64; 4]) {
+        self.control_surfaces = Some(surfaces);
     }
 
     pub fn flap_angles(&self) -> impl Iterator<Item = f64> + '_ {
@@ -902,6 +928,34 @@ impl Variables {
 
 impl Host for Variables {
     fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+        if reference.category == 'A'
+            && let Some(surfaces) = self.control_surfaces
+        {
+            let index = match reference.name.as_str() {
+                "ELEVATOR DEFLECTION PCT" => Some(0),
+                "AILERON LEFT DEFLECTION PCT" => Some(1),
+                "AILERON RIGHT DEFLECTION PCT" => Some(2),
+                "RUDDER DEFLECTION PCT" => Some(3),
+                _ => None,
+            };
+            if let Some(index) = index {
+                let value = Value::Number(surfaces[index]);
+                if reference.unit.as_deref() == Some("percent over 100") {
+                    return Ok(value);
+                }
+                return super::units::convert(
+                    &value,
+                    Some("percent over 100"),
+                    reference.unit.as_deref(),
+                )
+                .ok_or_else(|| {
+                    Error::Variable(format!(
+                        "unsupported control surface unit for {}",
+                        reference.name
+                    ))
+                });
+            }
+        }
         let local = reference.category == 'L' || reference.category == 'G';
         let Some(variable) = self.values.get(&(
             reference.category,
