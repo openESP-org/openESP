@@ -10,6 +10,7 @@ pub struct Variables {
     electrical: Option<crate::electrical::Electrical>,
     throttle_lower_limit: f64,
     control_surfaces: Option<[f64; 4]>,
+    aileron_step: f64,
 }
 
 struct Variable {
@@ -39,6 +40,27 @@ fn variable_name(category: char, name: &str) -> String {
 }
 
 impl Variables {
+    pub fn configure_aileron_travel(&mut self, up_limit_degrees: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            up_limit_degrees.is_finite() && up_limit_degrees >= 0.0,
+            "invalid aileron travel"
+        );
+        self.aileron_step = if up_limit_degrees > 0.0 {
+            (1.0 / up_limit_degrees).min(1.0)
+        } else {
+            0.0
+        };
+        Ok(())
+    }
+
+    fn aileron_step_or_default(&self) -> f64 {
+        if self.aileron_step > 0.0 {
+            self.aileron_step
+        } else {
+            0.05
+        }
+    }
+
     pub fn configure_electrical(
         &mut self,
         definition: &esp_formats::cfg::electrical::Electrical,
@@ -282,8 +304,20 @@ impl Variables {
             0x1021f => "GEAR_UP",
             0x10220 => "GEAR_DOWN",
             0x10047 => "ELEV_TRIM_DN",
+            0x10048 => "ELEV_DOWN",
+            0x1004b => "AILERONS_LEFT",
             0x1004c => "CENTER_AILER_RUDDER",
+            0x1004d => "AILERONS_RIGHT",
             0x1004f => "ELEV_TRIM_UP",
+            0x10050 => "ELEV_UP",
+            0x10093 => "ELEVATOR_DOWN",
+            0x10094 => "ELEVATOR_UP",
+            0x10095 => "AILERON_LEFT",
+            0x10096 => "AILERON_CENTER",
+            0x10097 => "AILERON_RIGHT",
+            0x10098 => "RUDDER_LEFT",
+            0x10099 => "RUDDER_CENTER",
+            0x1009a => "RUDDER_RIGHT",
             0x1009e => "ELEVATOR_SET",
             0x1009f => "AILERON_SET",
             0x100a0 => "RUDDER_SET",
@@ -387,6 +421,45 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        let step = match name {
+            "ELEV_DOWN" | "ELEVATOR_DOWN" => {
+                Some(("ELEVATOR DEFLECTION PCT", "ELEVATOR_SET", -0.05))
+            }
+            "ELEV_UP" | "ELEVATOR_UP" => Some(("ELEVATOR DEFLECTION PCT", "ELEVATOR_SET", 0.05)),
+            "AILERONS_LEFT" | "AILERON_LEFT" => Some((
+                "AILERON LEFT DEFLECTION PCT",
+                "AILERON_SET",
+                -self.aileron_step_or_default(),
+            )),
+            "AILERONS_RIGHT" | "AILERON_RIGHT" => Some((
+                "AILERON LEFT DEFLECTION PCT",
+                "AILERON_SET",
+                self.aileron_step_or_default(),
+            )),
+            "RUDDER_LEFT" => Some(("RUDDER DEFLECTION PCT", "RUDDER_SET", -0.05)),
+            "RUDDER_RIGHT" => Some(("RUDDER DEFLECTION PCT", "RUDDER_SET", 0.05)),
+            _ => None,
+        };
+        if let Some((input, event, increment)) = step {
+            if !value.is_finite() {
+                return Err(Error::Number);
+            }
+            let current = if self.has_control_input(input) {
+                self.control_input(input)?
+            } else {
+                0.0
+            };
+            return self.dispatch_event(event, Value::Number((current + increment) * 16383.0));
+        }
+        if name == "RUDDER_CENTER" {
+            return self.dispatch_event(
+                "RUDDER_SET",
+                Value::Number(if value.is_finite() { 0.0 } else { value }),
+            );
+        }
+        if name == "AILERON_CENTER" {
+            return self.dispatch_event("CENTER_AILER_RUDDER", Value::Number(value));
+        }
         let controls: &[(&str, f64)] = match name {
             "ELEVATOR_SET" | "AXIS_ELEVATOR_SET" => {
                 &[("YOKE Y POSITION", 1.0), ("ELEVATOR DEFLECTION PCT", 1.0)]
@@ -1070,6 +1143,48 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_controls_use_pilot_input_and_aircraft_travel() {
+        let mut vars = Variables::default();
+        vars.configure_aileron_travel(25.0).unwrap();
+        vars.dispatch_event("AILERON_SET", Value::Number(8191.5))
+            .unwrap();
+        vars.dispatch_event("RUDDER_SET", Value::Number(-8191.5))
+            .unwrap();
+        vars.dispatch_event("ELEVATOR_SET", Value::Number(8191.5))
+            .unwrap();
+        vars.set_control_surfaces([0.1, 0.1, -0.1, -0.1]);
+        vars.dispatch_key_event(0x1004b, Value::Number(0.0))
+            .unwrap();
+        vars.dispatch_key_event(0x10050, Value::Number(0.0))
+            .unwrap();
+        vars.dispatch_key_event(0x1009a, Value::Number(0.0))
+            .unwrap();
+        assert!((vars.control_input("AILERON LEFT DEFLECTION PCT").unwrap() - 0.46).abs() < 1e-12);
+        assert!((vars.control_input("ELEVATOR DEFLECTION PCT").unwrap() - 0.55).abs() < 1e-12);
+        assert!((vars.control_input("RUDDER DEFLECTION PCT").unwrap() + 0.45).abs() < 1e-12);
+        vars.dispatch_key_event(0x10099, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(vars.control_input("RUDDER DEFLECTION PCT").unwrap(), 0.0);
+        assert!((vars.control_input("AILERON LEFT DEFLECTION PCT").unwrap() - 0.46).abs() < 1e-12);
+        for _ in 0..100 {
+            vars.dispatch_event("ELEV_UP", Value::Number(0.0)).unwrap();
+        }
+        assert_eq!(vars.control_input("ELEVATOR DEFLECTION PCT").unwrap(), 1.0);
+        assert!(
+            vars.dispatch_event("ELEV_DOWN", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(vars.control_input("ELEVATOR DEFLECTION PCT").unwrap(), 1.0);
+        vars.dispatch_event("AILERON_CENTER", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            vars.control_input("AILERON LEFT DEFLECTION PCT").unwrap(),
+            0.0
+        );
+        assert_eq!(vars.control_input("ELEVATOR DEFLECTION PCT").unwrap(), 1.0);
+    }
 
     #[test]
     fn primary_control_events_update_pilot_inputs() {

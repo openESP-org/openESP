@@ -41,6 +41,7 @@ pub struct Flight {
     gear: LandingGear,
     hydraulics: Option<Hydraulics>,
     hydraulic_boost: [f64; 3],
+    aileron_up_limit: f64,
     on_ground: bool,
 }
 
@@ -69,6 +70,10 @@ impl Flight {
             "invalid flight starting state"
         );
         let model = Aerodynamics::from_data(data)?;
+        let aileron_up_limit = data
+            .configuration
+            .number("airplane_geometry", "aileron_up_limit")?
+            .unwrap_or(20.0);
         let hydraulics = Hydraulics::from_config(&data.configuration)?;
         let boost = |key| -> Result<f64> {
             let value = data
@@ -185,6 +190,7 @@ impl Flight {
             gear,
             hydraulics,
             hydraulic_boost,
+            aileron_up_limit,
             on_ground,
         })
     }
@@ -212,6 +218,10 @@ impl Flight {
         ] {
             variables.set_number(name, "percent over 100", 0.0);
         }
+    }
+
+    pub fn configure_controls(&self, variables: &mut Variables) -> Result<()> {
+        variables.configure_aileron_travel(self.aileron_up_limit)
     }
 
     pub fn start_running(&mut self, data: &FlightData) -> Result<()> {

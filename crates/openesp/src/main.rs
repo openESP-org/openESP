@@ -391,6 +391,7 @@ impl App {
                     }
                     if let Some(flight) = &self.flight {
                         Flight::configure_ground(&mut self.variables);
+                        flight.configure_controls(&mut self.variables)?;
                         Flight::publish(&flight.current, &mut self.variables)?;
                         flight.publish_loading(&mut self.variables);
                         flight.configure_engines(&mut self.variables)?;
