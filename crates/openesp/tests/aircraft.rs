@@ -270,7 +270,7 @@ fn renders_flight_with_reverse_thrust() {
                 "50",
                 "--event",
             ])
-            .arg(format!("THROTTLE_SET={}", lower * 16383.0))
+            .arg("AXIS_THROTTLE_REVERSER_SET=16383")
             .args(["--frames", "120", "--screenshot"])
             .arg(&screenshot);
         capture_command(command, &screenshot);

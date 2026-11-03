@@ -2734,7 +2734,7 @@ mod tests {
                 continue;
             }
             reverse_vars
-                .dispatch_event("THROTTLE_SET", Value::Number(lower / 100.0 * 16383.0))
+                .dispatch_event("AXIS_THROTTLE_REVERSER_SET", Value::Number(16383.0))
                 .unwrap();
             for _ in 0..120 {
                 reverse.advance(1.0 / 60.0, &mut reverse_vars).unwrap();

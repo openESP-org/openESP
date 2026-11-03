@@ -191,6 +191,14 @@ impl Variables {
     }
 
     pub fn dispatch_key_event(&mut self, id: u32, value: Value) -> Result<(), Error> {
+        if (0x109ce..=0x109d2).contains(&id) {
+            let index = id - 0x109ce;
+            return self.throttle_event(
+                "AXIS_THROTTLE_REVERSER_SET",
+                value.number()?,
+                (index != 0).then_some(index),
+            );
+        }
         if (0x103bd..=0x103c1).contains(&id) {
             let offset = id - 0x103bd;
             let name = if offset == 0 {
@@ -474,6 +482,15 @@ impl Variables {
             }
             "THROTTLE_FULL" | "THROTTLE_CUT" | "THROTTLE_INCR" | "THROTTLE_DECR"
             | "THROTTLE_SET" | "AXIS_THROTTLE_SET" => self.throttle_event(name, value, None),
+            "AXIS_THROTTLE_REVERSER_SET" => self.throttle_event(name, value, None),
+            "AXIS_THROTTLE_REVERSER1_SET"
+            | "AXIS_THROTTLE_REVERSER2_SET"
+            | "AXIS_THROTTLE_REVERSER3_SET"
+            | "AXIS_THROTTLE_REVERSER4_SET" => self.throttle_event(
+                "AXIS_THROTTLE_REVERSER_SET",
+                value,
+                name.as_bytes().get(22).map(|index| u32::from(index - b'0')),
+            ),
             "THROTTLE1_SET" => self.throttle_event("THROTTLE_SET", value, Some(1)),
             "THROTTLE2_SET" => self.throttle_event("THROTTLE_SET", value, Some(2)),
             "THROTTLE3_SET" => self.throttle_event("THROTTLE_SET", value, Some(3)),
@@ -818,6 +835,11 @@ impl Variables {
         if self.engines.is_empty() || engine.is_some_and(|i| !self.engines.contains(&i)) {
             return Err(Error::Unsupported("engine controls are unavailable".into()));
         }
+        if name == "AXIS_THROTTLE_REVERSER_SET" && self.throttle_lower_limit == 0.0 {
+            return Err(Error::Unsupported(
+                "thrust reversers are unavailable".into(),
+            ));
+        }
         for index in self
             .engines
             .clone()
@@ -832,6 +854,11 @@ impl Variables {
                 "THROTTLE_INCR" => self.read(&reference)?.number()? + 1.0,
                 "THROTTLE_DECR" => self.read(&reference)?.number()? - 1.0,
                 "AXIS_THROTTLE_SET" => (value + 16383.0) / 32766.0 * 100.0,
+                "AXIS_THROTTLE_REVERSER_SET" => {
+                    (value.clamp(-16383.0, 16383.0) + 16383.0) / 32766.0
+                        * self.throttle_lower_limit
+                        * 100.0
+                }
                 _ => value / 16383.0 * 100.0,
             };
             self.set_number(
@@ -1228,6 +1255,44 @@ mod tests {
             .dispatch_event("THROTTLE_CUT", Value::Number(0.0))
             .unwrap();
         assert_eq!(variables.read(&throttle(1)).unwrap().number().unwrap(), 0.0);
+        variables
+            .dispatch_event("AXIS_THROTTLE_REVERSER1_SET", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            variables.read(&throttle(1)).unwrap().number().unwrap(),
+            -12.5
+        );
+        assert_eq!(variables.read(&throttle(2)).unwrap().number().unwrap(), 0.0);
+        variables
+            .dispatch_key_event(0x109d0, Value::Number(16383.0))
+            .unwrap();
+        assert_eq!(
+            variables.read(&throttle(2)).unwrap().number().unwrap(),
+            -25.0
+        );
+        variables
+            .dispatch_key_event(0x109ce, Value::Number(-20000.0))
+            .unwrap();
+        assert_eq!(variables.read(&throttle(1)).unwrap().number().unwrap(), 0.0);
+        assert_eq!(variables.read(&throttle(2)).unwrap().number().unwrap(), 0.0);
+        assert!(
+            variables
+                .dispatch_event("AXIS_THROTTLE_REVERSER3_SET", Value::Number(0.0))
+                .is_err()
+        );
+        variables.configure_throttle_limit(0.0).unwrap();
+        variables
+            .dispatch_event("THROTTLE_FULL", Value::Number(0.0))
+            .unwrap();
+        assert!(
+            variables
+                .dispatch_event("AXIS_THROTTLE_REVERSER_SET", Value::Number(16383.0))
+                .is_err()
+        );
+        assert_eq!(
+            variables.read(&throttle(1)).unwrap().number().unwrap(),
+            100.0
+        );
         assert!(variables.configure_throttle_limit(-1.1).is_err());
     }
     use esp_script::Program;
