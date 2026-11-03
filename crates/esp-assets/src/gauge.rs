@@ -307,11 +307,11 @@ impl PanelImage {
             let mut dirty = false;
             for layer in &mut gauge.layers {
                 for motion in &mut layer.motion {
-                    motion.advance(&self.conditions, dt);
+                    motion.advance(&self.conditions, dt, host);
                 }
                 let transform = rotation::transform(&layer.motion, &self.conditions);
                 for mask in &mut layer.masks {
-                    dirty |= mask.update(&self.conditions, dt);
+                    dirty |= mask.update(&self.conditions, dt, host);
                 }
                 let visible = transform.is_some()
                     && layer.masks.iter().all(Mask::ready)

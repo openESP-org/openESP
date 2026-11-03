@@ -57,9 +57,14 @@ impl Mask {
         }
     }
 
-    pub fn update(&mut self, conditions: &[Condition], dt: f64) -> bool {
+    pub fn update(
+        &mut self,
+        conditions: &[Condition],
+        dt: f64,
+        host: &mut impl esp_script::Host,
+    ) -> bool {
         for motion in &mut self.motion {
-            motion.advance(conditions, dt);
+            motion.advance(conditions, dt, host);
         }
         let next = rotation::transform(&self.motion, conditions);
         let changed = self.transform != next;

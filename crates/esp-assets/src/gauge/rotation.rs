@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use esp_script::Program;
+use esp_script::{Host, Program, Reference};
 use glam::{DAffine2, DMat2, DVec2};
 use image::{Rgba, RgbaImage, imageops::overlay};
 use imageproc::geometric_transformations::{Border, Interpolation, Projection, warp_into};
@@ -23,6 +23,7 @@ struct Shift {
     table: Vec<(f64, DVec2)>,
     delay: Option<Delay>,
     delayed_offset: Option<DVec2>,
+    failure: FailureState<DVec2>,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,104 @@ struct Rotation {
     points_to: f64,
     table: Vec<(f64, f64)>,
     delay: Option<Delay>,
+    failure: FailureState<f64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailureAction {
+    Freeze,
+    Zero,
+    NoDraw,
+}
+
+#[derive(Clone)]
+struct FailureRule {
+    variable: &'static str,
+    inverted: bool,
+    action: FailureAction,
+}
+
+#[derive(Clone)]
+struct FailureState<T> {
+    rules: Vec<FailureRule>,
+    action: Option<FailureAction>,
+    last: Option<T>,
+}
+
+impl<T> FailureState<T> {
+    fn parse(node: Node<'_, '_>) -> Result<Self> {
+        let mut rules = Vec::new();
+        for failure in node
+            .children()
+            .filter(|c| c.has_tag_name("FailureTable"))
+            .flat_map(|t| t.children().filter(|c| c.has_tag_name("Failure")))
+        {
+            let key = child_text(failure, "Fail_Key")
+                .unwrap_or("NONE")
+                .trim()
+                .to_ascii_uppercase();
+            if key.is_empty() || key == "NONE" {
+                continue;
+            }
+            let (variable, inverted) = match key.as_str() {
+                "SYSTEM_ELECTRICAL_PANELS" => ("CIRCUIT GENERAL PANEL ON", true),
+                "SYSTEM_PITOT_STATIC" => ("PARTIAL PANEL PITOT", false),
+                "SYSTEM_VACUUM" => ("PARTIAL PANEL VACUUM", false),
+                "SYSTEM_ENGINE" => ("PARTIAL PANEL ENGINE", false),
+                "GAUGE_ADF" => ("PARTIAL PANEL ADF", false),
+                "GAUGE_AIRSPEED" => ("PARTIAL PANEL AIRSPEED", false),
+                "GAUGE_ALTIMETER" => ("PARTIAL PANEL ALTIMETER", false),
+                "GAUGE_COMMUNICATIONS" => ("PARTIAL PANEL COMM", false),
+                "GAUGE_FUEL_INDICATORS" => ("PARTIAL PANEL FUEL INDICATOR", false),
+                "GAUGE_GYRO_HEADING" => ("PARTIAL PANEL HEADING", false),
+                "GAUGE_MAGNETIC_COMPASS" => ("PARTIAL PANEL COMPASS", false),
+                "GAUGE_NAVIGATION_VOR1" | "GAUGE_NAVIGATION_VOR2" => ("PARTIAL PANEL NAV", false),
+                "GAUGE_TRANSPONDER" => ("PARTIAL PANEL TRANSPONDER", false),
+                "GAUGE_TURN_COORDINATOR" => ("PARTIAL PANEL TURN COORDINATOR", false),
+                "GAUGE_VERTICAL_SPEED" => ("PARTIAL PANEL VERTICAL VELOCITY", false),
+                "GAUGE_ELECTRICAL_PANEL" => ("PARTIAL PANEL ELECTRICAL", false),
+                "GAUGE_ELECTRICAL_AVIONICS" => ("PARTIAL PANEL AVIONICS", false),
+                _ => anyhow::bail!("unsupported gauge motion failure {key}"),
+            };
+            let action = match child_text(failure, "Fail_Action")
+                .unwrap_or("None")
+                .trim()
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "NONE" | "" => continue,
+                "FREEZE" => FailureAction::Freeze,
+                "ZERO" => FailureAction::Zero,
+                "NODRAW" => FailureAction::NoDraw,
+                action => anyhow::bail!("unsupported gauge failure action {action}"),
+            };
+            rules.push(FailureRule {
+                variable,
+                inverted,
+                action,
+            });
+        }
+        Ok(Self {
+            rules,
+            action: None,
+            last: None,
+        })
+    }
+
+    fn update(&mut self, host: &mut impl Host) {
+        self.action = self.rules.iter().find_map(|rule| {
+            let value = host
+                .read(&Reference::new(
+                    'A',
+                    rule.variable,
+                    Some(if rule.inverted { "bool" } else { "enum" }),
+                ))
+                .ok()?
+                .number()
+                .ok()?;
+            (value.is_finite() && ((value == 0.0) == rule.inverted)).then_some(rule.action)
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -130,12 +229,12 @@ impl Motion {
         }
     }
 
-    pub fn advance(&mut self, conditions: &[Condition], dt: f64) {
+    pub fn advance(&mut self, conditions: &[Condition], dt: f64, host: &mut impl Host) {
         if let Some(rotation) = &mut self.rotation {
-            rotation.advance(conditions, dt);
+            rotation.advance(conditions, dt, host);
         }
         if let Some(shift) = &mut self.shift {
-            shift.advance(conditions, dt);
+            shift.advance(conditions, dt, host);
         }
     }
 }
@@ -146,21 +245,6 @@ pub(super) fn axis(node: Node<'_, '_>) -> Result<DVec2> {
         .map(point)
         .transpose()
         .map(|p| p.unwrap_or(DVec2::ZERO))
-}
-
-fn supported_effects(node: Node<'_, '_>) -> Result<()> {
-    for failure in node
-        .children()
-        .filter(|c| c.has_tag_name("FailureTable"))
-        .flat_map(|t| t.children().filter(|c| c.has_tag_name("Failure")))
-    {
-        let key = child_text(failure, "Fail_Key").unwrap_or("NONE").trim();
-        anyhow::ensure!(
-            key.is_empty() || key.eq_ignore_ascii_case("NONE"),
-            "unsupported gauge motion failure {key}"
-        );
-    }
-    Ok(())
 }
 
 fn expression(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<usize> {
@@ -186,7 +270,7 @@ fn expression(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<usi
 
 impl Shift {
     fn parse(node: Node<'_, '_>, origin: DVec2, conditions: &mut Vec<Condition>) -> Result<Self> {
-        supported_effects(node)?;
+        let failure = FailureState::parse(node)?;
         let scale = node
             .children()
             .find(|c| c.has_tag_name("Scale"))
@@ -242,10 +326,25 @@ impl Shift {
             table,
             delay,
             delayed_offset: None,
+            failure,
         })
     }
 
-    fn advance(&mut self, conditions: &[Condition], dt: f64) {
+    fn advance(&mut self, conditions: &[Condition], dt: f64, host: &mut impl Host) {
+        self.failure.update(host);
+        if self.failure.action == Some(FailureAction::Freeze) {
+            if self.failure.last.is_none() {
+                self.failure.last = Some(self.offset_for(0.0));
+            }
+            return;
+        }
+        if self.failure.action == Some(FailureAction::NoDraw) {
+            return;
+        }
+        if self.failure.action == Some(FailureAction::Zero) {
+            self.failure.last = Some(self.offset_for(0.0));
+            return;
+        }
         let Some(value) = conditions[self.expression].value else {
             return;
         };
@@ -267,9 +366,15 @@ impl Shift {
         } else if let Some(delay) = &mut self.delay {
             delay.advance(value, dt);
         }
+        self.failure.last = self.offset(conditions);
     }
 
     fn offset(&self, conditions: &[Condition]) -> Option<DVec2> {
+        match self.failure.action {
+            Some(FailureAction::Freeze | FailureAction::Zero) => return self.failure.last,
+            Some(FailureAction::NoDraw) => return None,
+            None => {}
+        }
         let value = if let Some(delay) = &self.delay {
             if delay.units == DelayUnits::Pixels {
                 return self.delayed_offset;
@@ -318,7 +423,7 @@ impl Shift {
 
 impl Rotation {
     fn parse(node: Node<'_, '_>, centre: DVec2, conditions: &mut Vec<Condition>) -> Result<Self> {
-        supported_effects(node)?;
+        let failure = FailureState::parse(node)?;
         let points_to = if let Some(direction) = child_text(node, "PointsTo") {
             match direction.trim().to_ascii_uppercase().as_str() {
                 "NORTH" => 0.0,
@@ -392,10 +497,16 @@ impl Rotation {
             points_to,
             table,
             delay: Delay::parse(node, true)?,
+            failure,
         })
     }
 
     fn angle(&self, conditions: &[Condition]) -> Option<f64> {
+        match self.failure.action {
+            Some(FailureAction::Freeze | FailureAction::Zero) => return self.failure.last,
+            Some(FailureAction::NoDraw) => return None,
+            None => {}
+        }
         if let Some(delay) = &self.delay
             && delay.units == DelayUnits::Angle
         {
@@ -438,7 +549,21 @@ impl Rotation {
         Some(angle - self.points_to)
     }
 
-    fn advance(&mut self, conditions: &[Condition], dt: f64) {
+    fn advance(&mut self, conditions: &[Condition], dt: f64, host: &mut impl Host) {
+        self.failure.update(host);
+        if self.failure.action == Some(FailureAction::Freeze) {
+            if self.failure.last.is_none() {
+                self.failure.last = self.angle_for(0.0).map(|angle| angle.rem_euclid(TAU));
+            }
+            return;
+        }
+        if self.failure.action == Some(FailureAction::NoDraw) {
+            return;
+        }
+        if self.failure.action == Some(FailureAction::Zero) {
+            self.failure.last = self.angle_for(0.0).map(|angle| angle.rem_euclid(TAU));
+            return;
+        }
         let Some(index) = self.expression else { return };
         let Some(value) = conditions[index].value else {
             return;
@@ -451,6 +576,7 @@ impl Rotation {
         if let (Some(delay), Some(target)) = (&mut self.delay, target) {
             delay.advance(target, dt);
         }
+        self.failure.last = self.angle(conditions);
     }
 }
 
@@ -568,6 +694,113 @@ fn point(node: Node<'_, '_>) -> Result<DVec2> {
 mod tests {
     use super::*;
 
+    struct NoHost;
+    impl Host for NoHost {
+        fn read(
+            &mut self,
+            _: &Reference,
+        ) -> std::result::Result<esp_script::Value, esp_script::Error> {
+            Err(esp_script::Error::Type)
+        }
+        fn write(
+            &mut self,
+            _: &Reference,
+            _: esp_script::Value,
+        ) -> std::result::Result<(), esp_script::Error> {
+            Err(esp_script::Error::Type)
+        }
+    }
+
+    struct PowerHost(f64);
+    impl Host for PowerHost {
+        fn read(
+            &mut self,
+            reference: &Reference,
+        ) -> std::result::Result<esp_script::Value, esp_script::Error> {
+            if reference.name == "CIRCUIT GENERAL PANEL ON" {
+                assert_eq!(reference.unit.as_deref(), Some("bool"));
+                Ok(esp_script::Value::Number(self.0))
+            } else {
+                Err(esp_script::Error::Type)
+            }
+        }
+        fn write(
+            &mut self,
+            _: &Reference,
+            _: esp_script::Value,
+        ) -> std::result::Result<(), esp_script::Error> {
+            Err(esp_script::Error::Type)
+        }
+    }
+
+    struct PartialPanelHost(f64);
+    impl Host for PartialPanelHost {
+        fn read(
+            &mut self,
+            reference: &Reference,
+        ) -> std::result::Result<esp_script::Value, esp_script::Error> {
+            assert_eq!(reference.name, "PARTIAL PANEL PITOT");
+            assert_eq!(reference.unit.as_deref(), Some("enum"));
+            Ok(esp_script::Value::Number(self.0))
+        }
+        fn write(
+            &mut self,
+            _: &Reference,
+            _: esp_script::Value,
+        ) -> std::result::Result<(), esp_script::Error> {
+            Err(esp_script::Error::Type)
+        }
+    }
+
+    #[test]
+    fn partial_panel_failure_flags_freeze_motion() {
+        let (mut dial, mut conditions) = rotation("<Rotation><Expression><Script>0</Script></Expression><FailureTable><Failure><Fail_Key>SYSTEM_PITOT_STATIC</Fail_Key><Fail_Action>Freeze</Fail_Action></Failure></FailureTable></Rotation>").unwrap();
+        let mut host = PartialPanelHost(0.0);
+        conditions[0].value = Some(0.5);
+        dial.advance(&conditions, 0.0, &mut host);
+        host.0 = 1.0;
+        conditions[0].value = Some(1.0);
+        dial.advance(&conditions, 1.0, &mut host);
+        assert_eq!(dial.angle(&conditions), Some(0.5));
+        host.0 = 0.0;
+        dial.advance(&conditions, 1.0, &mut host);
+        assert_eq!(dial.angle(&conditions), Some(1.0));
+    }
+
+    #[test]
+    fn electrical_failures_freeze_zero_hide_and_restore_motion() {
+        for (action, expected) in [("Freeze", Some(1.0)), ("Zero", Some(0.0)), ("NoDraw", None)] {
+            let text = format!(
+                "<Rotation><Expression><Script>0</Script></Expression><FailureTable><Failure><Fail_Key>SYSTEM_ELECTRICAL_PANELS</Fail_Key><Fail_Action>{action}</Fail_Action></Failure></FailureTable></Rotation>"
+            );
+            let (mut rotation, mut conditions) = self::rotation(&text).unwrap();
+            let mut host = PowerHost(1.0);
+            conditions[0].value = Some(1.0);
+            rotation.advance(&conditions, 0.0, &mut host);
+            assert_eq!(rotation.angle(&conditions), Some(1.0));
+            host.0 = 0.0;
+            conditions[0].value = Some(2.0);
+            rotation.advance(&conditions, 1.0, &mut host);
+            assert_eq!(rotation.angle(&conditions), expected, "{action}");
+            host.0 = 1.0;
+            rotation.advance(&conditions, 1.0, &mut host);
+            assert_eq!(rotation.angle(&conditions), Some(2.0));
+        }
+        let doc = roxmltree::Document::parse(r#"<Shift><Scale>2,0</Scale><Expression><Script>0</Script></Expression><FailureTable><Failure><Fail_Key>SYSTEM_ELECTRICAL_PANELS</Fail_Key><Fail_Action>Zero</Fail_Action></Failure></FailureTable></Shift>"#).unwrap();
+        let mut conditions = Vec::new();
+        let mut shift = Shift::parse(doc.root_element(), DVec2::ZERO, &mut conditions).unwrap();
+        let mut host = PowerHost(1.0);
+        conditions[0].value = Some(3.0);
+        shift.advance(&conditions, 0.0, &mut host);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::new(6.0, 0.0)));
+        host.0 = 0.0;
+        shift.advance(&conditions, 0.0, &mut host);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::ZERO));
+        host.0 = 1.0;
+        shift.advance(&conditions, 0.0, &mut host);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::new(6.0, 0.0)));
+    }
+
     fn rotation(text: &str) -> Result<(Rotation, Vec<Condition>)> {
         let document = roxmltree::Document::parse(text).unwrap();
         let mut conditions = Vec::new();
@@ -579,21 +812,21 @@ mod tests {
     fn delay_limits_angular_and_expression_motion() {
         let (mut rotation, mut conditions) = self::rotation(r#"<Rotation><Delay><DelayValue>90</DelayValue><DelayUnits>DEGREES_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression></Rotation>"#).unwrap();
         conditions[0].value = Some(0.0);
-        rotation.advance(&conditions, 0.0);
+        rotation.advance(&conditions, 0.0, &mut NoHost);
         conditions[0].value = Some(PI);
-        rotation.advance(&conditions, 0.5);
+        rotation.advance(&conditions, 0.5, &mut NoHost);
         assert!((rotation.angle(&conditions).unwrap() - PI / 4.0).abs() < 1e-12);
-        rotation.advance(&conditions, 1.5);
+        rotation.advance(&conditions, 1.5, &mut NoHost);
         assert!((rotation.angle(&conditions).unwrap() - PI).abs() < 1e-12);
         conditions[0].value = Some(0.0);
-        rotation.advance(&conditions, 0.5);
+        rotation.advance(&conditions, 0.5, &mut NoHost);
         assert!((rotation.angle(&conditions).unwrap() - 3.0 * PI / 4.0).abs() < 1e-12);
 
         let (mut rotation, mut conditions) = self::rotation(r#"<Rotation><Delay><DelayValue>2</DelayValue><DelayUnits>VALUE_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression><NonlinearityTable><NonlinearityEntry><ExpressionResult>0</ExpressionResult><Degrees>0</Degrees></NonlinearityEntry><NonlinearityEntry><ExpressionResult>10</ExpressionResult><Degrees>90</Degrees></NonlinearityEntry></NonlinearityTable></Rotation>"#).unwrap();
         conditions[0].value = Some(0.0);
-        rotation.advance(&conditions, 0.0);
+        rotation.advance(&conditions, 0.0, &mut NoHost);
         conditions[0].value = Some(10.0);
-        rotation.advance(&conditions, 2.0);
+        rotation.advance(&conditions, 2.0, &mut NoHost);
         assert!((rotation.angle(&conditions).unwrap() - 36_f64.to_radians()).abs() < 1e-12);
     }
 
@@ -603,9 +836,9 @@ mod tests {
         let mut conditions = Vec::new();
         let mut shift = Shift::parse(doc.root_element(), DVec2::ZERO, &mut conditions).unwrap();
         conditions[0].value = Some(0.0);
-        shift.advance(&conditions, 0.0);
+        shift.advance(&conditions, 0.0, &mut NoHost);
         conditions[0].value = Some(10.0);
-        shift.advance(&conditions, 1.0);
+        shift.advance(&conditions, 1.0, &mut NoHost);
         assert!(
             shift
                 .offset(&conditions)
@@ -620,12 +853,12 @@ mod tests {
         let mut conditions = Vec::new();
         let mut shift = Shift::parse(doc.root_element(), DVec2::ZERO, &mut conditions).unwrap();
         conditions[0].value = Some(30.0);
-        shift.advance(&conditions, 0.0);
+        shift.advance(&conditions, 0.0, &mut NoHost);
         assert_eq!(shift.offset(&conditions), Some(DVec2::new(-70.0, 0.0)));
         conditions[0].value = Some(80.0);
-        shift.advance(&conditions, 1.0);
+        shift.advance(&conditions, 1.0, &mut NoHost);
         assert_eq!(shift.offset(&conditions), Some(DVec2::new(-80.0, 0.0)));
-        shift.advance(&conditions, 10.0);
+        shift.advance(&conditions, 10.0, &mut NoHost);
         assert_eq!(shift.offset(&conditions), Some(DVec2::new(-140.0, 0.0)));
 
         let doc = roxmltree::Document::parse(r#"<Shift><Scale>0,0</Scale><Expression><Script>0</Script></Expression><NonlinearityTable><NonlinearityEntry><ExpressionResult>100</ExpressionResult><FloatPosition>245,65</FloatPosition></NonlinearityEntry><NonlinearityEntry><ExpressionResult>0</ExpressionResult><FloatPosition>245,123</FloatPosition></NonlinearityEntry></NonlinearityTable></Shift>"#).unwrap();
@@ -697,7 +930,7 @@ mod tests {
     #[test]
     fn empty_failure_entries_do_not_disable_motion() {
         assert!(rotation("<Rotation><FailureTable><Failure/></FailureTable><Expression><Script>0</Script></Expression></Rotation>").is_ok());
-        assert!(rotation("<Rotation><FailureTable><Failure><Fail_Key>SYSTEM_PITOT_STATIC</Fail_Key><Fail_Action>Freeze</Fail_Action></Failure></FailureTable></Rotation>").is_err());
+        assert!(rotation("<Rotation><FailureTable><Failure><Fail_Key>SYSTEM_PITOT_STATIC</Fail_Key><Fail_Action>Freeze</Fail_Action></Failure></FailureTable></Rotation>").is_ok());
     }
 
     #[test]
