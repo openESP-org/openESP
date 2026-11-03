@@ -12,6 +12,153 @@ mod content;
 
 #[test]
 #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+fn authored_control_scaling_and_elasticity_change_control_response() {
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut data = FlightData::load(&path, 0).unwrap();
+        let records = esp_formats::air::parse(&data.air).unwrap();
+        let wanted = [0x341, 0x342, 0x343, 0x517, 0x518, 0x519];
+        let mut ranges = Vec::new();
+        for id in wanted {
+            let Some(record) = records.iter().find(|record| record.id == id) else {
+                continue;
+            };
+            let Some(esp_formats::air::table::Table::Curve(curve)) = record.table().unwrap() else {
+                continue;
+            };
+            ranges.push((id, record.offset + 8, curve.points));
+        }
+        let trim_record = records
+            .iter()
+            .find(|record| record.id == 0x1525)
+            .map(|record| (record.offset + 8, record.table().unwrap()))
+            .and_then(|(offset, table)| match table {
+                Some(esp_formats::air::table::Table::Curve(curve)) => {
+                    Some((offset, curve.points.len()))
+                }
+                _ => None,
+            });
+        if ranges.len() != wanted.len() {
+            continue;
+        }
+        for (id, start, points) in &ranges {
+            for (index, _) in points.iter().enumerate() {
+                let scalar: f64 = if *id <= 0x343 { 0.0 } else { 1.0 };
+                let offset = start + 4 + index * 16 + 8;
+                data.air[offset..offset + 8].copy_from_slice(&scalar.to_le_bytes());
+            }
+        }
+        let model = Aerodynamics::from_data(&data).unwrap();
+        let loading = WeightBalance::from_config(&data.configuration)
+            .unwrap()
+            .load(0.0, false)
+            .unwrap();
+        let flaps = vec![
+            0.0;
+            esp_formats::cfg::aircraft::flaps(&data.configuration)
+                .unwrap()
+                .iter()
+                .filter(|flap| flap.kind != 0)
+                .count()
+        ];
+        let sample = |controls| {
+            model
+                .forces(
+                    DVec3::X * 50.0,
+                    DVec3::ZERO,
+                    1.225,
+                    controls,
+                    &flaps,
+                    loading.cg,
+                )
+                .unwrap()
+        };
+        let baseline = sample(Controls::default());
+        let deflected = sample(Controls {
+            elevator: 0.5,
+            aileron: 0.5,
+            rudder: 0.5,
+            ..Controls::default()
+        });
+        assert!(baseline.force.abs_diff_eq(deflected.force, 1e-9));
+        assert!(baseline.moment.abs_diff_eq(deflected.moment, 1e-9));
+        for (id, start, points) in &ranges {
+            for (index, _) in points.iter().enumerate() {
+                let scalar: f64 = if *id == 0x517 && index > 0 { 0.0 } else { 1.0 };
+                let offset = start + 4 + index * 16 + 8;
+                data.air[offset..offset + 8].copy_from_slice(&scalar.to_le_bytes());
+            }
+        }
+        let model = Aerodynamics::from_data(&data).unwrap();
+        let pressure =
+            ranges.iter().find(|(id, _, _)| *id == 0x517).unwrap().2[1].input * 47.88025898033584;
+        assert!(pressure > 0.0);
+        let speed = (2.0 * pressure / 1.225).sqrt();
+        let baseline = model
+            .forces(
+                DVec3::X * speed,
+                DVec3::ZERO,
+                1.225,
+                Controls::default(),
+                &flaps,
+                loading.cg,
+            )
+            .unwrap();
+        let deflected = model
+            .forces(
+                DVec3::X * speed,
+                DVec3::ZERO,
+                1.225,
+                Controls {
+                    elevator: 0.5,
+                    ..Controls::default()
+                },
+                &flaps,
+                loading.cg,
+            )
+            .unwrap();
+        assert!(baseline.force.abs_diff_eq(deflected.force, 1e-8));
+        assert!(baseline.moment.abs_diff_eq(deflected.moment, 1e-8));
+        if let Some((start, count)) = trim_record {
+            let trim = Controls {
+                elevator_trim: 0.5,
+                ..Controls::default()
+            };
+            let before = model
+                .forces(
+                    DVec3::X * speed,
+                    DVec3::ZERO,
+                    1.225,
+                    trim,
+                    &flaps,
+                    loading.cg,
+                )
+                .unwrap();
+            assert!((before.moment.y - baseline.moment.y).abs() > 1.0);
+            for index in 0..count {
+                let offset = start + 4 + index * 16 + 8;
+                data.air[offset..offset + 8].copy_from_slice(&0.0f64.to_le_bytes());
+            }
+            let disabled = Aerodynamics::from_data(&data)
+                .unwrap()
+                .forces(
+                    DVec3::X * speed,
+                    DVec3::ZERO,
+                    1.225,
+                    trim,
+                    &flaps,
+                    loading.cg,
+                )
+                .unwrap();
+            assert!(disabled.moment.abs_diff_eq(baseline.moment, 1e-8));
+        }
+        verified += 1;
+    }
+    assert!(verified > 0);
+}
+
+#[test]
+#[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
 fn authored_ground_effect_changes_lift_by_height_above_the_surface() {
     let mut verified = 0;
     for path in content::aircraft_paths() {

@@ -20,6 +20,9 @@ pub struct Aerodynamics {
     drag_scalar: f64,
     stability: DVec3,
     effectiveness: DVec3,
+    control_scaling: [Option<Curve>; 3],
+    control_elasticity: [Option<Curve>; 3],
+    trim_elasticity: Option<Curve>,
     elevator: [f64; 2],
     elevator_trim: f64,
     elevator_trim_limit: f64,
@@ -88,6 +91,13 @@ impl Aerodynamics {
         };
         let curve = |id| -> Result<Curve> {
             Curve::from_record(record(id)?).with_context(|| format!("AIR record {id:#x}"))
+        };
+        let optional_curve = |id| -> Result<Option<Curve>> {
+            if records.iter().any(|r| r.id == id) {
+                Ok(Some(curve(id)?))
+            } else {
+                Ok(None)
+            }
         };
         let lift = curve(0x404)?;
         let pitch = curve(0x473)?;
@@ -218,6 +228,17 @@ impl Aerodynamics {
                 tuning(config, "elevator_effectiveness")?,
                 tuning(config, "rudder_effectiveness")?,
             ),
+            control_scaling: [
+                optional_curve(0x342)?,
+                optional_curve(0x341)?,
+                optional_curve(0x343)?,
+            ],
+            control_elasticity: [
+                optional_curve(0x518)?,
+                optional_curve(0x517)?,
+                optional_curve(0x519)?,
+            ],
+            trim_elasticity: optional_curve(0x1525)?,
             elevator: [
                 geometry("elevator_up_limit")?.to_radians(),
                 geometry("elevator_down_limit")?.to_radians(),
@@ -344,15 +365,32 @@ impl Aerodynamics {
         }
         let alpha = velocity.z.atan2(velocity.x);
         let beta = (velocity.y / speed).clamp(-1.0, 1.0).asin();
-        let qbar_area = 0.5 * density * speed * speed * self.area;
+        let dynamic_pressure = 0.5 * density * speed * speed;
+        let qbar_area = dynamic_pressure * self.area;
+        let pressure_psf = dynamic_pressure / 47.88025898033584;
         let p = -angular_velocity.x * self.span / (2.0 * speed);
         let q = -angular_velocity.y * self.chord / (2.0 * speed);
         let r = angular_velocity.z * self.span / (2.0 * speed);
-        let elevator = controls.elevator
-            * self.elevator[usize::from(controls.elevator < 0.0)]
-            * self.effectiveness.y;
-        let aileron = controls.aileron * self.aileron * self.effectiveness.x;
-        let rudder = controls.rudder * self.rudder * self.effectiveness.z;
+        let scaled = |index: usize, angle: f64, effectiveness: f64| {
+            let angle_factor = self.control_scaling[index]
+                .as_ref()
+                .map_or(1.0, |curve| curve.sample(angle));
+            let pressure_factor = self.control_elasticity[index]
+                .as_ref()
+                .map_or(1.0, |curve| curve.sample(pressure_psf));
+            angle * effectiveness * angle_factor * pressure_factor
+        };
+        let elevator = scaled(
+            1,
+            controls.elevator * self.elevator[usize::from(controls.elevator < 0.0)],
+            self.effectiveness.y,
+        );
+        let aileron = scaled(0, controls.aileron * self.aileron, self.effectiveness.x);
+        let rudder = scaled(2, controls.rudder * self.rudder, self.effectiveness.z);
+        let trim_factor = self
+            .trim_elasticity
+            .as_ref()
+            .map_or(1.0, |curve| curve.sample(pressure_psf));
         let flap = flaps
             .iter()
             .zip(&self.flaps)
@@ -392,7 +430,7 @@ impl Aerodynamics {
         let pitch = c.pitch.cm0
             + self.pitch.sample(alpha)
             + c.pitch.cm_de * elevator
-            + c.pitch.cm_delta_trim * controls.elevator_trim * self.elevator_trim
+            + c.pitch.cm_delta_trim * controls.elevator_trim * self.elevator_trim * trim_factor
             + c.pitch.cm_spoiler * spoiler
             + c.pitch.cm_gear * controls.gear
             + c.pitch.cm_ih * self.incidence
