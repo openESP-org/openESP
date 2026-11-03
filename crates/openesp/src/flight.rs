@@ -1053,12 +1053,25 @@ impl Flight {
         let indicated_airspeed = Atmosphere::calibrated_airspeed_from_impact_pressure(
             (pitot_pressure - static_pressure).max(0.0),
         )?;
-        for name in [
+        variables.set_number(
             "AIRSPEED INDICATED",
+            "meters per second",
+            indicated_airspeed,
+        );
+        let selected = if variables
+            .read(&Reference::new('A', "TRUE AIRSPEED SELECTED", Some("bool")))?
+            .number()?
+            != 0.0
+        {
+            speed
+        } else {
+            indicated_airspeed
+        };
+        for name in [
             "AIRSPEED SELECT INDICATED OR TRUE",
             "AIRSPEED SELECT INDICATED OR TRUE:2",
         ] {
-            variables.set_number(name, "meters per second", indicated_airspeed);
+            variables.set_number(name, "meters per second", selected);
         }
         variables.set_number("AIRSPEED MACH", "mach", speed / atmosphere.sound_speed);
         variables.set_number("AMBIENT PRESSURE", "pascals", atmosphere.pressure);
@@ -3399,6 +3412,47 @@ mod tests {
             full.advance(1.0 / 60.0, &mut variables).unwrap();
             assert!(full.current.velocity.z > empty.current.velocity.z);
         }
+    }
+
+    #[test]
+    fn airspeed_selection_switches_between_true_and_indicated() {
+        let mut variables = Variables::default();
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -5000.0),
+            velocity: DVec3::X * 100.0,
+            ..State::default()
+        };
+        let read = |variables: &mut Variables, name| {
+            variables
+                .read(&Reference::new('A', name, Some("meters per second")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        Flight::publish(&state, &mut variables).unwrap();
+        let indicated = read(&mut variables, "AIRSPEED INDICATED");
+        assert!(indicated < 100.0);
+        assert_eq!(
+            read(&mut variables, "AIRSPEED SELECT INDICATED OR TRUE:2"),
+            indicated
+        );
+        variables.set_number("TRUE AIRSPEED SELECTED", "bool", 1.0);
+        Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(
+            read(&mut variables, "AIRSPEED SELECT INDICATED OR TRUE"),
+            100.0
+        );
+        assert_eq!(
+            read(&mut variables, "AIRSPEED SELECT INDICATED OR TRUE:2"),
+            100.0
+        );
+        assert_eq!(read(&mut variables, "AIRSPEED INDICATED"), indicated);
+        variables.set_number("TRUE AIRSPEED SELECTED", "bool", 0.0);
+        Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(
+            read(&mut variables, "AIRSPEED SELECT INDICATED OR TRUE"),
+            indicated
+        );
     }
 
     #[test]

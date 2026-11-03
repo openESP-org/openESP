@@ -50,6 +50,8 @@ impl Default for Variables {
         for name in ["PITOT BLOCKED", "STATIC PORT BLOCKED"] {
             variables.set_number(name, "bool", 0.0);
         }
+        variables.set_number("TRUE AIRSPEED SELECTED", "bool", 0.0);
+        variables.set_number("AIRSPEED TRUE CALIBRATE", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -429,7 +431,10 @@ impl Variables {
             0x10158 => "HEADING_BUG_DEC",
             0x1015b => "KOHLSMAN_INC",
             0x1015c => "KOHLSMAN_DEC",
+            0x1015d => "TRUE_AIRSPEED_CAL_INC",
+            0x1015e => "TRUE_AIRSPEED_CAL_DEC",
             0x101f8 => "KOHLSMAN_SET",
+            0x101fb => "TRUE_AIRSPEED_CAL_SET",
             0x1051e => "BAROMETRIC_STD_PRESSURE",
             0x1013d => "SPOILERS_ARM_TOGGLE",
             0x1017f => "MIXTURE1_SET",
@@ -688,6 +693,25 @@ impl Variables {
             return self.magneto_event(engine, action, value);
         }
         match name {
+            "TRUE_AIRSPEED_CAL_INC" | "TRUE_AIRSPEED_CAL_DEC" | "TRUE_AIRSPEED_CAL_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let current = self
+                    .read(&Reference::new(
+                        'A',
+                        "AIRSPEED TRUE CALIBRATE",
+                        Some("degrees"),
+                    ))?
+                    .number()?;
+                let next = match name {
+                    "TRUE_AIRSPEED_CAL_INC" => current + 1.0,
+                    "TRUE_AIRSPEED_CAL_DEC" => current - 1.0,
+                    _ => value,
+                };
+                self.set_number("AIRSPEED TRUE CALIBRATE", "degrees", next.rem_euclid(360.0));
+                Ok(())
+            }
             "KOHLSMAN_INC"
             | "KOHLSMAN_DEC"
             | "KOHLSMAN_SET"
@@ -1303,6 +1327,30 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn airspeed_reference_card_events_wrap_and_validate_values() {
+        let mut variables = Variables::default();
+        variables
+            .dispatch_key_event(0x1015e, Value::Number(0.0))
+            .unwrap();
+        let reference = Reference::new('A', "AIRSPEED TRUE CALIBRATE", Some("degrees"));
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(359.0));
+        variables
+            .dispatch_key_event(0x1015d, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(0.0));
+        variables
+            .dispatch_key_event(0x101fb, Value::Number(45.0))
+            .unwrap();
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(45.0));
+        assert!(
+            variables
+                .dispatch_event("TRUE_AIRSPEED_CAL_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(45.0));
+    }
 
     #[test]
     fn incremental_controls_use_pilot_input_and_aircraft_travel() {
