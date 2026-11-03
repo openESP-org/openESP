@@ -84,6 +84,25 @@ fn original_turbine_tables_control_thrust_spooling_and_shutdown() {
         assert!((right_only.force.x * 2.0 - symmetric.force.x).abs() < 1e-8);
         assert!(right_only.moment.z < 0.0);
         fractions.fill(1.0);
+        if model.throttle_lower_limit() < 0.0 {
+            commands[0].throttle = model.throttle_lower_limit();
+            model.advance(STEP, &sea, 0.0, &commands, true).unwrap();
+            let reverse = model.output(0, &sea, 0.0).unwrap();
+            let forward = model.output(1, &sea, 0.0).unwrap();
+            assert!(reverse.net_thrust < 0.0 && reverse.fuel_kilograms_per_second > 0.0);
+            assert_eq!(reverse.reverse_nozzle, 1.0);
+            assert!(forward.net_thrust > 0.0 && forward.reverse_nozzle == 0.0);
+            assert!(
+                model
+                    .wrench(&sea, DVec3::ZERO, cg, &fractions)
+                    .unwrap()
+                    .moment
+                    .z
+                    < 0.0
+            );
+            commands[0].throttle = 1.0;
+            model.advance(STEP, &sea, 0.0, &commands, true).unwrap();
+        }
         commands[1].fuel_valve = false;
         model.advance(STEP, &sea, 0.0, &commands, true).unwrap();
         let asymmetric = model.wrench(&sea, DVec3::ZERO, cg, &fractions).unwrap();

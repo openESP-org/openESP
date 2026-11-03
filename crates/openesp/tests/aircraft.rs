@@ -227,6 +227,74 @@ fn renders_cockpit_power_from_battery_switch_events() {
 
 #[test]
 #[ignore = "requires a GPU, desktop and original turbine aircraft"]
+fn renders_flight_with_reverse_thrust() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut count = 0;
+    for path in content::aircraft_paths() {
+        let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(1.0)
+        {
+            continue;
+        }
+        let lower = data
+            .configuration
+            .number("GeneralEngineData", "min_throttle_limit")
+            .unwrap()
+            .unwrap_or(0.0);
+        if lower >= 0.0
+            || data
+                .configuration
+                .number("TurbineEngineData", "reverser_available")
+                .unwrap()
+                .unwrap_or(0.0)
+                <= 0.0
+        {
+            continue;
+        }
+        let screenshot = temp.path().join("reverse.png");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_openesp"));
+        command
+            .arg("--aircraft")
+            .arg(&path)
+            .args([
+                "--airspeed",
+                "160",
+                "--height",
+                "5000",
+                "--engines-running",
+                "--fuel-percent",
+                "50",
+                "--event",
+            ])
+            .arg(format!("THROTTLE_SET={}", lower * 16383.0))
+            .args(["--frames", "120", "--screenshot"])
+            .arg(&screenshot);
+        capture_command(command, &screenshot);
+        let log = std::fs::read_to_string(screenshot.with_extension("log")).unwrap();
+        let thrust: f64 = log
+            .split("engine 1: N1=")
+            .nth(1)
+            .unwrap()
+            .split("thrust=")
+            .nth(1)
+            .unwrap()
+            .split('N')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(thrust < 0.0, "reverse thrust not reported: {log}");
+        count += 1;
+    }
+    assert!(count > 0);
+}
+
+#[test]
+#[ignore = "requires a GPU, desktop and original turbine aircraft"]
 fn renders_powered_flight_with_live_engine_state_and_fuel_use() {
     let temp = tempfile::tempdir().unwrap();
     let mut count = 0;

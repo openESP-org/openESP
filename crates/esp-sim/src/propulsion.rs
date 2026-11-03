@@ -69,6 +69,13 @@ impl Propulsion {
         matches!(self, Self::Piston { .. })
     }
 
+    pub fn throttle_lower_limit(&self) -> f64 {
+        match self {
+            Self::Piston { .. } => 0.0,
+            Self::Turbine { model, .. } => model.throttle_lower_limit(),
+        }
+    }
+
     pub fn indices(&self) -> impl Iterator<Item = u32> + '_ {
         let (piston, turbine) = match self {
             Self::Piston { model, .. } => (Some(model), None),

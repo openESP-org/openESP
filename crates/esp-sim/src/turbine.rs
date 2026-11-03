@@ -25,6 +25,8 @@ pub struct Turbines {
     fuel_scalar: f64,
     consumption: f64,
     gain: f64,
+    throttle_lower_limit: f64,
+    reverse_scalar: f64,
     engines: Vec<Engine>,
 }
 
@@ -34,6 +36,7 @@ struct Engine {
     direction: DVec3,
     coordinate: f64,
     lit: bool,
+    reversing: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +56,7 @@ pub struct Output {
     pub net_thrust: f64,
     pub fuel_kilograms_per_second: f64,
     pub combustion: bool,
+    pub reverse_nozzle: f64,
 }
 
 impl Turbines {
@@ -110,6 +114,7 @@ impl Turbines {
                     ),
                     coordinate: spool.0[0].input,
                     lit: false,
+                    reversing: false,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -129,6 +134,12 @@ impl Turbines {
                 .unwrap_or(1.0),
             consumption: number("TurbineEngineData", "ThrustSpecificFuelConsumption")?,
             gain: number("TurbineEngineData", "fuel_flow_gain")?,
+            throttle_lower_limit: config
+                .number("GeneralEngineData", "min_throttle_limit")?
+                .unwrap_or(0.0),
+            reverse_scalar: config
+                .number("TurbineEngineData", "reverser_available")?
+                .unwrap_or(0.0),
             engines,
         };
         ensure!(
@@ -138,6 +149,13 @@ impl Turbines {
         ensure!(
             model.static_thrust > 0.0 && model.gain > 0.0,
             "invalid rated thrust or fuel flow gain"
+        );
+        ensure!(
+            model.throttle_lower_limit.is_finite()
+                && (-1.0..=0.0).contains(&model.throttle_lower_limit)
+                && model.reverse_scalar.is_finite()
+                && model.reverse_scalar >= 0.0,
+            "invalid thrust reverser configuration"
         );
         ensure!(
             [
@@ -157,6 +175,14 @@ impl Turbines {
 
     pub fn indices(&self) -> impl Iterator<Item = u32> + '_ {
         self.engines.iter().map(|e| e.index)
+    }
+
+    pub fn throttle_lower_limit(&self) -> f64 {
+        if self.reverse_scalar > 0.0 {
+            self.throttle_lower_limit
+        } else {
+            0.0
+        }
     }
 
     fn target_n2(&self, throttle: f64, air: &Atmosphere, speed: f64) -> f64 {
@@ -193,13 +219,18 @@ impl Turbines {
             "invalid engine timestep or command count"
         );
         ensure!(
-            commands
-                .iter()
-                .all(|c| c.throttle.is_finite() && (0.0..=1.0).contains(&c.throttle)),
+            commands.iter().all(|c| c.throttle.is_finite()
+                && (self.throttle_lower_limit()..=1.0).contains(&c.throttle)),
             "invalid engine throttle"
         );
         let travel = self.gain * (2048.0 / 60.0) * dt;
         for (i, command) in commands.iter().enumerate() {
+            let reversing = command.throttle < 0.0;
+            let throttle = if reversing {
+                command.throttle / self.throttle_lower_limit
+            } else {
+                command.throttle
+            };
             let mach = speed / air.sound_speed;
             let theta = air.temperature / 288.15 * (1.0 + 0.2 * mach * mach);
             let current_n2 = self.spool.sample(self.engines[i].coordinate) * theta.sqrt();
@@ -209,8 +240,7 @@ impl Turbines {
                 && fuel_available
                 && command.fuel_valve;
             let target = if lit {
-                self.spool
-                    .inverse(self.target_n2(command.throttle, air, speed))
+                self.spool.inverse(self.target_n2(throttle, air, speed))
             } else if command.starter {
                 self.spool.inverse(25.0 / theta.sqrt())
             } else {
@@ -218,6 +248,7 @@ impl Turbines {
             };
             let engine = &mut self.engines[i];
             engine.lit = lit;
+            engine.reversing = reversing;
             if command.starter && !lit {
                 let next_n2 = (current_n2 + dt).min(25.0);
                 let start_coordinate = self.spool.inverse(next_n2 / theta.sqrt());
@@ -253,12 +284,20 @@ impl Turbines {
             n2: cn2 * theta.sqrt(),
             gross_thrust: gross * self.thrust_scalar,
             ram_drag: ram_drag * self.thrust_scalar,
-            net_thrust: (gross - ram_drag) * self.thrust_scalar,
+            net_thrust: (gross
+                * if engine.reversing {
+                    -self.reverse_scalar
+                } else {
+                    1.0
+                }
+                - ram_drag)
+                * self.thrust_scalar,
             fuel_kilograms_per_second: gross / POUND_FORCE * self.consumption * self.fuel_scalar
                 / theta.sqrt()
                 * POUND
                 / 3600.0,
             combustion: engine.lit,
+            reverse_nozzle: f64::from(engine.reversing),
         };
         ensure!(
             [
@@ -305,7 +344,13 @@ impl Turbines {
             } else {
                 DVec3::ZERO
             };
-            let force = engine.direction * output.gross_thrust * power_fractions[index] - drag;
+            let direction = if engine.reversing {
+                -self.reverse_scalar
+            } else {
+                1.0
+            };
+            let force =
+                engine.direction * output.gross_thrust * power_fractions[index] * direction - drag;
             wrench.force += force;
             wrench.moment += (engine.position - cg).cross(force);
         }

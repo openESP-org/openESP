@@ -8,6 +8,7 @@ pub struct Variables {
     flaps: Option<crate::flaps::Flaps>,
     engines: Vec<u32>,
     electrical: Option<crate::electrical::Electrical>,
+    throttle_lower_limit: f64,
 }
 
 struct Variable {
@@ -73,6 +74,17 @@ impl Variables {
             self.set_number(&format!("GENERAL ENG FUEL VALVE:{index}"), "bool", 1.0);
         }
         self.engines = engines;
+        self.configure_throttle_limit(0.0)?;
+        Ok(())
+    }
+
+    pub fn configure_throttle_limit(&mut self, lower: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            lower.is_finite() && (-1.0..=0.0).contains(&lower),
+            "invalid throttle lower limit"
+        );
+        self.throttle_lower_limit = lower;
+        self.set_number("THROTTLE LOWER LIMIT", "percent", lower * 100.0);
         Ok(())
     }
 
@@ -822,7 +834,11 @@ impl Variables {
                 "AXIS_THROTTLE_SET" => (value + 16383.0) / 32766.0 * 100.0,
                 _ => value / 16383.0 * 100.0,
             };
-            self.set_number(&variable, "percent", position.clamp(0.0, 100.0));
+            self.set_number(
+                &variable,
+                "percent",
+                position.clamp(self.throttle_lower_limit * 100.0, 100.0),
+            );
         }
         Ok(())
     }
@@ -1174,6 +1190,45 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn throttle_events_respect_the_configured_reverse_range() {
+        let mut variables = Variables::default();
+        variables.configure_engines([1, 2].into_iter()).unwrap();
+        variables.configure_throttle_limit(-0.25).unwrap();
+        for _ in 0..30 {
+            variables
+                .dispatch_event("THROTTLE_DECR", Value::Number(0.0))
+                .unwrap();
+        }
+        let throttle = |index| {
+            Reference::new(
+                'A',
+                &format!("GENERAL ENG THROTTLE LEVER POSITION:{index}"),
+                Some("percent"),
+            )
+        };
+        assert_eq!(
+            variables.read(&throttle(1)).unwrap().number().unwrap(),
+            -25.0
+        );
+        variables
+            .dispatch_event("THROTTLE2_SET", Value::Number(8191.5))
+            .unwrap();
+        assert_eq!(
+            variables.read(&throttle(1)).unwrap().number().unwrap(),
+            -25.0
+        );
+        assert_eq!(
+            variables.read(&throttle(2)).unwrap().number().unwrap(),
+            50.0
+        );
+        variables
+            .dispatch_event("THROTTLE_CUT", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(variables.read(&throttle(1)).unwrap().number().unwrap(), 0.0);
+        assert!(variables.configure_throttle_limit(-1.1).is_err());
     }
     use esp_script::Program;
 

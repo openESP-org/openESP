@@ -225,6 +225,7 @@ impl Flight {
     pub fn configure_engines(&self, variables: &mut Variables) -> Result<()> {
         if let Some(engines) = &self.engines {
             variables.configure_engines(engines.indices())?;
+            variables.configure_throttle_limit(engines.throttle_lower_limit())?;
             variables.configure_fuel_selectors(self.fuel_selectors);
             variables.set_number("MASTER IGNITION SWITCH", "bool", 1.0);
             if !engines.is_piston() {
@@ -278,6 +279,11 @@ impl Flight {
                         ("TURB ENG N1", "percent", output.n1),
                         ("TURB ENG N2", "percent", output.n2),
                         ("TURB ENG JET THRUST", "newtons", output.net_thrust),
+                        (
+                            "TURB ENG REVERSE NOZZLE PERCENT",
+                            "percent over 100",
+                            output.reverse_nozzle,
+                        ),
                         (
                             "TURB ENG FUEL FLOW PPH",
                             "pounds per hour",
@@ -2691,6 +2697,78 @@ mod tests {
             verified[kind] = true;
         }
         assert_eq!(verified, [true, true]);
+    }
+
+    #[test]
+    #[ignore = "requires original turbine aircraft with thrust reversers"]
+    fn configured_reverse_thrust_changes_motion_and_cockpit_state() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(1.0)
+            {
+                continue;
+            }
+            let mut reverse = Flight::new(&data, 160.0, 5000.0, 0.5, false).unwrap();
+            let mut idle = Flight::new(&data, 160.0, 5000.0, 0.5, false).unwrap();
+            reverse.start_running(&data).unwrap();
+            idle.start_running(&data).unwrap();
+            let mut reverse_vars = controls(&data);
+            let mut idle_vars = controls(&data);
+            reverse.configure_engines(&mut reverse_vars).unwrap();
+            idle.configure_engines(&mut idle_vars).unwrap();
+            let lower = reverse_vars
+                .read(&Reference::new(
+                    'A',
+                    "THROTTLE LOWER LIMIT",
+                    Some("percent"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap();
+            if lower >= 0.0 {
+                continue;
+            }
+            reverse_vars
+                .dispatch_event("THROTTLE_SET", Value::Number(lower / 100.0 * 16383.0))
+                .unwrap();
+            for _ in 0..120 {
+                reverse.advance(1.0 / 60.0, &mut reverse_vars).unwrap();
+                idle.advance(1.0 / 60.0, &mut idle_vars).unwrap();
+            }
+            assert!(reverse.current.velocity.x < idle.current.velocity.x);
+            for index in reverse.engines.as_ref().unwrap().indices() {
+                let nozzle = Reference::new(
+                    'A',
+                    &format!("TURB ENG REVERSE NOZZLE PERCENT:{index}"),
+                    Some("percent over 100"),
+                );
+                assert_eq!(reverse_vars.read(&nozzle).unwrap().number().unwrap(), 1.0);
+                assert_eq!(idle_vars.read(&nozzle).unwrap().number().unwrap(), 0.0);
+            }
+            reverse_vars
+                .dispatch_event("THROTTLE_CUT", Value::Number(0.0))
+                .unwrap();
+            reverse.advance(1.0 / 60.0, &mut reverse_vars).unwrap();
+            assert_eq!(
+                reverse_vars
+                    .read(&Reference::new(
+                        'A',
+                        "TURB ENG REVERSE NOZZLE PERCENT:1",
+                        Some("percent over 100")
+                    ))
+                    .unwrap()
+                    .number()
+                    .unwrap(),
+                0.0
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
     }
 
     #[test]
