@@ -16,7 +16,7 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "meters" | "meter" => Some((3, 1.0)),
         "feet" | "foot" => Some((3, 0.3048)),
         "pascals" | "pascal" => Some((4, 1.0)),
-        "millibars" => Some((4, 100.0)),
+        "millibars" | "millibar" | "hectopascals" | "hectopascal" | "hpa" => Some((4, 100.0)),
         "inhg" => Some((4, 3386.389)),
         "psi" | "pounds per square inch" => Some((4, 6894.757293168)),
         "psf" | "pounds per square foot" => Some((4, 47.88025898033584)),

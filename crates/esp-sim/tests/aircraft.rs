@@ -585,6 +585,9 @@ fn original_efis_standard_pressure_click_emits_event() {
         for panel in aircraft.panel_images.values() {
             for (index, area) in panel.mouse_areas.iter().enumerate() {
                 let mut variables = Variables::default();
+                variables
+                    .dispatch_event("KOHLSMAN_SET", Value::Number(16000.0))
+                    .unwrap();
                 if panel
                     .mouse_event(
                         MouseEvent::LeftSingle,
@@ -596,9 +599,23 @@ fn original_efis_standard_pressure_click_emits_event() {
                 {
                     continue;
                 }
-                if variables.drain_events().any(|(name, value)| {
-                    name == "BAROMETRIC_STD_PRESSURE" && value == Value::Number(1.0)
+                let events: Vec<_> = variables.drain_events().collect();
+                if events.iter().any(|(name, value)| {
+                    name == "BAROMETRIC_STD_PRESSURE" && *value == Value::Number(1.0)
                 }) {
+                    for (name, value) in events {
+                        variables.dispatch_event(&name, value).unwrap();
+                    }
+                    assert_eq!(
+                        variables
+                            .read(&Reference::new(
+                                'A',
+                                "KOHLSMAN SETTING MB",
+                                Some("millibars")
+                            ))
+                            .unwrap(),
+                        Value::Number(1013.25)
+                    );
                     verified += 1;
                 }
             }

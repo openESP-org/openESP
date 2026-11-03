@@ -15,6 +15,34 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
+    pub fn indicated_altitude(static_pressure: f64, setting: f64) -> Result<f64> {
+        ensure!(
+            static_pressure.is_finite()
+                && static_pressure > 0.0
+                && setting.is_finite()
+                && setting > 0.0,
+            "invalid altimeter pressure"
+        );
+        let equivalent_pressure = static_pressure * SEA_PRESSURE / setting;
+        let height = SEA_TEMPERATURE / 0.0065
+            * (1.0 - (equivalent_pressure / SEA_PRESSURE).powf(0.0065 * GAS_CONSTANT / GRAVITY));
+        if height <= 11_000.0 {
+            let geometric = RADIUS * height / (RADIUS - height);
+            return Ok(geometric.max(-2000.0));
+        }
+        let mut low = -2000.0;
+        let mut high = 86_000.0;
+        for _ in 0..60 {
+            let middle = (low + high) * 0.5;
+            if Self::standard(middle)?.pressure > equivalent_pressure {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        Ok((low + high) * 0.5)
+    }
+
     // U.S. Standard Atmosphere 1976, lower atmosphere; SI units.
     pub fn standard(altitude: f64) -> Result<Self> {
         ensure!(
@@ -125,6 +153,21 @@ fn impact_ratio(mach: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn altimeter_pressure_round_trips_across_atmosphere_layers() {
+        for altitude in [
+            -2000.0, 0.0, 1000.0, 10_000.0, 12_000.0, 25_000.0, 60_000.0, 86_000.0,
+        ] {
+            let pressure = Atmosphere::standard(altitude).unwrap().pressure;
+            let indicated = Atmosphere::indicated_altitude(pressure, 101_325.0).unwrap();
+            assert!(
+                (indicated - altitude).abs() < 1e-7,
+                "{altitude}: {indicated}"
+            );
+        }
+        assert!(Atmosphere::indicated_altitude(100_000.0, 0.0).is_err());
+    }
 
     #[test]
     fn matches_published_layer_boundary_conditions() {

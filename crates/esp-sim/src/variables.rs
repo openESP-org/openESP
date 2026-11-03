@@ -50,6 +50,9 @@ impl Default for Variables {
         for name in ["PITOT BLOCKED", "STATIC PORT BLOCKED"] {
             variables.set_number(name, "bool", 0.0);
         }
+        for index in 1..=4 {
+            variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
+        }
         variables
     }
 }
@@ -60,6 +63,24 @@ struct Variable {
 }
 
 fn variable_name(category: char, name: &str) -> String {
+    if category == 'A' {
+        for prefix in [
+            "KOHLSMAN SETTING MB",
+            "KOHLSMAN SETTING HG",
+            "KOHLSMAN SETTING",
+        ] {
+            if let Some(suffix) = name.strip_prefix(prefix) {
+                if suffix.is_empty() {
+                    return "KOHLSMAN SETTING:1".into();
+                }
+                if let Some(index) = suffix.strip_prefix(':')
+                    && index.parse::<u32>().is_ok_and(|n| n > 0)
+                {
+                    return format!("KOHLSMAN SETTING:{index}");
+                }
+            }
+        }
+    }
     if category == 'A' && name == "FUEL TANK SELECTOR" {
         return "FUEL TANK SELECTOR:1".into();
     }
@@ -357,6 +378,7 @@ impl Variables {
         }
         let name = match id {
             0x10018 => "STROBES_TOGGLE",
+            0x10030 => "BAROMETRIC",
             0x10022 => "GEAR_TOGGLE",
             0x10035 => "SPOILERS_TOGGLE",
             0x1003b => "FLAPS_UP",
@@ -405,6 +427,10 @@ impl Variables {
             0x10142 => "PITOT_HEAT_TOGGLE",
             0x10157 => "HEADING_BUG_INC",
             0x10158 => "HEADING_BUG_DEC",
+            0x1015b => "KOHLSMAN_INC",
+            0x1015c => "KOHLSMAN_DEC",
+            0x101f8 => "KOHLSMAN_SET",
+            0x1051e => "BAROMETRIC_STD_PRESSURE",
             0x1013d => "SPOILERS_ARM_TOGGLE",
             0x1017f => "MIXTURE1_SET",
             0x10180 => "MIXTURE2_SET",
@@ -662,6 +688,41 @@ impl Variables {
             return self.magneto_event(engine, action, value);
         }
         match name {
+            "KOHLSMAN_INC"
+            | "KOHLSMAN_DEC"
+            | "KOHLSMAN_SET"
+            | "BAROMETRIC_STD_PRESSURE"
+            | "BAROMETRIC" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let index = match name {
+                    "KOHLSMAN_INC" | "KOHLSMAN_DEC" | "BAROMETRIC_STD_PRESSURE"
+                        if value.fract() == 0.0 && (0.0..=4.0).contains(&value) =>
+                    {
+                        (value as u32).max(1)
+                    }
+                    "KOHLSMAN_INC" | "KOHLSMAN_DEC" | "BAROMETRIC_STD_PRESSURE" => {
+                        return Err(Error::Number);
+                    }
+                    _ => 1,
+                };
+                let key = format!("KOHLSMAN SETTING MB:{index}");
+                let current = self
+                    .read(&Reference::new('A', &key, Some("pascals")))?
+                    .number()?;
+                let pressure = match name {
+                    "KOHLSMAN_INC" => current + 33.863_895,
+                    "KOHLSMAN_DEC" => current - 33.863_895,
+                    "KOHLSMAN_SET" => value * 100.0 / 16.0,
+                    _ => 101_325.0,
+                };
+                if !(80_000.0..=110_000.0).contains(&pressure) {
+                    return Err(Error::Number);
+                }
+                self.set_number(&key, "pascals", pressure);
+                Ok(())
+            }
             "TOGGLE_VACUUM_FAILURE" => {
                 if !value.is_finite() {
                     return Err(Error::Number);

@@ -1076,16 +1076,20 @@ impl Flight {
         for name in ["PLANE ALTITUDE", "PLANE ALT ABOVE GROUND"] {
             variables.set_number(name, "meters", -state.position.z);
         }
-        let indicated_altitude = if static_blocked {
-            variables
-                .read(&Reference::new('A', "INDICATED ALTITUDE", Some("meters")))
-                .ok()
-                .and_then(|v| v.number().ok())
-                .unwrap_or(-state.position.z)
-        } else {
-            -state.position.z
-        };
-        variables.set_number("INDICATED ALTITUDE", "meters", indicated_altitude);
+        for index in 1..=4 {
+            let setting = variables
+                .read(&Reference::new(
+                    'A',
+                    &format!("KOHLSMAN SETTING MB:{index}"),
+                    Some("pascals"),
+                ))?
+                .number()?;
+            let indicated = Atmosphere::indicated_altitude(static_pressure, setting)?;
+            variables.set_number(&format!("INDICATED ALTITUDE:{index}"), "meters", indicated);
+            if index == 1 {
+                variables.set_number("INDICATED ALTITUDE", "meters", indicated);
+            }
+        }
         for name in ["PLANE PITCH DEGREES", "ATTITUDE INDICATOR PITCH DEGREES"] {
             variables.set_number(name, "radians", -pitch);
         }
@@ -3398,6 +3402,59 @@ mod tests {
     }
 
     #[test]
+    fn altimeter_settings_change_indications_independently_even_with_blocked_static() {
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -1000.0),
+            velocity: DVec3::X * 50.0,
+            ..State::default()
+        };
+        let mut variables = Variables::default();
+        let read = |variables: &mut Variables, name, unit| {
+            variables
+                .read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "KOHLSMAN SETTING HG", "inhg") - 29.92126).abs() < 0.00001);
+        variables
+            .dispatch_key_event(0x1015b, Value::Number(2.0))
+            .unwrap();
+        assert!(
+            (read(&mut variables, "KOHLSMAN SETTING MB:2", "hectopascals") - 1013.58863895).abs()
+                < 1e-8
+        );
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "INDICATED ALTITUDE", "meters") - 1000.0).abs() < 1e-8);
+        assert!(read(&mut variables, "INDICATED ALTITUDE:2", "meters") > 1000.0);
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_event("KOHLSMAN_INC", Value::Number(2.0))
+            .unwrap();
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!(read(&mut variables, "INDICATED ALTITUDE:2", "meters") > 1005.0);
+        variables
+            .dispatch_key_event(0x1051e, Value::Number(2.0))
+            .unwrap();
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "INDICATED ALTITUDE:2", "meters") - 1000.0).abs() < 1e-8);
+        variables
+            .dispatch_key_event(0x101f8, Value::Number(1000.0 * 16.0))
+            .unwrap();
+        assert!(
+            (read(&mut variables, "KOHLSMAN SETTING HG:1", "millibars") - 1000.0).abs() < 1e-10
+        );
+        assert!(
+            variables
+                .dispatch_event("KOHLSMAN_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn blocked_pressure_lines_respond_to_changes_in_flight() {
         let mut variables = Variables::default();
         let mut state = State {
@@ -3499,7 +3556,7 @@ mod tests {
             .unwrap();
         state.position.z = -2000.0;
         Flight::publish(&state, &mut variables).unwrap();
-        assert_eq!(read(&mut variables, "INDICATED ALTITUDE", "meters"), 1000.0);
+        assert!((read(&mut variables, "INDICATED ALTITUDE", "meters") - 1000.0).abs() < 1e-8);
         assert_eq!(read(&mut variables, "PLANE ALTITUDE", "meters"), 2000.0);
         assert_eq!(
             read(&mut variables, "VERTICAL SPEED", "meters per second"),
@@ -3515,7 +3572,7 @@ mod tests {
         assert_eq!(read(&mut variables, "PARTIAL PANEL PITOT", "enum"), 0.0);
         Flight::publish(&state, &mut variables).unwrap();
         assert!(read(&mut variables, "AIRSPEED INDICATED", "meters per second") > airspeed);
-        assert_eq!(read(&mut variables, "INDICATED ALTITUDE", "meters"), 2000.0);
+        assert!((read(&mut variables, "INDICATED ALTITUDE", "meters") - 2000.0).abs() < 1e-8);
         assert_eq!(
             read(&mut variables, "VERTICAL SPEED", "meters per second"),
             5.0
