@@ -56,6 +56,10 @@ impl Atmosphere {
     }
 
     pub fn calibrated_airspeed(&self, true_airspeed: f64) -> Result<f64> {
+        Self::calibrated_airspeed_from_impact_pressure(self.impact_pressure(true_airspeed)?)
+    }
+
+    pub fn impact_pressure(&self, true_airspeed: f64) -> Result<f64> {
         ensure!(
             true_airspeed.is_finite() && true_airspeed >= 0.0,
             "invalid true airspeed"
@@ -67,28 +71,32 @@ impl Atmosphere {
                 && self.sound_speed > 0.0,
             "invalid air data atmosphere"
         );
-        let mach = true_airspeed / self.sound_speed;
-        let impact = |mach: f64| {
-            let square = mach * mach;
-            if mach <= 1.0 {
-                (3.5 * (0.2 * square).ln_1p()).exp_m1()
-            } else {
-                square * 1.2f64.powf(3.5) * (6.0 / (7.0 - 1.0 / square)).powf(2.5) - 1.0
-            }
-        };
-        let ratio = self.pressure / SEA_PRESSURE * impact(mach);
+        let pressure = self.pressure * impact_ratio(true_airspeed / self.sound_speed);
+        ensure!(
+            pressure.is_finite() && pressure >= 0.0,
+            "airspeed exceeds the air data model range"
+        );
+        Ok(pressure)
+    }
+
+    pub fn calibrated_airspeed_from_impact_pressure(pressure: f64) -> Result<f64> {
+        ensure!(
+            pressure.is_finite() && pressure >= 0.0,
+            "invalid impact pressure"
+        );
+        let ratio = pressure / SEA_PRESSURE;
         ensure!(
             ratio.is_finite(),
             "airspeed exceeds the air data model range"
         );
-        let sea_mach = if ratio <= impact(1.0) {
+        let sea_mach = if ratio <= impact_ratio(1.0) {
             (5.0 * (ratio.ln_1p() / 3.5).exp_m1()).sqrt()
         } else {
             let mut low = 1.0;
             let mut high = 2.0 * ratio.sqrt() + 1.0;
             for _ in 0..64 {
                 let middle = (low + high) * 0.5;
-                if impact(middle) < ratio {
+                if impact_ratio(middle) < ratio {
                     low = middle;
                 } else {
                     high = middle;
@@ -102,6 +110,15 @@ impl Atmosphere {
             "airspeed exceeds the air data model range"
         );
         Ok(calibrated)
+    }
+}
+
+fn impact_ratio(mach: f64) -> f64 {
+    let square = mach * mach;
+    if mach <= 1.0 {
+        (3.5 * (0.2 * square).ln_1p()).exp_m1()
+    } else {
+        square * 1.2f64.powf(3.5) * (6.0 / (7.0 - 1.0 / square)).powf(2.5) - 1.0
     }
 }
 

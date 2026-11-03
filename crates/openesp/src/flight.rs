@@ -1043,21 +1043,16 @@ impl Flight {
         };
         let pitot_blocked = blocked(variables, "PITOT BLOCKED")?;
         let static_blocked = blocked(variables, "STATIC PORT BLOCKED")?;
-        let actual_indicated = atmosphere.calibrated_airspeed(speed)?;
-        // A blocked pressure line holds the last instrument reading until repaired.
-        let indicated_airspeed = if pitot_blocked || static_blocked {
-            variables
-                .read(&Reference::new(
-                    'A',
-                    "AIRSPEED INDICATED",
-                    Some("meters per second"),
-                ))
-                .ok()
-                .and_then(|v| v.number().ok())
-                .unwrap_or(actual_indicated)
-        } else {
-            actual_indicated
-        };
+        let total_pressure = atmosphere.pressure + atmosphere.impact_pressure(speed)?;
+        let [pitot_pressure, static_pressure] = variables.air_data_pressures(
+            total_pressure,
+            atmosphere.pressure,
+            pitot_blocked,
+            static_blocked,
+        )?;
+        let indicated_airspeed = Atmosphere::calibrated_airspeed_from_impact_pressure(
+            (pitot_pressure - static_pressure).max(0.0),
+        )?;
         for name in [
             "AIRSPEED INDICATED",
             "AIRSPEED SELECT INDICATED OR TRUE",
@@ -3400,6 +3395,76 @@ mod tests {
             full.advance(1.0 / 60.0, &mut variables).unwrap();
             assert!(full.current.velocity.z > empty.current.velocity.z);
         }
+    }
+
+    #[test]
+    fn blocked_pressure_lines_respond_to_changes_in_flight() {
+        let mut variables = Variables::default();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -1000.0),
+            velocity: DVec3::X * 100.0,
+            ..State::default()
+        };
+        let speed = |variables: &mut Variables| {
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "AIRSPEED INDICATED",
+                    Some("meters per second"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        Flight::publish(&state, &mut variables).unwrap();
+        let initial = speed(&mut variables);
+        variables
+            .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        state.velocity.x = 150.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!((speed(&mut variables) - initial).abs() < 1e-10);
+        state.position.z = -2000.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!(speed(&mut variables) > initial);
+        variables
+            .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        Flight::publish(&state, &mut variables).unwrap();
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        let static_initial = speed(&mut variables);
+        state.velocity.x = 180.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!(speed(&mut variables) > static_initial);
+        state.position.z = -3000.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        let blocked_indication = speed(&mut variables);
+        let accurate = Atmosphere::standard(3000.0)
+            .unwrap()
+            .calibrated_airspeed(180.0)
+            .unwrap();
+        assert!(blocked_indication < accurate);
+        variables
+            .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        state.velocity.x = 220.0;
+        state.position.z = -4000.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!((speed(&mut variables) - blocked_indication).abs() < 1e-10);
+        variables
+            .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        Flight::publish(&state, &mut variables).unwrap();
+        let accurate = Atmosphere::standard(4000.0)
+            .unwrap()
+            .calibrated_airspeed(220.0)
+            .unwrap();
+        assert!((speed(&mut variables) - accurate).abs() < 1e-10);
     }
 
     #[test]

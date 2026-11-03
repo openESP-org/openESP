@@ -10,6 +10,7 @@ pub struct Variables {
     throttle_lower_limit: f64,
     control_surfaces: Option<[f64; 4]>,
     aileron_step: f64,
+    air_data_pressures: Option<[f64; 2]>,
 }
 
 impl Default for Variables {
@@ -23,6 +24,7 @@ impl Default for Variables {
             throttle_lower_limit: 0.0,
             control_surfaces: None,
             aileron_step: 0.0,
+            air_data_pressures: None,
         };
         for name in [
             "ADF",
@@ -79,6 +81,26 @@ fn variable_name(category: char, name: &str) -> String {
 }
 
 impl Variables {
+    pub fn air_data_pressures(
+        &mut self,
+        total: f64,
+        ambient: f64,
+        pitot_blocked: bool,
+        static_blocked: bool,
+    ) -> anyhow::Result<[f64; 2]> {
+        anyhow::ensure!(
+            total.is_finite() && ambient.is_finite() && total >= ambient && ambient > 0.0,
+            "invalid air data pressures"
+        );
+        let previous = self.air_data_pressures.unwrap_or([total, ambient]);
+        let current = [
+            if pitot_blocked { previous[0] } else { total },
+            if static_blocked { previous[1] } else { ambient },
+        ];
+        self.air_data_pressures = Some(current);
+        Ok(current)
+    }
+
     pub fn configure_aileron_travel(&mut self, up_limit_degrees: f64) -> anyhow::Result<()> {
         anyhow::ensure!(
             up_limit_degrees.is_finite() && up_limit_degrees >= 0.0,
