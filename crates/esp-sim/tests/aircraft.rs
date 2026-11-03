@@ -624,6 +624,26 @@ fn flap_commands_drive_configured_actuators_models_and_gauges() {
         let last = primary.positions.last().unwrap().angle;
         let mut variables = Variables::default();
         variables.configure_flaps(&aircraft.flaps).unwrap();
+        let detent = Reference::new('A', "FLAPS HANDLE INDEX", Some("number"));
+        variables
+            .dispatch_key_event(0x1003d, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(variables.read(&detent).unwrap(), Value::Number(1.0));
+        variables.advance(time).unwrap();
+        let first_detent = primary
+            .positions
+            .iter()
+            .find(|position| position.index == 1)
+            .unwrap();
+        let angle = Reference::new('A', "TRAILING EDGE FLAPS0 LEFT ANGLE", Some("degrees"));
+        assert!(
+            (variables.read(&angle).unwrap().number().unwrap() - first_detent.angle).abs() < 1e-9
+        );
+        variables
+            .dispatch_key_event(0x103e6, Value::Number(-16383.0))
+            .unwrap();
+        variables.advance(time).unwrap();
+        assert_eq!(variables.read(&detent).unwrap(), Value::Number(0.0));
         let mut state = ModelState::new(&aircraft.exterior).unwrap();
         state
             .update(&aircraft.exterior, &mut variables, 0.0)

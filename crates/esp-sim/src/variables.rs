@@ -299,6 +299,9 @@ impl Variables {
             0x10022 => "GEAR_TOGGLE",
             0x10035 => "SPOILERS_TOGGLE",
             0x1003b => "FLAPS_UP",
+            0x1003d => "FLAPS_1",
+            0x1003f => "FLAPS_2",
+            0x10041 => "FLAPS_3",
             0x10043 => "FLAPS_DOWN",
             0x100a4 => "GEAR_SET",
             0x1021f => "GEAR_UP",
@@ -383,6 +386,7 @@ impl Variables {
             0x102ff => "TOGGLE_STARTER4",
             0x1034b => "TOGGLE_NAV_LIGHTS",
             0x1034e => "AXIS_SPOILER_SET",
+            0x103e6 => "AXIS_FLAPS_SET",
             0x1033b => "TOGGLE_ALTERNATOR1",
             0x1033c => "TOGGLE_ALTERNATOR2",
             0x1033d => "TOGGLE_ALTERNATOR3",
@@ -666,7 +670,8 @@ impl Variables {
                 }
                 Ok(())
             }
-            "FLAPS_UP" | "FLAPS_DOWN" | "FLAPS_INCR" | "FLAPS_DECR" | "FLAPS_SET" => self
+            "FLAPS_UP" | "FLAPS_1" | "FLAPS_2" | "FLAPS_3" | "FLAPS_4" | "FLAPS_DOWN"
+            | "FLAPS_INCR" | "FLAPS_DECR" | "FLAPS_SET" | "AXIS_FLAPS_SET" => self
                 .flaps
                 .as_mut()
                 .ok_or_else(|| Error::Unsupported("flap system is unavailable".into()))?

@@ -102,12 +102,18 @@ impl Flaps {
         }
         self.handle = match name {
             "FLAPS_UP" => 0,
-            "FLAPS_DOWN" => self.max_handle,
+            "FLAPS_DOWN" | "FLAPS_4" => self.max_handle,
+            "FLAPS_1" => 1.min(self.max_handle),
+            "FLAPS_2" => 2.min(self.max_handle),
+            "FLAPS_3" => 3.min(self.max_handle),
             "FLAPS_INCR" => self.handle.saturating_add(1).min(self.max_handle),
             "FLAPS_DECR" => self.handle.saturating_sub(1),
             "FLAPS_SET" => {
                 (value.clamp(0.0, 16383.0) / 16383.0 * f64::from(self.max_handle)).round() as u32
             }
+            "AXIS_FLAPS_SET" => ((value.clamp(-16383.0, 16383.0) + 16383.0) / 32766.0
+                * f64::from(self.max_handle))
+            .round() as u32,
             _ => return Err(Error::Unsupported(format!("flap event {name}"))),
         };
         Ok(())
@@ -259,6 +265,37 @@ mod tests {
             system_type: None,
             positions: positions(&[(0, -5.0), (1, 0.0), (2, 25.0)]),
         }
+    }
+
+    #[test]
+    fn numbered_and_axis_commands_select_and_bound_detents() {
+        let mut primary = definition();
+        primary.positions = positions(&[
+            (0, 0.0),
+            (1, 10.0),
+            (2, 20.0),
+            (3, 30.0),
+            (4, 40.0),
+            (5, 50.0),
+        ]);
+        let mut flaps = Flaps::new(&[primary]).unwrap();
+        for (event, input, expected) in [
+            ("FLAPS_1", 0.0, 1.0),
+            ("FLAPS_2", 0.0, 2.0),
+            ("FLAPS_3", 0.0, 3.0),
+            ("FLAPS_4", 0.0, 5.0),
+            ("AXIS_FLAPS_SET", -20000.0, 0.0),
+            ("AXIS_FLAPS_SET", 0.0, 3.0),
+            ("AXIS_FLAPS_SET", 20000.0, 5.0),
+        ] {
+            flaps.event(event, input).unwrap();
+            assert_eq!(flaps.read("FLAPS HANDLE INDEX").unwrap().0, expected);
+        }
+        assert!(flaps.event("AXIS_FLAPS_SET", f64::NAN).is_err());
+        assert_eq!(flaps.read("FLAPS HANDLE INDEX").unwrap().0, 5.0);
+        let mut short = Flaps::new(&[definition()]).unwrap();
+        short.event("FLAPS_3", 0.0).unwrap();
+        assert_eq!(short.read("FLAPS HANDLE INDEX").unwrap().0, 2.0);
     }
 
     #[test]
