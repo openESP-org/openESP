@@ -282,7 +282,14 @@ impl Variables {
             0x1021f => "GEAR_UP",
             0x10220 => "GEAR_DOWN",
             0x10047 => "ELEV_TRIM_DN",
+            0x1004c => "CENTER_AILER_RUDDER",
             0x1004f => "ELEV_TRIM_UP",
+            0x1009e => "ELEVATOR_SET",
+            0x1009f => "AILERON_SET",
+            0x100a0 => "RUDDER_SET",
+            0x100e2 => "AXIS_ELEVATOR_SET",
+            0x100e3 => "AXIS_AILERONS_SET",
+            0x100e4 => "AXIS_RUDDER_SET",
             0x100aa => "ELEVATOR_TRIM_SET",
             0x100e6 => "AXIS_ELEV_TRIM_SET",
             0x100a2 => "FLAPS_SET",
@@ -380,6 +387,38 @@ impl Variables {
 
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
+        let controls: &[(&str, f64)] = match name {
+            "ELEVATOR_SET" | "AXIS_ELEVATOR_SET" => {
+                &[("YOKE Y POSITION", 1.0), ("ELEVATOR DEFLECTION PCT", 1.0)]
+            }
+            "AILERON_SET" | "AXIS_AILERONS_SET" => &[
+                ("YOKE X POSITION", 1.0),
+                ("AILERON LEFT DEFLECTION PCT", 1.0),
+                ("AILERON RIGHT DEFLECTION PCT", -1.0),
+            ],
+            "RUDDER_SET" | "AXIS_RUDDER_SET" => &[
+                ("RUDDER PEDAL POSITION", 1.0),
+                ("RUDDER DEFLECTION PCT", 1.0),
+            ],
+            "CENTER_AILER_RUDDER" => &[
+                ("YOKE X POSITION", 0.0),
+                ("AILERON LEFT DEFLECTION PCT", 0.0),
+                ("AILERON RIGHT DEFLECTION PCT", 0.0),
+                ("RUDDER PEDAL POSITION", 0.0),
+                ("RUDDER DEFLECTION PCT", 0.0),
+            ],
+            _ => &[],
+        };
+        if !controls.is_empty() {
+            if !value.is_finite() {
+                return Err(Error::Number);
+            }
+            let position = value.clamp(-16383.0, 16383.0) / 16383.0;
+            for &(name, direction) in controls {
+                self.set_number(name, "percent over 100", position * direction);
+            }
+            return Ok(());
+        }
         if name == "TOGGLE_FUEL_VALVE_ALL" {
             if self.engines.is_empty() {
                 return Err(Error::Unsupported("fuel valves are unavailable".into()));
@@ -1031,6 +1070,39 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_control_events_update_pilot_inputs() {
+        let mut vars = Variables::default();
+        vars.dispatch_event("AXIS_ELEVATOR_SET", Value::Number(8191.5))
+            .unwrap();
+        vars.dispatch_key_event(0x100e3, Value::Number(-16383.0))
+            .unwrap();
+        vars.dispatch_key_event(0x100a0, Value::Number(20000.0))
+            .unwrap();
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("percent over 100")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert_eq!(read(&mut vars, "YOKE Y POSITION"), 0.5);
+        assert_eq!(read(&mut vars, "ELEVATOR DEFLECTION PCT"), 0.5);
+        assert_eq!(read(&mut vars, "YOKE X POSITION"), -1.0);
+        assert_eq!(read(&mut vars, "AILERON LEFT DEFLECTION PCT"), -1.0);
+        assert_eq!(read(&mut vars, "AILERON RIGHT DEFLECTION PCT"), 1.0);
+        assert_eq!(read(&mut vars, "RUDDER PEDAL POSITION"), 1.0);
+        assert!(
+            vars.dispatch_event("RUDDER_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(read(&mut vars, "RUDDER DEFLECTION PCT"), 1.0);
+        vars.dispatch_key_event(0x1004c, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut vars, "AILERON LEFT DEFLECTION PCT"), 0.0);
+        assert_eq!(read(&mut vars, "RUDDER DEFLECTION PCT"), 0.0);
+        assert_eq!(read(&mut vars, "ELEVATOR DEFLECTION PCT"), 0.5);
+    }
 
     #[test]
     fn turbine_ignition_events_keep_the_three_switch_positions() {

@@ -420,9 +420,12 @@ fn renders_airborne_motion_with_opposite_control_inputs() {
                     "1000",
                     "--frames",
                     "120",
-                    "--variable",
+                    "--event",
                 ])
-                .arg(format!("A:AILERON LEFT DEFLECTION PCT,percent={percent}"))
+                .arg(format!(
+                    "AXIS_AILERONS_SET={}",
+                    f64::from(percent) * 16383.0 / 100.0
+                ))
                 .arg("--screenshot")
                 .arg(&screenshot)
                 .stderr(std::fs::File::create(&log_path).unwrap());

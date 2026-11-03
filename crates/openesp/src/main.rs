@@ -151,6 +151,7 @@ struct App {
     reported_diagnostics: HashSet<String>,
     camera: Camera,
     keys: HashSet<KeyCode>,
+    keyboard_axes: [f64; 3],
     mouse_look: bool,
     cursor: Option<(f64, f64)>,
     pressed_panel: Option<(String, Vec<usize>, [f64; 2])>,
@@ -461,17 +462,25 @@ impl App {
         let roll = axis(KeyCode::ArrowRight, KeyCode::ArrowLeft) as f64;
         let pitch = axis(KeyCode::ArrowDown, KeyCode::ArrowUp) as f64;
         let rudder = axis(KeyCode::KeyX, KeyCode::KeyZ) as f64;
-        for (name, value) in [
-            ("YOKE X POSITION", roll * 100.0),
-            ("YOKE Y POSITION", pitch * 100.0),
-            ("AILERON LEFT DEFLECTION PCT", roll * 100.0),
-            ("AILERON RIGHT DEFLECTION PCT", -roll * 100.0),
-            ("ELEVATOR DEFLECTION PCT", pitch * 100.0),
-            ("RUDDER DEFLECTION PCT", rudder * 100.0),
-            ("EXIT OPEN:0", if self.door_open { 100.0 } else { 0.0 }),
-        ] {
-            self.variables.set_number(name, "percent", value);
+        for (index, (name, value)) in [
+            ("AXIS_AILERONS_SET", roll),
+            ("AXIS_ELEVATOR_SET", pitch),
+            ("AXIS_RUDDER_SET", rudder),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.keyboard_axes[index] != value {
+                self.variables
+                    .dispatch_event(name, Value::Number(value * 16383.0))?;
+                self.keyboard_axes[index] = value;
+            }
         }
+        self.variables.set_number(
+            "EXIT OPEN:0",
+            "percent",
+            if self.door_open { 100.0 } else { 0.0 },
+        );
         if let Some(flight) = &self.flight {
             Flight::publish(&flight.current, &mut self.variables)?;
         }
@@ -837,6 +846,9 @@ fn main() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
+    for event in ["AXIS_AILERONS_SET", "AXIS_ELEVATOR_SET", "AXIS_RUDDER_SET"] {
+        variables.dispatch_event(event, Value::Number(0.0))?;
+    }
     variables.set('P', "UNITS OF MEASURE", Some("enum"), Value::Number(0.0));
     variables.set_number("AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool", 0.0);
     variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 0.0);
@@ -855,6 +867,7 @@ fn main() -> Result<()> {
         reported_diagnostics: HashSet::new(),
         camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
         keys: HashSet::new(),
+        keyboard_axes: [0.0; 3],
         mouse_look: false,
         cursor: None,
         pressed_panel: None,
@@ -947,6 +960,7 @@ mod tests {
             reported_diagnostics: HashSet::new(),
             camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
             keys: HashSet::new(),
+            keyboard_axes: [0.0; 3],
             mouse_look: true,
             cursor: None,
             pressed_panel: Some(("$TEST".into(), areas, [0.5, 0.5])),
