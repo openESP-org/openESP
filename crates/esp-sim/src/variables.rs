@@ -1,7 +1,6 @@
 use esp_script::{Error, Host, Reference, Value};
 use std::collections::HashMap;
 
-#[derive(Default)]
 pub struct Variables {
     values: HashMap<(char, String), Variable>,
     events: Vec<(String, Value)>,
@@ -11,6 +10,46 @@ pub struct Variables {
     throttle_lower_limit: f64,
     control_surfaces: Option<[f64; 4]>,
     aileron_step: f64,
+}
+
+impl Default for Variables {
+    fn default() -> Self {
+        let mut variables = Self {
+            values: HashMap::new(),
+            events: Vec::new(),
+            flaps: None,
+            engines: Vec::new(),
+            electrical: None,
+            throttle_lower_limit: 0.0,
+            control_surfaces: None,
+            aileron_step: 0.0,
+        };
+        for name in [
+            "ADF",
+            "AIRSPEED",
+            "ALTIMETER",
+            "ATTITUDE",
+            "COMM",
+            "COMPASS",
+            "ELECTRICAL",
+            "AVIONICS",
+            "ENGINE",
+            "FUEL INDICATOR",
+            "HEADING",
+            "VERTICAL VELOCITY",
+            "TRANSPONDER",
+            "NAV",
+            "PITOT",
+            "TURN COORDINATOR",
+            "VACUUM",
+        ] {
+            variables.set_number(&format!("PARTIAL PANEL {name}"), "enum", 0.0);
+        }
+        for name in ["PITOT BLOCKED", "STATIC PORT BLOCKED"] {
+            variables.set_number(name, "bool", 0.0);
+        }
+        variables
+    }
 }
 
 struct Variable {
@@ -361,6 +400,9 @@ impl Variables {
             0x10213 => "SPOILERS_ARM_OFF",
             0x10214 => "SPOILERS_ARM_SET",
             0x10305 => "TOGGLE_HYDRAULIC_FAILURE",
+            0x10301 => "TOGGLE_VACUUM_FAILURE",
+            0x10303 => "TOGGLE_PITOT_BLOCKAGE",
+            0x10304 => "TOGGLE_STATIC_PORT_BLOCKAGE",
             0x10498 => "HYDRAULIC_SWITCH_TOGGLE",
             0x103e7 => "TOGGLE_MASTER_IGNITION_SWITCH",
             0x1049d => "TURBINE_IGNITION_SWITCH_TOGGLE",
@@ -598,6 +640,36 @@ impl Variables {
             return self.magneto_event(engine, action, value);
         }
         match name {
+            "TOGGLE_VACUUM_FAILURE" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let current = self
+                    .read(&Reference::new('A', "PARTIAL PANEL VACUUM", Some("enum")))?
+                    .number()?;
+                self.set_number("PARTIAL PANEL VACUUM", "enum", f64::from(current == 0.0));
+                Ok(())
+            }
+            "TOGGLE_PITOT_BLOCKAGE" | "TOGGLE_STATIC_PORT_BLOCKAGE" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let target = if name == "TOGGLE_PITOT_BLOCKAGE" {
+                    "PITOT BLOCKED"
+                } else {
+                    "STATIC PORT BLOCKED"
+                };
+                self.toggle(target)?;
+                let mut blocked = false;
+                for name in ["PITOT BLOCKED", "STATIC PORT BLOCKED"] {
+                    blocked |= self
+                        .read(&Reference::new('A', name, Some("bool")))?
+                        .number()?
+                        != 0.0;
+                }
+                self.set_number("PARTIAL PANEL PITOT", "enum", f64::from(blocked));
+                Ok(())
+            }
             "TOGGLE_MASTER_IGNITION_SWITCH" => self.toggle("MASTER IGNITION SWITCH"),
             "TURBINE_IGNITION_SWITCH_TOGGLE"
             | "TURBINE_IGNITION_SWITCH_SET"

@@ -1035,7 +1035,29 @@ impl Flight {
         let atmosphere = Atmosphere::standard(-state.position.z)?;
         let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
         variables.set_number("AIRSPEED TRUE", "meters per second", speed);
-        let indicated_airspeed = atmosphere.calibrated_airspeed(speed)?;
+        let blocked = |variables: &mut Variables, name| -> Result<bool> {
+            Ok(variables
+                .read(&Reference::new('A', name, Some("bool")))?
+                .number()?
+                != 0.0)
+        };
+        let pitot_blocked = blocked(variables, "PITOT BLOCKED")?;
+        let static_blocked = blocked(variables, "STATIC PORT BLOCKED")?;
+        let actual_indicated = atmosphere.calibrated_airspeed(speed)?;
+        // A blocked pressure line holds the last instrument reading until repaired.
+        let indicated_airspeed = if pitot_blocked || static_blocked {
+            variables
+                .read(&Reference::new(
+                    'A',
+                    "AIRSPEED INDICATED",
+                    Some("meters per second"),
+                ))
+                .ok()
+                .and_then(|v| v.number().ok())
+                .unwrap_or(actual_indicated)
+        } else {
+            actual_indicated
+        };
         for name in [
             "AIRSPEED INDICATED",
             "AIRSPEED SELECT INDICATED OR TRUE",
@@ -1056,13 +1078,19 @@ impl Flight {
             atmosphere.temperature * (1.0 + 0.2 * (speed / atmosphere.sound_speed).powi(2))
                 - 273.15,
         );
-        for name in [
-            "PLANE ALTITUDE",
-            "INDICATED ALTITUDE",
-            "PLANE ALT ABOVE GROUND",
-        ] {
+        for name in ["PLANE ALTITUDE", "PLANE ALT ABOVE GROUND"] {
             variables.set_number(name, "meters", -state.position.z);
         }
+        let indicated_altitude = if static_blocked {
+            variables
+                .read(&Reference::new('A', "INDICATED ALTITUDE", Some("meters")))
+                .ok()
+                .and_then(|v| v.number().ok())
+                .unwrap_or(-state.position.z)
+        } else {
+            -state.position.z
+        };
+        variables.set_number("INDICATED ALTITUDE", "meters", indicated_altitude);
         for name in ["PLANE PITCH DEGREES", "ATTITUDE INDICATOR PITCH DEGREES"] {
             variables.set_number(name, "radians", -pitch);
         }
@@ -1084,7 +1112,15 @@ impl Flight {
                 0.0
             },
         );
-        variables.set_number("VERTICAL SPEED", "meters per second", -state.velocity.z);
+        variables.set_number(
+            "VERTICAL SPEED",
+            "meters per second",
+            if static_blocked {
+                0.0
+            } else {
+                -state.velocity.z
+            },
+        );
         variables.set_number(
             "GROUND VELOCITY",
             "meters per second",
@@ -3364,6 +3400,70 @@ mod tests {
             full.advance(1.0 / 60.0, &mut variables).unwrap();
             assert!(full.current.velocity.z > empty.current.velocity.z);
         }
+    }
+
+    #[test]
+    fn pressure_blockages_hold_indications_until_repaired() {
+        let mut variables = Variables::default();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -1000.0),
+            velocity: DVec3::new(50.0, 0.0, -5.0),
+            ..State::default()
+        };
+        let read = |variables: &mut Variables, name, unit| {
+            variables
+                .read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        Flight::publish(&state, &mut variables).unwrap();
+        let airspeed = read(&mut variables, "AIRSPEED INDICATED", "meters per second");
+        variables
+            .dispatch_key_event(0x10303, Value::Number(0.0))
+            .unwrap();
+        state.velocity.x = 100.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(
+            read(&mut variables, "AIRSPEED INDICATED", "meters per second"),
+            airspeed
+        );
+        assert!(read(&mut variables, "AIRSPEED TRUE", "meters per second") > 100.0);
+        variables
+            .dispatch_key_event(0x10304, Value::Number(0.0))
+            .unwrap();
+        state.position.z = -2000.0;
+        Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "INDICATED ALTITUDE", "meters"), 1000.0);
+        assert_eq!(read(&mut variables, "PLANE ALTITUDE", "meters"), 2000.0);
+        assert_eq!(
+            read(&mut variables, "VERTICAL SPEED", "meters per second"),
+            0.0
+        );
+        variables
+            .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "PARTIAL PANEL PITOT", "enum"), 1.0);
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "PARTIAL PANEL PITOT", "enum"), 0.0);
+        Flight::publish(&state, &mut variables).unwrap();
+        assert!(read(&mut variables, "AIRSPEED INDICATED", "meters per second") > airspeed);
+        assert_eq!(read(&mut variables, "INDICATED ALTITUDE", "meters"), 2000.0);
+        assert_eq!(
+            read(&mut variables, "VERTICAL SPEED", "meters per second"),
+            5.0
+        );
+        variables
+            .dispatch_key_event(0x10301, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "PARTIAL PANEL VACUUM", "enum"), 1.0);
+        assert_eq!(read(&mut variables, "PARTIAL PANEL VACUUM", "bool"), 1.0);
+        variables
+            .dispatch_event("TOGGLE_VACUUM_FAILURE", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "PARTIAL PANEL VACUUM", "enum"), 0.0);
     }
 
     #[test]
