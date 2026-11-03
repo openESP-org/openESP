@@ -19,7 +19,10 @@ pub(super) struct Motion {
 struct Shift {
     expression: usize,
     scale: DVec2,
+    origin: DVec2,
+    table: Vec<(f64, DVec2)>,
     delay: Option<Delay>,
+    delayed_offset: Option<DVec2>,
 }
 
 #[derive(Clone)]
@@ -92,7 +95,7 @@ impl Motion {
         let shift = node
             .children()
             .find(|c| c.has_tag_name("Shift"))
-            .map(|node| Shift::parse(node, conditions))
+            .map(|node| Shift::parse(node, DVec2::from(offset), conditions))
             .transpose()?;
         Ok(Self {
             offset: DVec2::from(offset),
@@ -182,17 +185,49 @@ fn expression(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<usi
 }
 
 impl Shift {
-    fn parse(node: Node<'_, '_>, conditions: &mut Vec<Condition>) -> Result<Self> {
+    fn parse(node: Node<'_, '_>, origin: DVec2, conditions: &mut Vec<Condition>) -> Result<Self> {
         supported_effects(node)?;
-        anyhow::ensure!(
-            !node.children().any(|c| c.has_tag_name("NonlinearityTable")),
-            "unsupported nonlinear gauge shift"
-        );
-        let scale = point(
-            node.children()
-                .find(|c| c.has_tag_name("Scale"))
-                .context("missing shift scale")?,
-        )?;
+        let scale = node
+            .children()
+            .find(|c| c.has_tag_name("Scale"))
+            .map(point)
+            .transpose()?
+            .unwrap_or(DVec2::ZERO);
+        let mut table = Vec::new();
+        if let Some(entries) = node
+            .children()
+            .find(|c| c.has_tag_name("NonlinearityTable"))
+        {
+            for entry in entries
+                .children()
+                .filter(|c| c.has_tag_name("NonlinearityEntry"))
+            {
+                let value =
+                    number(entry, "ExpressionResult")?.context("missing shift table value")?;
+                let position = point(
+                    entry
+                        .children()
+                        .find(|c| c.has_tag_name("FloatPosition"))
+                        .context("missing shift table position")?,
+                )?;
+                table.push((value, position));
+            }
+            anyhow::ensure!(!table.is_empty(), "empty shift table");
+            let increasing = table.last().unwrap().0 > table[0].0;
+            anyhow::ensure!(
+                table.windows(2).all(|pair| if increasing {
+                    pair[1].0 > pair[0].0
+                } else {
+                    pair[1].0 < pair[0].0
+                }),
+                "non-monotonic shift table"
+            );
+        } else {
+            anyhow::ensure!(
+                node.children().any(|c| c.has_tag_name("Scale")),
+                "missing shift scale"
+            );
+        }
         let expression = expression(
             node.children()
                 .find(|c| c.has_tag_name("Expression"))
@@ -203,7 +238,10 @@ impl Shift {
         Ok(Self {
             expression,
             scale,
+            origin,
+            table,
             delay,
+            delayed_offset: None,
         })
     }
 
@@ -211,30 +249,70 @@ impl Shift {
         let Some(value) = conditions[self.expression].value else {
             return;
         };
-        if let Some(delay) = &mut self.delay {
-            let target = if delay.units == DelayUnits::Pixels {
-                value * self.scale.length()
+        if self
+            .delay
+            .as_ref()
+            .is_some_and(|delay| delay.units == DelayUnits::Pixels)
+        {
+            let target = self.offset_for(value);
+            let rate = self.delay.as_ref().unwrap().rate;
+            let current = self.delayed_offset.unwrap_or(target);
+            let difference = target - current;
+            let distance = difference.length();
+            self.delayed_offset = Some(if distance > rate * dt && distance > 0.0 {
+                current + difference * (rate * dt / distance)
             } else {
-                value
-            };
-            delay.advance(target, dt);
+                target
+            });
+        } else if let Some(delay) = &mut self.delay {
+            delay.advance(value, dt);
         }
     }
 
     fn offset(&self, conditions: &[Condition]) -> Option<DVec2> {
         let value = if let Some(delay) = &self.delay {
-            let value = delay.value?;
-            if delay.units == DelayUnits::Pixels && self.scale.length() > 0.0 {
-                value / self.scale.length()
-            } else if delay.units == DelayUnits::Pixels {
-                0.0
-            } else {
-                value
+            if delay.units == DelayUnits::Pixels {
+                return self.delayed_offset;
             }
+            delay.value?
         } else {
             conditions[self.expression].value?
         };
-        Some(self.scale * value)
+        Some(self.offset_for(value))
+    }
+
+    fn offset_for(&self, value: f64) -> DVec2 {
+        if self.table.is_empty() {
+            return self.scale * value;
+        }
+        let first = self.table[0];
+        let last = *self.table.last().unwrap();
+        let increasing = last.0 > first.0;
+        let position = if (increasing && value <= first.0) || (!increasing && value >= first.0) {
+            first.1
+        } else if (increasing && value >= last.0) || (!increasing && value <= last.0) {
+            last.1
+        } else {
+            let pair = self
+                .table
+                .windows(2)
+                .find(|pair| {
+                    if increasing {
+                        value <= pair[1].0
+                    } else {
+                        value >= pair[1].0
+                    }
+                })
+                .unwrap();
+            pair[0]
+                .1
+                .lerp(pair[1].1, (value - pair[0].0) / (pair[1].0 - pair[0].0))
+        };
+        if self.scale == DVec2::ZERO {
+            position - self.origin
+        } else {
+            self.scale * position
+        }
     }
 }
 
@@ -523,7 +601,7 @@ mod tests {
     fn delay_limits_shift_speed_in_pixels() {
         let doc = roxmltree::Document::parse(r#"<Shift><Scale>3,4</Scale><Delay><DelayValue>10</DelayValue><DelayUnits>PIXELS_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression></Shift>"#).unwrap();
         let mut conditions = Vec::new();
-        let mut shift = Shift::parse(doc.root_element(), &mut conditions).unwrap();
+        let mut shift = Shift::parse(doc.root_element(), DVec2::ZERO, &mut conditions).unwrap();
         conditions[0].value = Some(0.0);
         shift.advance(&conditions, 0.0);
         conditions[0].value = Some(10.0);
@@ -534,6 +612,40 @@ mod tests {
                 .unwrap()
                 .abs_diff_eq(DVec2::new(6.0, 8.0), 1e-12)
         );
+    }
+
+    #[test]
+    fn nonlinear_shift_interpolates_positions_and_limits_pixel_speed() {
+        let doc = roxmltree::Document::parse(r#"<Shift><Scale>-1,0</Scale><Delay><DelayValue>10</DelayValue><DelayUnits>PIXELS_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression><NonlinearityTable><NonlinearityEntry><ExpressionResult>0</ExpressionResult><FloatPosition>40,0</FloatPosition></NonlinearityEntry><NonlinearityEntry><ExpressionResult>60</ExpressionResult><FloatPosition>100,0</FloatPosition></NonlinearityEntry><NonlinearityEntry><ExpressionResult>100</ExpressionResult><FloatPosition>180,0</FloatPosition></NonlinearityEntry></NonlinearityTable></Shift>"#).unwrap();
+        let mut conditions = Vec::new();
+        let mut shift = Shift::parse(doc.root_element(), DVec2::ZERO, &mut conditions).unwrap();
+        conditions[0].value = Some(30.0);
+        shift.advance(&conditions, 0.0);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::new(-70.0, 0.0)));
+        conditions[0].value = Some(80.0);
+        shift.advance(&conditions, 1.0);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::new(-80.0, 0.0)));
+        shift.advance(&conditions, 10.0);
+        assert_eq!(shift.offset(&conditions), Some(DVec2::new(-140.0, 0.0)));
+
+        let doc = roxmltree::Document::parse(r#"<Shift><Scale>0,0</Scale><Expression><Script>0</Script></Expression><NonlinearityTable><NonlinearityEntry><ExpressionResult>100</ExpressionResult><FloatPosition>245,65</FloatPosition></NonlinearityEntry><NonlinearityEntry><ExpressionResult>0</ExpressionResult><FloatPosition>245,123</FloatPosition></NonlinearityEntry></NonlinearityTable></Shift>"#).unwrap();
+        let mut conditions = Vec::new();
+        let shift = Shift::parse(
+            doc.root_element(),
+            DVec2::new(245.0, 123.0),
+            &mut conditions,
+        )
+        .unwrap();
+        for (value, expected) in [
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (50.0, -29.0),
+            (100.0, -58.0),
+            (101.0, -58.0),
+        ] {
+            conditions[0].value = Some(value);
+            assert_eq!(shift.offset(&conditions), Some(DVec2::new(0.0, expected)));
+        }
     }
 
     #[test]

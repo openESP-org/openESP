@@ -1035,11 +1035,14 @@ impl Flight {
         let atmosphere = Atmosphere::standard(-state.position.z)?;
         let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
         variables.set_number("AIRSPEED TRUE", "meters per second", speed);
-        variables.set_number(
+        let indicated_airspeed = atmosphere.calibrated_airspeed(speed)?;
+        for name in [
             "AIRSPEED INDICATED",
-            "meters per second",
-            atmosphere.calibrated_airspeed(speed)?,
-        );
+            "AIRSPEED SELECT INDICATED OR TRUE",
+            "AIRSPEED SELECT INDICATED OR TRUE:2",
+        ] {
+            variables.set_number(name, "meters per second", indicated_airspeed);
+        }
         variables.set_number("AIRSPEED MACH", "mach", speed / atmosphere.sound_speed);
         variables.set_number("AMBIENT PRESSURE", "pascals", atmosphere.pressure);
         variables.set_number(
@@ -3375,6 +3378,14 @@ mod tests {
         Flight::publish(&state, &mut variables).unwrap();
         for (name, unit, expected) in [
             ("AIRSPEED TRUE", "knots", 50.0 * 3600.0 / 1852.0),
+            (
+                "AIRSPEED SELECT INDICATED OR TRUE:2",
+                "meters per second",
+                Atmosphere::standard(1000.0)
+                    .unwrap()
+                    .calibrated_airspeed(50.0)
+                    .unwrap(),
+            ),
             ("PLANE ALTITUDE", "feet", 1000.0 / 0.3048),
             ("PLANE PITCH DEGREES", "radians", -0.1),
             ("PLANE BANK DEGREES", "radians", -0.2),

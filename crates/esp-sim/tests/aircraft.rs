@@ -10,6 +10,58 @@ struct PoseHost {
 }
 
 #[test]
+#[ignore = "requires original backup airspeed gauge and OPENESP_AIRCRAFT_PATHS"]
+fn original_nonlinear_airspeed_tape_moves_with_indicated_speed() {
+    use esp_sim::variables::Variables;
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut aircraft = Aircraft::load(&path, 0).unwrap();
+        let Some(panel) = aircraft.panel.as_ref() else {
+            continue;
+        };
+        if !panel
+            .layout()
+            .unwrap()
+            .windows
+            .iter()
+            .filter(|window| window.texture.is_some())
+            .flat_map(|window| window.gauges.iter())
+            .any(|gauge| {
+                gauge
+                    .reference
+                    .to_ascii_lowercase()
+                    .ends_with("!alti_and_asi_backup")
+            })
+        {
+            continue;
+        }
+        let mut variables = Variables::default();
+        variables.set_number("AIRSPEED SELECT INDICATED OR TRUE:2", "knots", 60.0);
+        for panel in aircraft.panel_images.values_mut() {
+            panel.update(&mut variables);
+        }
+        let before: Vec<_> = aircraft
+            .panel_images
+            .values()
+            .map(|panel| panel.image.clone())
+            .collect();
+        variables.set_number("AIRSPEED SELECT INDICATED OR TRUE:2", "knots", 200.0);
+        let mut changed = 0;
+        for (before, panel) in before.iter().zip(aircraft.panel_images.values_mut()) {
+            panel.update(&mut variables);
+            changed += before
+                .pixels()
+                .zip(panel.image.pixels())
+                .filter(|(a, b)| a != b)
+                .count();
+        }
+        assert!(changed > 10, "backup airspeed tape did not move");
+        verified += 1;
+    }
+    assert!(verified > 0, "no original backup airspeed gauge found");
+}
+
+#[test]
 #[ignore = "requires original MDL cockpit controls and OPENESP_AIRCRAFT_PATHS"]
 fn original_model_click_changes_switch_state_and_animation() {
     use esp_assets::gauge::MouseEvent;
