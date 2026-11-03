@@ -57,7 +57,10 @@ impl Mask {
         }
     }
 
-    pub fn update(&mut self, conditions: &[Condition]) -> bool {
+    pub fn update(&mut self, conditions: &[Condition], dt: f64) -> bool {
+        for motion in &mut self.motion {
+            motion.advance(conditions, dt);
+        }
         let next = rotation::transform(&self.motion, conditions);
         let changed = self.transform != next;
         self.transform = next;

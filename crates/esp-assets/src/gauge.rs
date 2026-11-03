@@ -25,6 +25,7 @@ pub struct PanelImage {
     gauges: Vec<Canvas>,
     conditions: Vec<Condition>,
     updates: Vec<Update>,
+    motion_elapsed: f64,
     background: Rgba<u8>,
 }
 
@@ -239,6 +240,7 @@ impl PanelImage {
 
     pub fn update_scripts(&mut self, dt: f64, host: &mut impl Host) -> Result<()> {
         anyhow::ensure!(dt.is_finite() && dt >= 0.0, "invalid gauge timestep");
+        self.motion_elapsed += dt;
         for update in &mut self.updates {
             let elapsed = update
                 .interval
@@ -299,13 +301,17 @@ impl PanelImage {
                 Err(_) => {}
             }
         }
+        let dt = std::mem::take(&mut self.motion_elapsed);
         let mut changed = false;
         for gauge in &mut self.gauges {
             let mut dirty = false;
             for layer in &mut gauge.layers {
+                for motion in &mut layer.motion {
+                    motion.advance(&self.conditions, dt);
+                }
                 let transform = rotation::transform(&layer.motion, &self.conditions);
                 for mask in &mut layer.masks {
-                    dirty |= mask.update(&self.conditions);
+                    dirty |= mask.update(&self.conditions, dt);
                 }
                 let visible = transform.is_some()
                     && layer.masks.iter().all(Mask::ready)
@@ -821,6 +827,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
         gauges,
         conditions,
         updates,
+        motion_elapsed: 0.0,
         background,
     };
     result.compose();
@@ -1189,6 +1196,34 @@ mod tests {
     }
 
     #[test]
+    fn delayed_gauge_motion_uses_elapsed_simulation_time() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("panel");
+        let module = directory.join("example");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(directory.join("panel.cfg"), "[VCockpit01]\nsize_mm=12,1\npixel_size=12,1\ntexture=$screen\ngauge00=example!dial,0,0,12,1").unwrap();
+        std::fs::write(module.join("dial.xml"), r#"<SimBase.Document Type="AceXML"><SimGauge.Gauge><Size>12,1</Size><Element><FloatPosition>0,0</FloatPosition><Image Name="dot.bmp"/><Shift><Scale>1,0</Scale><Delay><DelayValue>2</DelayValue><DelayUnits>PIXELS_PER_SECOND</DelayUnits></Delay><Expression><Script>(L:POWER,number)</Script></Expression></Shift></Element></SimGauge.Gauge></SimBase.Document>"#).unwrap();
+        let mut bytes = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut bytes)
+            .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("dot.bmp"), bytes).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(0.0);
+        image.advance(0.0, &mut host).unwrap();
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        host.0 = 10.0;
+        image.update_scripts(0.25, &mut host).unwrap();
+        image.update_scripts(0.75, &mut host).unwrap();
+        assert!(image.update(&mut host));
+        assert_eq!(image.image.get_pixel(2, 0).0, [255, 0, 0, 255]);
+        assert!(!image.update(&mut host));
+        image.advance(4.0, &mut host).unwrap();
+        assert_eq!(image.image.get_pixel(10, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
     fn repaint_preserves_overlapping_gauges_and_clips_offscreen_artwork() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("panel");
@@ -1359,6 +1394,7 @@ mod tests {
             gauges: vec![],
             conditions: vec![],
             updates: vec![],
+            motion_elapsed: 0.0,
             background: Rgba([0; 4]),
         };
         #[derive(Default)]
@@ -1446,7 +1482,7 @@ mod tests {
                 visibility: vec![],
             }],
             gauges: vec![], conditions: vec![], background: Rgba([0; 4]),
-            updates: vec![],
+            updates: vec![], motion_elapsed: 0.0,
         };
         let captured = panel.mouse_areas_at(2.0, 2.0);
         let mut host = Values::default();
@@ -1516,6 +1552,7 @@ mod tests {
             gauges: vec![],
             conditions: vec![],
             updates: vec![],
+            motion_elapsed: 0.0,
             background: Rgba([0; 4]),
         };
         let mut host = Writes(Vec::new());
@@ -1565,6 +1602,7 @@ mod tests {
             gauges: vec![],
             conditions: vec![],
             updates: vec![],
+            motion_elapsed: 0.0,
             background: Rgba([0; 4]),
         };
         struct State {
@@ -1731,6 +1769,7 @@ mod tests {
             gauges: vec![],
             conditions: vec![],
             background: Rgba([0; 4]),
+            motion_elapsed: 0.0,
             updates: ["(A:MISSING,bool)", "(>K:TEST)"]
                 .into_iter()
                 .map(|source| Update {

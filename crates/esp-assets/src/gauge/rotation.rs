@@ -19,6 +19,7 @@ pub(super) struct Motion {
 struct Shift {
     expression: usize,
     scale: DVec2,
+    delay: Option<Delay>,
 }
 
 #[derive(Clone)]
@@ -26,6 +27,54 @@ struct Rotation {
     expression: Option<usize>,
     points_to: f64,
     table: Vec<(f64, f64)>,
+    delay: Option<Delay>,
+}
+
+#[derive(Clone)]
+struct Delay {
+    rate: f64,
+    units: DelayUnits,
+    value: Option<f64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DelayUnits {
+    Value,
+    Angle,
+    Pixels,
+}
+
+impl Delay {
+    fn parse(node: Node<'_, '_>, rotation: bool) -> Result<Option<Self>> {
+        let Some(node) = node.children().find(|c| c.has_tag_name("Delay")) else {
+            return Ok(None);
+        };
+        let rate = number(node, "DelayValue")?.context("missing gauge delay value")?;
+        anyhow::ensure!(rate.is_finite() && rate > 0.0, "invalid gauge delay value");
+        let units = child_text(node, "DelayUnits")
+            .context("missing gauge delay units")?
+            .trim()
+            .to_ascii_uppercase();
+        let (units, rate) = match units.as_str() {
+            "VALUE_PER_SECOND" => (DelayUnits::Value, rate),
+            "DEGREES_PER_SECOND" if rotation => (DelayUnits::Angle, rate.to_radians()),
+            "RADIANS_PER_SECOND" if rotation => (DelayUnits::Angle, rate),
+            "PIXELS_PER_SECOND" if !rotation => (DelayUnits::Pixels, rate),
+            _ => anyhow::bail!("unsupported gauge delay units {units}"),
+        };
+        Ok(Some(Self {
+            rate,
+            units,
+            value: None,
+        }))
+    }
+
+    fn advance(&mut self, target: f64, dt: f64) {
+        self.value = Some(match self.value {
+            Some(value) => value + (target - value).clamp(-self.rate * dt, self.rate * dt),
+            None => target,
+        });
+    }
 }
 
 impl Motion {
@@ -77,6 +126,15 @@ impl Motion {
             shift: None,
         }
     }
+
+    pub fn advance(&mut self, conditions: &[Condition], dt: f64) {
+        if let Some(rotation) = &mut self.rotation {
+            rotation.advance(conditions, dt);
+        }
+        if let Some(shift) = &mut self.shift {
+            shift.advance(conditions, dt);
+        }
+    }
 }
 
 pub(super) fn axis(node: Node<'_, '_>) -> Result<DVec2> {
@@ -88,10 +146,6 @@ pub(super) fn axis(node: Node<'_, '_>) -> Result<DVec2> {
 }
 
 fn supported_effects(node: Node<'_, '_>) -> Result<()> {
-    anyhow::ensure!(
-        !node.children().any(|c| c.has_tag_name("Delay")),
-        "unsupported gauge motion delay"
-    );
     for failure in node
         .children()
         .filter(|c| c.has_tag_name("FailureTable"))
@@ -145,11 +199,41 @@ impl Shift {
                 .context("missing shift expression")?,
             conditions,
         )?;
-        Ok(Self { expression, scale })
+        let delay = Delay::parse(node, false)?;
+        Ok(Self {
+            expression,
+            scale,
+            delay,
+        })
+    }
+
+    fn advance(&mut self, conditions: &[Condition], dt: f64) {
+        let Some(value) = conditions[self.expression].value else {
+            return;
+        };
+        if let Some(delay) = &mut self.delay {
+            let target = if delay.units == DelayUnits::Pixels {
+                value * self.scale.length()
+            } else {
+                value
+            };
+            delay.advance(target, dt);
+        }
     }
 
     fn offset(&self, conditions: &[Condition]) -> Option<DVec2> {
-        let value = conditions[self.expression].value?;
+        let value = if let Some(delay) = &self.delay {
+            let value = delay.value?;
+            if delay.units == DelayUnits::Pixels && self.scale.length() > 0.0 {
+                value / self.scale.length()
+            } else if delay.units == DelayUnits::Pixels {
+                0.0
+            } else {
+                value
+            }
+        } else {
+            conditions[self.expression].value?
+        };
         Some(self.scale * value)
     }
 }
@@ -229,14 +313,28 @@ impl Rotation {
             expression,
             points_to,
             table,
+            delay: Delay::parse(node, true)?,
         })
     }
 
     fn angle(&self, conditions: &[Condition]) -> Option<f64> {
+        if let Some(delay) = &self.delay
+            && delay.units == DelayUnits::Angle
+        {
+            return delay.value.map(|angle| angle.rem_euclid(TAU));
+        }
         let Some(index) = self.expression else {
             return Some(0.0);
         };
-        let value = conditions[index].value?;
+        let value = if let Some(delay) = &self.delay {
+            delay.value?
+        } else {
+            conditions[index].value?
+        };
+        self.angle_for(value).map(|angle| angle.rem_euclid(TAU))
+    }
+
+    fn angle_for(&self, value: f64) -> Option<f64> {
         let angle = if self.table.is_empty() {
             value
         } else {
@@ -259,7 +357,22 @@ impl Rotation {
                 pair[0].1 + t * (pair[1].1 - pair[0].1)
             }
         };
-        Some((angle - self.points_to).rem_euclid(TAU))
+        Some(angle - self.points_to)
+    }
+
+    fn advance(&mut self, conditions: &[Condition], dt: f64) {
+        let Some(index) = self.expression else { return };
+        let Some(value) = conditions[index].value else {
+            return;
+        };
+        let target = match self.delay.as_ref().map(|delay| delay.units) {
+            Some(DelayUnits::Angle) => self.angle_for(value),
+            Some(DelayUnits::Value) => Some(value),
+            _ => None,
+        };
+        if let (Some(delay), Some(target)) = (&mut self.delay, target) {
+            delay.advance(target, dt);
+        }
     }
 }
 
@@ -382,6 +495,45 @@ mod tests {
         let mut conditions = Vec::new();
         let rotation = Rotation::parse(document.root_element(), DVec2::ZERO, &mut conditions)?;
         Ok((rotation, conditions))
+    }
+
+    #[test]
+    fn delay_limits_angular_and_expression_motion() {
+        let (mut rotation, mut conditions) = self::rotation(r#"<Rotation><Delay><DelayValue>90</DelayValue><DelayUnits>DEGREES_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression></Rotation>"#).unwrap();
+        conditions[0].value = Some(0.0);
+        rotation.advance(&conditions, 0.0);
+        conditions[0].value = Some(PI);
+        rotation.advance(&conditions, 0.5);
+        assert!((rotation.angle(&conditions).unwrap() - PI / 4.0).abs() < 1e-12);
+        rotation.advance(&conditions, 1.5);
+        assert!((rotation.angle(&conditions).unwrap() - PI).abs() < 1e-12);
+        conditions[0].value = Some(0.0);
+        rotation.advance(&conditions, 0.5);
+        assert!((rotation.angle(&conditions).unwrap() - 3.0 * PI / 4.0).abs() < 1e-12);
+
+        let (mut rotation, mut conditions) = self::rotation(r#"<Rotation><Delay><DelayValue>2</DelayValue><DelayUnits>VALUE_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression><NonlinearityTable><NonlinearityEntry><ExpressionResult>0</ExpressionResult><Degrees>0</Degrees></NonlinearityEntry><NonlinearityEntry><ExpressionResult>10</ExpressionResult><Degrees>90</Degrees></NonlinearityEntry></NonlinearityTable></Rotation>"#).unwrap();
+        conditions[0].value = Some(0.0);
+        rotation.advance(&conditions, 0.0);
+        conditions[0].value = Some(10.0);
+        rotation.advance(&conditions, 2.0);
+        assert!((rotation.angle(&conditions).unwrap() - 36_f64.to_radians()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn delay_limits_shift_speed_in_pixels() {
+        let doc = roxmltree::Document::parse(r#"<Shift><Scale>3,4</Scale><Delay><DelayValue>10</DelayValue><DelayUnits>PIXELS_PER_SECOND</DelayUnits></Delay><Expression><Script>0</Script></Expression></Shift>"#).unwrap();
+        let mut conditions = Vec::new();
+        let mut shift = Shift::parse(doc.root_element(), &mut conditions).unwrap();
+        conditions[0].value = Some(0.0);
+        shift.advance(&conditions, 0.0);
+        conditions[0].value = Some(10.0);
+        shift.advance(&conditions, 1.0);
+        assert!(
+            shift
+                .offset(&conditions)
+                .unwrap()
+                .abs_diff_eq(DVec2::new(6.0, 8.0), 1e-12)
+        );
     }
 
     #[test]
