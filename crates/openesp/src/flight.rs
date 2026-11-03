@@ -176,6 +176,8 @@ impl Flight {
 
     pub fn configure_ground(variables: &mut Variables) {
         variables.set_number("ELEVATOR TRIM PCT", "percent", 0.0);
+        variables.set_number("AILERON TRIM PCT", "percent", 0.0);
+        variables.set_number("RUDDER TRIM PCT", "percent", 0.0);
         variables.set_number("GEAR HANDLE POSITION", "bool", 1.0);
         variables.set_number("HYDRAULIC SWITCH", "bool", 0.0);
         variables.set_number("HYDRAULIC FAILURE", "bool", 0.0);
@@ -459,6 +461,8 @@ impl Flight {
             aileron,
             rudder: control("RUDDER DEFLECTION PCT")?,
             elevator_trim: control("ELEVATOR TRIM PCT")?,
+            aileron_trim: control("AILERON TRIM PCT")?,
+            rudder_trim: control("RUDDER TRIM PCT")?,
             spoilers,
             spoiler_difference: self.spoiler_surfaces[0] - self.spoiler_surfaces[1],
             gear: self.gear.extension(),
@@ -476,6 +480,12 @@ impl Flight {
             "radians",
             controls.elevator_trim * self.model.elevator_trim_limit(),
         );
+        for (name, angle) in ["AILERON TRIM", "RUDDER TRIM"]
+            .into_iter()
+            .zip(self.model.lateral_trim_angles(controls))
+        {
+            variables.set_number(name, "radians", angle);
+        }
         for (name, position) in ["SPOILERS LEFT POSITION", "SPOILERS RIGHT POSITION"]
             .into_iter()
             .zip(self.spoiler_surfaces)
@@ -1667,6 +1677,62 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires original aircraft with lateral trim records"]
+    fn lateral_trim_events_change_aircraft_moments_using_air_data() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let records = esp_formats::air::parse(&data.air).unwrap();
+            let Some(record) = records.iter().find(|record| record.id == 0x516) else {
+                continue;
+            };
+            let roll = f64::from_le_bytes(record.data[0..8].try_into().unwrap());
+            let yaw = f64::from_le_bytes(record.data[8..16].try_into().unwrap());
+            let mut neutral = Flight::new(&data, 120.0, 2000.0, 0.5, true).unwrap();
+            let mut trimmed = Flight::new(&data, 120.0, 2000.0, 0.5, true).unwrap();
+            let mut base_vars = controls(&data);
+            let mut trim_vars = controls(&data);
+            trim_vars
+                .dispatch_key_event(0x104ab, Value::Number(9010.65))
+                .unwrap();
+            trim_vars
+                .dispatch_key_event(0x104ac, Value::Number(9010.65))
+                .unwrap();
+            neutral.advance(1.0 / 60.0, &mut base_vars).unwrap();
+            trimmed.advance(1.0 / 60.0, &mut trim_vars).unwrap();
+            let delta = trimmed.current.angular_velocity - neutral.current.angular_velocity;
+            if roll != 0.0 {
+                assert!(delta.x * roll < 0.0, "{}: {delta:?}", path.display());
+            }
+            if yaw != 0.0 {
+                assert!(delta.z * yaw > 0.0, "{}: {delta:?}", path.display());
+            }
+            assert!(
+                (trim_vars
+                    .read(&Reference::new('A', "RUDDER TRIM PCT", Some("percent")))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+                    - 10.0)
+                    .abs()
+                    < 1e-9
+            );
+            assert!(
+                (trim_vars
+                    .read(&Reference::new('A', "AILERON TRIM", Some("degrees")))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+                    - 1.0)
+                    .abs()
+                    < 1e-9
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
     }
 
     #[test]

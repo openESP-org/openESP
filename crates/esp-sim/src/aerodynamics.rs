@@ -22,6 +22,8 @@ pub struct Aerodynamics {
     elevator: [f64; 2],
     elevator_trim: f64,
     elevator_trim_limit: f64,
+    lateral_trim: [f64; 2],
+    lateral_trim_limits: [f64; 2],
     spoiler_limit: f64,
     spoileron_gain: f64,
     spoileron_threshold: f64,
@@ -42,6 +44,8 @@ pub struct Controls {
     pub aileron: f64,
     pub rudder: f64,
     pub elevator_trim: f64,
+    pub aileron_trim: f64,
+    pub rudder_trim: f64,
     pub spoilers: f64,
     pub spoiler_difference: f64,
     pub gear: f64,
@@ -85,6 +89,25 @@ impl Aerodynamics {
         let lift = curve(0x404)?;
         let pitch = curve(0x473)?;
         let coefficients = record(0x1101)?.legacy_aerodynamics()?.unwrap();
+        let lateral_trim = if records.iter().any(|r| r.id == 0x516) {
+            let definition = record(0x516)?;
+            ensure!(
+                definition.data.len() == 16,
+                "invalid AIR lateral trim record"
+            );
+            let aileron = f64::from_le_bytes(definition.data[..8].try_into().unwrap());
+            let rudder = f64::from_le_bytes(definition.data[8..].try_into().unwrap());
+            ensure!(
+                aileron.is_finite() && rudder.is_finite(),
+                "invalid AIR lateral trim coefficients"
+            );
+            [
+                aileron * tuning(config, "aileron_trim_effectiveness")?,
+                rudder * tuning(config, "rudder_trim_effectiveness")?,
+            ]
+        } else {
+            [0.0; 2]
+        };
         let geometry = |key| required(config, "airplane_geometry", key);
         let area = geometry("wing_area")? * FOOT * FOOT;
         let span = geometry("wing_span")? * FOOT;
@@ -134,6 +157,15 @@ impl Aerodynamics {
             .number("airplane_geometry", "elevator_trim_limit")?
             .unwrap_or(0.0)
             .to_radians();
+        // Legacy AIR files do not specify lateral trim travel; use ten degrees
+        // when the aircraft does not provide a rudder limit.
+        let lateral_trim_limits = [
+            10f64.to_radians(),
+            config
+                .number("airplane_geometry", "rudder_trim_limit")?
+                .unwrap_or(10.0)
+                .to_radians(),
+        ];
         let spoilerons = config
             .number("airplane_geometry", "spoilerons_available")?
             .unwrap_or(0.0)
@@ -162,6 +194,8 @@ impl Aerodynamics {
             ],
             elevator_trim: elevator_trim_limit * tuning(config, "elevator_trim_effectiveness")?,
             elevator_trim_limit,
+            lateral_trim,
+            lateral_trim_limits,
             spoiler_limit: config
                 .number("airplane_geometry", "spoiler_limit")?
                 .unwrap_or(0.0)
@@ -203,6 +237,8 @@ impl Aerodynamics {
                     &result.rudder,
                     &result.elevator_trim,
                     &result.elevator_trim_limit,
+                    &result.lateral_trim_limits[0],
+                    &result.lateral_trim_limits[1],
                     &result.spoiler_limit,
                     &result.spoileron_gain,
                     &result.spoileron_threshold,
@@ -245,6 +281,8 @@ impl Aerodynamics {
                 controls.aileron,
                 controls.rudder,
                 controls.elevator_trim,
+                controls.aileron_trim,
+                controls.rudder_trim,
                 controls.spoiler_difference
             ]
             .iter()
@@ -303,6 +341,7 @@ impl Aerodynamics {
             + c.side.cy_r * r;
         let roll = c.roll.cl_beta * beta
             + c.roll.cl_delta_aileron * aileron
+            + self.lateral_trim[0] * controls.aileron_trim * self.lateral_trim_limits[0]
             + c.roll.cl_delta_spoiler * controls.spoiler_difference * self.spoiler_limit
             + c.roll.cl_delta_rudder * rudder
             + c.roll.cl_p * p * self.stability.x
@@ -319,6 +358,7 @@ impl Aerodynamics {
         let yaw = c.yaw.cn_beta * beta
             + c.yaw.cn_delta_aileron * aileron
             + c.yaw.cn_delta_rudder * rudder
+            + self.lateral_trim[1] * controls.rudder_trim * self.lateral_trim_limits[1]
             + c.yaw.cn_p * p
             + c.yaw.cn_r * r * self.stability.z;
         let lift_direction = DVec3::new(alpha.sin(), 0.0, -alpha.cos());
@@ -341,6 +381,13 @@ impl Aerodynamics {
 
     pub fn elevator_trim_limit(&self) -> f64 {
         self.elevator_trim_limit
+    }
+
+    pub fn lateral_trim_angles(&self, controls: Controls) -> [f64; 2] {
+        [
+            controls.aileron_trim * self.lateral_trim_limits[0],
+            controls.rudder_trim * self.lateral_trim_limits[1],
+        ]
     }
 
     pub fn has_spoilers(&self) -> bool {

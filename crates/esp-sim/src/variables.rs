@@ -302,6 +302,12 @@ impl Variables {
             0x102c1 => "TOGGLE_MASTER_BATTERY",
             0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
             0x102f0 => "TOGGLE_FLIGHT_DIRECTOR",
+            0x102e4 => "AILERON_TRIM_LEFT",
+            0x102e5 => "AILERON_TRIM_RIGHT",
+            0x102e6 => "RUDDER_TRIM_LEFT",
+            0x102e7 => "RUDDER_TRIM_RIGHT",
+            0x104ab => "AILERON_TRIM_SET",
+            0x104ac => "RUDDER_TRIM_SET",
             0x102f4 => "AXIS_MIXTURE_SET",
             0x102f5 => "TOGGLE_AVIONICS_MASTER",
             0x102fc => "TOGGLE_STARTER1",
@@ -633,6 +639,29 @@ impl Variables {
                     "percent",
                     position.clamp(-100.0, 100.0),
                 );
+                Ok(())
+            }
+            "AILERON_TRIM_LEFT" | "AILERON_TRIM_RIGHT" | "AILERON_TRIM_SET"
+            | "RUDDER_TRIM_LEFT" | "RUDDER_TRIM_RIGHT" | "RUDDER_TRIM_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let variable = if name.starts_with("AILERON") {
+                    "AILERON TRIM PCT"
+                } else {
+                    "RUDDER TRIM PCT"
+                };
+                let current = self
+                    .read(&Reference::new('A', variable, Some("percent")))?
+                    .number()?;
+                let position = if name.ends_with("_LEFT") {
+                    current - 1.0
+                } else if name.ends_with("_RIGHT") {
+                    current + 1.0
+                } else {
+                    value / 16383.0 * 200.0 - 100.0
+                };
+                self.set_number(variable, "percent", position.clamp(-100.0, 100.0));
                 Ok(())
             }
             "AXIS_LEFT_BRAKE_SET" | "AXIS_RIGHT_BRAKE_SET" => {
@@ -1294,6 +1323,33 @@ mod tests {
             100.0
         );
         assert!(variables.configure_throttle_limit(-1.1).is_err());
+    }
+
+    #[test]
+    fn lateral_trim_events_preserve_axes_and_bound_inputs() {
+        let mut variables = Variables::default();
+        variables.set_number("AILERON TRIM PCT", "percent", 0.0);
+        variables.set_number("RUDDER TRIM PCT", "percent", 0.0);
+        variables
+            .dispatch_key_event(0x102e4, Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_event("RUDDER_TRIM_RIGHT", Value::Number(0.0))
+            .unwrap();
+        let aileron = Reference::new('A', "AILERON TRIM PCT", Some("percent"));
+        let rudder = Reference::new('A', "RUDDER TRIM PCT", Some("percent"));
+        assert_eq!(variables.read(&aileron).unwrap().number().unwrap(), -1.0);
+        assert_eq!(variables.read(&rudder).unwrap().number().unwrap(), 1.0);
+        variables
+            .dispatch_event("AILERON_TRIM_SET", Value::Number(1e9))
+            .unwrap();
+        assert_eq!(variables.read(&aileron).unwrap().number().unwrap(), 100.0);
+        assert!(
+            variables
+                .dispatch_event("RUDDER_TRIM_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert_eq!(variables.read(&rudder).unwrap().number().unwrap(), 1.0);
     }
     use esp_script::Program;
 
