@@ -466,6 +466,7 @@ impl Flight {
             spoilers,
             spoiler_difference: self.spoiler_surfaces[0] - self.spoiler_surfaces[1],
             gear: self.gear.extension(),
+            ground_height: None,
         };
         let ground_controls = GroundControls {
             steering: controls.rudder,
@@ -710,6 +711,12 @@ impl Flight {
                 DVec3::Z * 9.80665,
                 |state| {
                     let air = Atmosphere::standard(-state.position.z)?;
+                    let mut controls = controls;
+                    controls.ground_height = Some(self.model.wing_height(
+                        state,
+                        self.loading.cg,
+                        TEST_SURFACE.elevation,
+                    ));
                     let mut loads = self.model.forces(
                         state.air_velocity(DVec3::ZERO),
                         state.angular_velocity,
@@ -1729,6 +1736,35 @@ mod tests {
                     - 1.0)
                     .abs()
                     < 1e-9
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
+
+    #[test]
+    #[ignore = "requires original aircraft ground-effect AIR data"]
+    fn ground_effect_changes_near_surface_flight_response() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let records = esp_formats::air::parse(&data.air).unwrap();
+            let Some(record) = records.iter().find(|r| r.id == 0x400) else {
+                continue;
+            };
+            let range = record.offset..record.offset + 8 + record.data.len();
+            let mut without = FlightData::load(&path, 0).unwrap();
+            without.air.drain(range);
+            let mut near = Flight::new(&data, 100.0, 5.0, 0.5, false).unwrap();
+            let mut baseline = Flight::new(&without, 100.0, 5.0, 0.5, false).unwrap();
+            let mut near_vars = controls(&data);
+            let mut base_vars = controls(&without);
+            near.advance(1.0 / 60.0, &mut near_vars).unwrap();
+            baseline.advance(1.0 / 60.0, &mut base_vars).unwrap();
+            assert!(
+                near.current.velocity.z < baseline.current.velocity.z,
+                "{}",
+                path.display()
             );
             verified += 1;
         }

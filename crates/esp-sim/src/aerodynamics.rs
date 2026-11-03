@@ -13,6 +13,7 @@ const FOOT: f64 = 0.3048;
 pub struct Aerodynamics {
     area: f64,
     span: f64,
+    wing_reference: DVec3,
     chord: f64,
     induced_drag: f64,
     lift_scalar: f64,
@@ -34,6 +35,7 @@ pub struct Aerodynamics {
     pitch_reference: f64,
     lift: Curve,
     pitch: Curve,
+    ground_effect: Option<Curve>,
     coefficients: LegacyParameters,
     flaps: Vec<[f64; 3]>,
 }
@@ -49,6 +51,7 @@ pub struct Controls {
     pub spoilers: f64,
     pub spoiler_difference: f64,
     pub gear: f64,
+    pub ground_height: Option<f64>,
 }
 
 impl Curve {
@@ -123,6 +126,32 @@ impl Aerodynamics {
         let taper = tip / root;
         let chord = 2.0 * root * (1.0 + taper + taper * taper) / (3.0 * (1.0 + taper));
         let weights = WeightBalance::from_config(config)?;
+        let datum = esp_formats::cfg::aircraft::ReferencePoints::from_config(config)?
+            .datum_feet
+            .context("missing reference datum")?;
+        let wing_reference = DVec3::new(
+            datum[0]
+                + config
+                    .number("airplane_geometry", "wing_pos_apex_lon")?
+                    .unwrap_or(0.0),
+            datum[1],
+            -datum[2]
+                - config
+                    .number("airplane_geometry", "wing_pos_apex_vert")?
+                    .unwrap_or(0.0),
+        ) * FOOT;
+        let ground_effect = if records.iter().any(|r| r.id == 0x400) {
+            Some(curve(0x400)?)
+        } else {
+            None
+        };
+        ensure!(
+            ground_effect.as_ref().is_none_or(|curve| curve
+                .0
+                .iter()
+                .all(|point| point.input >= 0.0 && point.output >= 0.0)),
+            "invalid ground effect table"
+        );
         let pitch_reference = if records.iter().any(|r| r.id == 0x1534) {
             let reference = record(0x1534)?;
             ensure!(
@@ -173,6 +202,7 @@ impl Aerodynamics {
         let result = Self {
             area,
             span,
+            wing_reference,
             chord,
             induced_drag: tuning(config, "induced_drag_scalar")?
                 / (std::f64::consts::PI * efficiency * (span * span / area)),
@@ -221,6 +251,7 @@ impl Aerodynamics {
             pitch_reference,
             lift,
             pitch,
+            ground_effect,
             coefficients,
             flaps,
         };
@@ -298,6 +329,12 @@ impl Aerodynamics {
             "invalid gear position"
         );
         ensure!(
+            controls
+                .ground_height
+                .is_none_or(|height| height.is_finite() && height >= 0.0),
+            "invalid height above ground"
+        );
+        ensure!(
             flaps.len() == self.flaps.len() && flaps.iter().all(|n| n.is_finite()),
             "invalid flap deflections"
         );
@@ -324,11 +361,17 @@ impl Aerodynamics {
             });
         let c = &self.coefficients;
         let spoiler = controls.spoilers * self.spoiler_limit;
-        let cl = self.lift_scalar * (self.lift.sample(alpha) + c.lift.cl_flaps * flap.x)
-            + c.lift.cl_spoiler * spoiler
-            + c.lift.cl_de * elevator
-            + c.lift.cl_ih * self.incidence
-            + c.pitch.cl_q * q;
+        // The authored curve approaches unity as height approaches one span.
+        let ground_scalar = controls
+            .ground_height
+            .zip(self.ground_effect.as_ref())
+            .map_or(1.0, |(height, curve)| curve.sample(height / self.span));
+        let cl = ground_scalar
+            * (self.lift_scalar * (self.lift.sample(alpha) + c.lift.cl_flaps * flap.x)
+                + c.lift.cl_spoiler * spoiler
+                + c.lift.cl_de * elevator
+                + c.lift.cl_ih * self.incidence
+                + c.pitch.cl_q * q);
         let cd = self.drag_scalar
             * (c.drag.cd0
                 + c.drag.cd_flaps * flap.y
@@ -381,6 +424,16 @@ impl Aerodynamics {
 
     pub fn elevator_trim_limit(&self) -> f64 {
         self.elevator_trim_limit
+    }
+
+    pub fn wing_height(
+        &self,
+        state: &crate::flight::State,
+        cg: DVec3,
+        ground_elevation: f64,
+    ) -> f64 {
+        (-(state.position + state.orientation * (self.wing_reference - cg)).z - ground_elevation)
+            .max(0.0)
     }
 
     pub fn lateral_trim_angles(&self, controls: Controls) -> [f64; 2] {

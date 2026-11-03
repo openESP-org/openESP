@@ -12,6 +12,81 @@ mod content;
 
 #[test]
 #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+fn authored_ground_effect_changes_lift_by_height_above_the_surface() {
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let data = FlightData::load(&path, 0).unwrap();
+        let records = esp_formats::air::parse(&data.air).unwrap();
+        let Some(record) = records.iter().find(|r| r.id == 0x400) else {
+            continue;
+        };
+        let Some(esp_formats::air::table::Table::Curve(curve)) = record.table().unwrap() else {
+            panic!("invalid ground effect curve")
+        };
+        let model = Aerodynamics::from_data(&data).unwrap();
+        let loading = WeightBalance::from_config(&data.configuration)
+            .unwrap()
+            .load(0.0, false)
+            .unwrap();
+        let flap_count = esp_formats::cfg::aircraft::flaps(&data.configuration)
+            .unwrap()
+            .iter()
+            .filter(|f| f.kind != 0)
+            .count();
+        let flaps = vec![0.0; flap_count];
+        let span = data
+            .configuration
+            .number("airplane_geometry", "wing_span")
+            .unwrap()
+            .unwrap()
+            * 0.3048;
+        let lift = |height| {
+            model
+                .forces(
+                    DVec3::X * 50.0,
+                    DVec3::ZERO,
+                    1.225,
+                    Controls {
+                        ground_height: Some(height),
+                        ..Controls::default()
+                    },
+                    &flaps,
+                    loading.cg,
+                )
+                .unwrap()
+                .force
+                .z
+        };
+        let low = lift(0.0);
+        let high = lift(span * 2.0);
+        let first = curve.points.first().unwrap().output;
+        let last = curve.points.last().unwrap().output;
+        assert!(first > last && high < 0.0 && low < high);
+        assert!((low / high - first / last).abs() < 1e-10);
+        let unbounded = model
+            .forces(
+                DVec3::X * 50.0,
+                DVec3::ZERO,
+                1.225,
+                Controls::default(),
+                &flaps,
+                loading.cg,
+            )
+            .unwrap();
+        assert!((unbounded.force.z - high).abs() < 1e-8);
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -100.0),
+            ..State::default()
+        };
+        let above = model.wing_height(&state, loading.cg, 0.0);
+        assert!((model.wing_height(&state, loading.cg, 5.0) - (above - 5.0)).abs() < 1e-10);
+        verified += 1;
+    }
+    assert!(verified > 0);
+}
+
+#[test]
+#[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
 fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
     let mut count = 0;
     for path in content::aircraft_paths() {
