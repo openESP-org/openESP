@@ -41,6 +41,7 @@ pub struct Command {
     pub throttle: f64,
     pub fuel_valve: bool,
     pub starter: bool,
+    pub ignition: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -204,7 +205,7 @@ impl Turbines {
             let current_n2 = self.spool.sample(self.engines[i].coordinate) * theta.sqrt();
             // Starter torque and ignition thresholds are approximated until pneumatic
             // supply and engine-specific start schedules are available.
-            let lit = (self.engines[i].lit || (command.starter && current_n2 >= 19.4))
+            let lit = (self.engines[i].lit || (command.ignition && current_n2 >= 19.4))
                 && fuel_available
                 && command.fuel_valve;
             let target = if lit {

@@ -16,6 +16,7 @@ fn full(model: &mut Turbines, air: &Atmosphere, speed: f64) {
             throttle: 1.0,
             fuel_valve: true,
             starter: false,
+            ignition: false,
         })
         .collect::<Vec<_>>();
     model.start_running(air, speed).unwrap();
@@ -50,6 +51,7 @@ fn original_turbine_tables_control_thrust_spooling_and_shutdown() {
                 throttle: 1.0,
                 fuel_valve: true,
                 starter: false,
+                ignition: false,
             })
             .collect::<Vec<_>>();
         model.advance(STEP, &sea, 0.0, &commands, true).unwrap();

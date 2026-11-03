@@ -25,6 +25,7 @@ pub struct Flight {
     engines: Option<Propulsion>,
     commands: Vec<Command>,
     fuel_selectors: u32,
+    master_ignition_available: bool,
     pub current: State,
     previous: State,
     previous_cg: DVec3,
@@ -99,6 +100,14 @@ impl Flight {
             "invalid spoiler extension time"
         );
         let weights = WeightBalance::from_config(&data.configuration)?;
+        let master_ignition = data
+            .configuration
+            .number("GeneralEngineData", "master_ignition_switch")?
+            .unwrap_or(0.0);
+        ensure!(
+            master_ignition == 0.0 || master_ignition == 1.0,
+            "invalid master ignition switch configuration"
+        );
         let fuel_selectors = data
             .configuration
             .number("fuel", "number_of_tank_selectors")?
@@ -146,6 +155,7 @@ impl Flight {
             engines: None,
             commands: Vec::new(),
             fuel_selectors: fuel_selectors as u32,
+            master_ignition_available: master_ignition != 0.0,
             previous_cg,
             current,
             previous: current,
@@ -216,6 +226,11 @@ impl Flight {
         if let Some(engines) = &self.engines {
             variables.configure_engines(engines.indices())?;
             variables.configure_fuel_selectors(self.fuel_selectors);
+            variables.set_number("MASTER IGNITION SWITCH", "bool", 1.0);
+            if !engines.is_piston() {
+                variables.set_number("TURB ENG IGNITION SWITCH", "enum", 1.0);
+                variables.set_number("TURB ENG IGNITION ON", "bool", 0.0);
+            }
             for id in engines.indices() {
                 variables.set_number(&format!("GENERAL ENG STARTER:{id}"), "bool", 0.0);
                 variables.set_number(&format!("GENERAL ENG STARTER ACTIVE:{id}"), "bool", 0.0);
@@ -468,6 +483,40 @@ impl Flight {
         let mut selectors = Vec::new();
         if let Some(engines) = &mut self.engines {
             self.commands.clear();
+            let master_ignition = !self.master_ignition_available
+                || variables
+                    .read(&Reference::new('A', "MASTER IGNITION SWITCH", Some("bool")))?
+                    .number()?
+                    != 0.0;
+            let ignition_mode = if engines.is_piston() {
+                0.0
+            } else {
+                variables
+                    .read(&Reference::new(
+                        'A',
+                        "TURB ENG IGNITION SWITCH",
+                        Some("enum"),
+                    ))?
+                    .number()?
+            };
+            ensure!(
+                ignition_mode.fract() == 0.0 && (0.0..=2.0).contains(&ignition_mode),
+                "invalid turbine ignition switch position"
+            );
+            let ignition_power = if engines.is_piston() {
+                false
+            } else {
+                match variables.read(&Reference::new(
+                    'A',
+                    "ELECTRICAL MAIN BUS VOLTAGE",
+                    Some("volts"),
+                )) {
+                    Ok(value) => value.number()? > 0.0,
+                    Err(esp_script::Error::Variable(_)) => false,
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            let mut any_ignition = false;
             for index in engines.indices() {
                 let throttle = variables
                     .read(&Reference::new(
@@ -493,7 +542,8 @@ impl Flight {
                         .number()? as u32
                 };
                 selectors.push(selector);
-                let fuel_valve = self.weights.selected_fuel(&self.loading, selector) > 0.0
+                let fuel_valve = master_ignition
+                    && self.weights.selected_fuel(&self.loading, selector) > 0.0
                     && variables
                         .read(&Reference::new(
                             'A',
@@ -520,6 +570,9 @@ impl Flight {
                             ))?
                             .number()?
                             != 0.0;
+                    }
+                    if !master_ignition {
+                        magnetos = [false; 2];
                     }
                     (mixture, magnetos)
                 } else {
@@ -551,13 +604,21 @@ impl Flight {
                     );
                     active
                 };
+                let ignition = master_ignition
+                    && !engines.is_piston()
+                    && (ignition_mode == 2.0 && ignition_power || ignition_mode == 1.0 && starter);
+                any_ignition |= ignition;
                 self.commands.push(Command {
                     throttle,
                     fuel_valve,
                     mixture,
                     magnetos,
                     starter,
+                    ignition,
                 });
+            }
+            if !engines.is_piston() {
+                variables.set_number("TURB ENG IGNITION ON", "bool", f64::from(any_ignition));
             }
             let air = Atmosphere::standard(-self.current.position.z)?;
             let velocity = self.current.air_velocity(DVec3::ZERO);
@@ -1925,6 +1986,64 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires original piston and turbine aircraft"]
+    fn configured_master_ignition_stops_all_engines_without_closing_fuel_valves() {
+        let mut verified = [false; 2];
+        for path in content::aircraft_paths() {
+            let mut data = FlightData::load(&path, 0).unwrap();
+            let kind = data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                .unwrap() as usize;
+            if kind > 1 {
+                continue;
+            }
+            let source = std::fs::read_to_string(path.join("aircraft.cfg")).unwrap();
+            let source = source
+                .lines()
+                .flat_map(|line| {
+                    if line.trim().eq_ignore_ascii_case("[GeneralEngineData]") {
+                        vec![line.to_owned(), "master_ignition_switch=1".to_owned()]
+                    } else {
+                        vec![line.to_owned()]
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
+            let (speed, height) = if kind == 0 {
+                (0.0, 0.0)
+            } else {
+                (160.0, 5000.0)
+            };
+            let mut flight = Flight::new(&data, speed, height, 0.5, false).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            vars.dispatch_key_event(0x103e7, Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            for index in flight.engines.as_ref().unwrap().indices() {
+                let read = |vars: &mut Variables, prefix| {
+                    vars.read(&Reference::new(
+                        'A',
+                        &format!("{prefix}:{index}"),
+                        Some("bool"),
+                    ))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+                };
+                assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION"), 0.0);
+                assert_eq!(read(&mut vars, "GENERAL ENG FUEL VALVE"), 1.0);
+            }
+            verified[kind] = true;
+        }
+        assert_eq!(verified, [true, true]);
+    }
+
+    #[test]
     #[ignore = "requires original turbine aircraft and AIR flight data"]
     fn turbine_start_requires_starter_power_and_fuel_then_runs_without_starter() {
         let mut verified = 0;
@@ -1975,13 +2094,24 @@ mod tests {
             assert!(read(&mut vars, "TURB ENG N2:1", "percent") >= 19.4);
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 0.0);
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:2", "bool"), 0.0);
+            vars.dispatch_key_event(0x1049d, Value::Number(0.0))
+                .unwrap();
             vars.dispatch_event("TOGGLE_FUEL_VALVE_ENG1", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..60 {
+                vars.update_electrical().unwrap();
+                flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            }
+            assert_eq!(read(&mut vars, "TURB ENG IGNITION ON", "bool"), 0.0);
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 0.0);
+            vars.dispatch_event("TURBINE_IGNITION_SWITCH_AUTO", Value::Number(0.0))
                 .unwrap();
             for _ in 0..600 {
                 vars.update_electrical().unwrap();
                 flight.advance(1.0 / 60.0, &mut vars).unwrap();
             }
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            assert_eq!(read(&mut vars, "TURB ENG IGNITION ON", "bool"), 1.0);
             vars.dispatch_event("STARTER1_SET", Value::Number(0.0))
                 .unwrap();
             for _ in 0..600 {
@@ -1989,6 +2119,7 @@ mod tests {
                 flight.advance(1.0 / 60.0, &mut vars).unwrap();
             }
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            assert_eq!(read(&mut vars, "TURB ENG IGNITION ON", "bool"), 0.0);
             assert!(read(&mut vars, "TURB ENG N2:1", "percent") > 25.0);
             assert_eq!(read(&mut vars, "GENERAL ENG STARTER ACTIVE:1", "bool"), 0.0);
             vars.dispatch_event("TOGGLE_FUEL_VALVE_ENG1", Value::Number(0.0))
@@ -1999,9 +2130,15 @@ mod tests {
                 .unwrap();
             flight.advance(1.0 / 60.0, &mut vars).unwrap();
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 0.0);
-            vars.dispatch_event("STARTER1_SET", Value::Number(1.0))
+            vars.dispatch_key_event(0x10795, Value::Number(0.0))
                 .unwrap();
             flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            assert_eq!(read(&mut vars, "TURB ENG IGNITION ON", "bool"), 1.0);
+            assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
+            vars.dispatch_event("TURBINE_IGNITION_SWITCH_OFF", Value::Number(0.0))
+                .unwrap();
+            flight.advance(1.0 / 60.0, &mut vars).unwrap();
+            assert_eq!(read(&mut vars, "TURB ENG IGNITION ON", "bool"), 0.0);
             assert_eq!(read(&mut vars, "GENERAL ENG COMBUSTION:1", "bool"), 1.0);
             verified += 1;
         }

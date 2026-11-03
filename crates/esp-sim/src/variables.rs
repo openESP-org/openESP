@@ -272,6 +272,12 @@ impl Variables {
             0x10214 => "SPOILERS_ARM_SET",
             0x10305 => "TOGGLE_HYDRAULIC_FAILURE",
             0x10498 => "HYDRAULIC_SWITCH_TOGGLE",
+            0x103e7 => "TOGGLE_MASTER_IGNITION_SWITCH",
+            0x1049d => "TURBINE_IGNITION_SWITCH_TOGGLE",
+            0x10794 => "TURBINE_IGNITION_SWITCH_SET",
+            0x10795 => "TURBINE_IGNITION_SWITCH_ON",
+            0x10796 => "TURBINE_IGNITION_SWITCH_OFF",
+            0x10797 => "TURBINE_IGNITION_SWITCH_AUTO",
             0x102c0 => "TOGGLE_TAXI_LIGHTS",
             0x102c1 => "TOGGLE_MASTER_BATTERY",
             0x102c2 => "TOGGLE_MASTER_ALTERNATOR",
@@ -424,6 +430,36 @@ impl Variables {
             return self.magneto_event(engine, action, value);
         }
         match name {
+            "TOGGLE_MASTER_IGNITION_SWITCH" => self.toggle("MASTER IGNITION SWITCH"),
+            "TURBINE_IGNITION_SWITCH_TOGGLE"
+            | "TURBINE_IGNITION_SWITCH_SET"
+            | "TURBINE_IGNITION_SWITCH_ON"
+            | "TURBINE_IGNITION_SWITCH_OFF"
+            | "TURBINE_IGNITION_SWITCH_AUTO" => {
+                let reference = Reference::new('A', "TURB ENG IGNITION SWITCH", Some("enum"));
+                let current = self.read(&reference)?.number()?;
+                let mode = match name {
+                    "TURBINE_IGNITION_SWITCH_TOGGLE" => {
+                        if current == 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "TURBINE_IGNITION_SWITCH_ON" => 2.0,
+                    "TURBINE_IGNITION_SWITCH_OFF" => 0.0,
+                    "TURBINE_IGNITION_SWITCH_AUTO" => 1.0,
+                    _ if value.is_finite()
+                        && value.fract() == 0.0
+                        && (0.0..=2.0).contains(&value) =>
+                    {
+                        value
+                    }
+                    _ => return Err(Error::Number),
+                };
+                self.set_number("TURB ENG IGNITION SWITCH", "enum", mode);
+                Ok(())
+            }
             "THROTTLE_FULL" | "THROTTLE_CUT" | "THROTTLE_INCR" | "THROTTLE_DECR"
             | "THROTTLE_SET" | "AXIS_THROTTLE_SET" => self.throttle_event(name, value, None),
             "THROTTLE1_SET" => self.throttle_event("THROTTLE_SET", value, Some(1)),
@@ -869,6 +905,27 @@ impl Host for Variables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turbine_ignition_events_keep_the_three_switch_positions() {
+        let mut vars = Variables::default();
+        vars.set_number("TURB ENG IGNITION SWITCH", "enum", 1.0);
+        let switch = Reference::new('A', "TURB ENG IGNITION SWITCH", Some("enum"));
+        vars.dispatch_key_event(0x1049d, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(vars.read(&switch).unwrap(), Value::Number(0.0));
+        vars.dispatch_key_event(0x10795, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(vars.read(&switch).unwrap(), Value::Number(2.0));
+        assert!(
+            vars.dispatch_event("TURBINE_IGNITION_SWITCH_SET", Value::Number(2.5))
+                .is_err()
+        );
+        assert_eq!(vars.read(&switch).unwrap(), Value::Number(2.0));
+        vars.dispatch_key_event(0x10797, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(vars.read(&switch).unwrap(), Value::Number(1.0));
+    }
 
     #[test]
     fn indexed_magnetos_preserve_other_engines_and_report_the_switch_position() {
