@@ -106,6 +106,10 @@ impl Instrument {
         matches!(self.kind, Kind::NavGpsSwitch)
     }
 
+    pub fn is_heading_indicator(&self) -> bool {
+        matches!(self.kind, Kind::Heading)
+    }
+
     pub fn is_altimeter(&self) -> bool {
         matches!(self.kind, Kind::Altimeter)
     }
@@ -139,7 +143,7 @@ impl Instrument {
             ],
             Kind::Heading => [
                 read(host, "HEADING INDICATOR", "degrees"),
-                0.0,
+                read(host, "AUTOPILOT HEADING LOCK DIR", "degrees"),
                 0.0,
                 0.0,
                 0.0,
@@ -645,7 +649,9 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
         return image;
     }
-    if values[0] == f64::MAX || (!matches!(kind, Kind::Altimeter) && values.contains(&f64::MAX)) {
+    if values[0] == f64::MAX
+        || (!matches!(kind, Kind::Altimeter | Kind::Heading) && values.contains(&f64::MAX))
+    {
         let red = Rgba([235, 60, 45, 255]);
         line(&mut image, (36.0, 36.0), (92.0, 92.0), red);
         line(&mut image, (92.0, 36.0), (36.0, 92.0), red);
@@ -908,6 +914,17 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         let value = format!("{:03}", values[0].round().rem_euclid(360.0) as u32);
         label(&mut image, 58, 57, &value, white);
         line(&mut image, (64.0, 9.0), (64.0, 20.0), yellow);
+        label(&mut image, 18, 108, "GYRO", white);
+        label(&mut image, 90, 108, "BUG", white);
+        if values[1] != f64::MAX {
+            let bug_angle = (values[1] - values[0]).to_radians();
+            line(
+                &mut image,
+                point(bug_angle, 44.0),
+                point(bug_angle, 55.0),
+                yellow,
+            );
+        }
     } else {
         line(&mut image, (64.0, 64.0), point(angle, 44.0), white);
         line(&mut image, (63.0, 64.0), point(angle, 44.0), white);

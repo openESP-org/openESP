@@ -484,6 +484,23 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new(),
                     });
                 }
+                if instrument.is_heading_indicator() {
+                    for (bounds, event) in [
+                        ((0.0, 80.0, 32.0, 48.0), "GYRO_DRIFT_DEC"),
+                        ((32.0, 80.0, 32.0, 48.0), "GYRO_DRIFT_INC"),
+                        ((64.0, 80.0, 32.0, 48.0), "HEADING_BUG_DEC"),
+                        ((96.0, 80.0, 32.0, 48.0), "HEADING_BUG_INC"),
+                    ] {
+                        raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: true, visibility: Vec::new() });
+                    }
+                    for (bounds, prefix) in [((0.0, 0.0, 64.0, 128.0), "GYRO_DRIFT"), ((64.0, 0.0, 64.0, 128.0), "HEADING_BUG")] {
+                        raw_areas.push(MouseAreaSource {
+                            bounds,
+                            source: format!("(M:Event) 'WheelUp' scmp 0 == if{{ 0 (>K:{prefix}_INC) }} (M:Event) 'WheelDown' scmp 0 == if{{ 0 (>K:{prefix}_DEC) }}"),
+                            events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
+                        });
+                    }
+                }
                 if instrument.is_altimeter() {
                     for (bounds, event) in [((0.0, 80.0, 64.0, 48.0), "KOHLSMAN_DEC"), ((64.0, 80.0, 64.0, 48.0), "KOHLSMAN_INC")] {
                         raw_areas.push(MouseAreaSource { bounds, source: format!("1 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: true, visibility: Vec::new() });
@@ -1314,6 +1331,74 @@ mod tests {
         assert_eq!(host.events, ["FLAPS_INCR", "FLAPS_DECR", "FLAPS_INCR"]);
     }
 
+    #[test]
+    fn fallback_heading_indicator_adjusts_gyro_and_heading_bug() {
+        struct HeadingHost {
+            heading: f64,
+            bug: f64,
+            events: Vec<String>,
+        }
+        impl Host for HeadingHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "HEADING INDICATOR" => Ok(Value::Number(self.heading)),
+                    "AUTOPILOT HEADING LOCK DIR" => Ok(Value::Number(self.bug)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+                if reference.category != 'K' {
+                    return Err(Error::Type);
+                }
+                self.events.push(reference.name.clone());
+                match reference.name.as_str() {
+                    "GYRO_DRIFT_INC" => self.heading += 1.0,
+                    "GYRO_DRIFT_DEC" => self.heading -= 1.0,
+                    "HEADING_BUG_INC" => self.bug += 1.0,
+                    "HEADING_BUG_DEC" => self.bug -= 1.0,
+                    _ => return Err(Error::Variable(reference.name.clone())),
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna!Heading_Indicator,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = HeadingHost {
+            heading: 0.0,
+            bug: 90.0,
+            events: Vec::new(),
+        };
+        assert!(image.update(&mut host));
+        let original = image.image.clone();
+        assert!(image.left_click(40.0, 100.0, &mut host).unwrap());
+        assert!(image.update(&mut host));
+        assert_ne!(original, image.image);
+        assert!(image.left_click(20.0, 100.0, &mut host).unwrap());
+        assert!(image.left_click(110.0, 100.0, &mut host).unwrap());
+        assert!(image.update(&mut host));
+        assert_ne!(original, image.image);
+        let areas = image.mouse_areas_at(100.0, 50.0);
+        assert!(
+            image
+                .mouse_event(MouseEvent::WheelDown, &areas, [100.0, 50.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(
+            host.events,
+            [
+                "GYRO_DRIFT_INC",
+                "GYRO_DRIFT_DEC",
+                "HEADING_BUG_INC",
+                "HEADING_BUG_DEC"
+            ]
+        );
+        assert!(image.update(&mut host));
+        assert_eq!(original, image.image);
+    }
     #[test]
     fn fallback_altimeter_displays_and_adjusts_barometric_setting() {
         struct AltimeterHost {
