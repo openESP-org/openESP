@@ -59,6 +59,21 @@ impl Origin {
             ((longitude + PI).rem_euclid(TAU) - PI).to_degrees(),
         ))
     }
+
+    pub fn local_position(&self, latitude: f64, longitude: f64) -> Result<(f64, f64)> {
+        let target = Self::new(latitude, longitude)?;
+        let delta_latitude = target.latitude - self.latitude;
+        let delta_longitude = target.longitude - self.longitude;
+        let h = ((delta_latitude / 2.0).sin().powi(2)
+            + self.latitude.cos() * target.latitude.cos() * (delta_longitude / 2.0).sin().powi(2))
+        .clamp(0.0, 1.0);
+        let distance = 2.0 * EARTH_RADIUS_METERS * h.sqrt().atan2((1.0 - h).sqrt());
+        let bearing = (delta_longitude.sin() * target.latitude.cos()).atan2(
+            self.latitude.cos() * target.latitude.sin()
+                - self.latitude.sin() * target.latitude.cos() * delta_longitude.cos(),
+        );
+        Ok((distance * bearing.cos(), distance * bearing.sin()))
+    }
 }
 
 pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
@@ -614,6 +629,9 @@ mod tests {
         let (latitude, longitude) = origin.position(0.0, 0.2 * degree).unwrap();
         assert!(latitude.abs() < 1e-10);
         assert!((longitude + 179.9).abs() < 1e-10);
+        let (north, east) = origin.local_position(latitude, longitude).unwrap();
+        assert!(north.abs() < 1e-6);
+        assert!((east - 0.2 * degree).abs() < 1e-6);
         assert!(Origin::new(91.0, 0.0).is_err());
         assert!(Origin::new(0.0, -181.0).is_err());
         assert!(Origin::new(f64::NAN, 0.0).is_err());

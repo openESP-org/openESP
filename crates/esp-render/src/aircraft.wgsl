@@ -37,7 +37,7 @@ struct Output {
         default: {}
     }
     if !passes { discard; }
-    if draw.settings.y > 0.0 {
+    if draw.settings.y > 0.0 && draw.settings.y < 1.5 {
         let distance = abs(fract(input.uv - 0.5) - 0.5);
         let width = max(fwidth(input.uv), vec2(0.0001));
         let lines = 1.0 - smoothstep(vec2(0.008), vec2(0.008) + width * 0.5, distance);

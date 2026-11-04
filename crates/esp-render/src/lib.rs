@@ -66,6 +66,7 @@ pub struct Renderer {
     interior: Vec<Draw>,
     panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
+    runway: Vec<Draw>,
     pub centre: Vec3,
     pub radius: f32,
     pub aircraft_origin: DVec3,
@@ -73,8 +74,52 @@ pub struct Renderer {
     pub cockpit_eye: Option<DVec3>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Runway {
+    pub threshold: DVec3,
+    /// Clockwise from true north, in radians.
+    pub heading: f64,
+}
+
+fn runway_mesh(markings: bool) -> (Vec<Vertex>, Vec<u16>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut rectangle = |left: f32, right: f32, start: f32, end: f32, height: f32| {
+        let base = vertices.len() as u16;
+        vertices.extend(
+            [(left, start), (left, end), (right, end), (right, start)].map(|(x, z)| Vertex {
+                position: [x, height, z],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
+            }),
+        );
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+    if markings {
+        rectangle(-21.5, -21.0, 0.0, 2000.0, 0.06);
+        rectangle(21.0, 21.5, 0.0, 2000.0, 0.06);
+        for step in 0..29 {
+            let start = 150.0 + step as f32 * 60.0;
+            rectangle(-0.45, 0.45, start, start + 30.0, 0.06);
+        }
+        for side in [-1.0, 1.0] {
+            for stripe in 0..4 {
+                let center = side * (3.0 + stripe as f32 * 4.0);
+                rectangle(center - 0.75, center + 0.75, 6.0, 36.0, 0.06);
+            }
+        }
+    } else {
+        rectangle(-22.5, 22.5, 0.0, 2000.0, 0.03);
+    }
+    (vertices, indices)
+}
+
 impl Renderer {
-    pub async fn new(window: Arc<Window>, aircraft: &Aircraft) -> Result<Self> {
+    pub async fn new(
+        window: Arc<Window>,
+        aircraft: &Aircraft,
+        runway: Option<Runway>,
+    ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
         // Some Windows GL drivers can fail even when DX12 was selected for
         // rendering.
@@ -381,7 +426,7 @@ impl Renderer {
         let aircraft_origin = DVec3::new(0.0, -f64::from(min.y), 0.0);
         let centre = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(1.0);
-        let extent = (radius * 4.0).max(50.0);
+        let extent = 40_000.0;
         let vertices = [
             (-extent, -extent),
             (-extent, extent),
@@ -419,6 +464,45 @@ impl Renderer {
                 pipeline: 0,
             },
         );
+        let mut runway_draws = Vec::new();
+        if let Some(runway) = runway {
+            anyhow::ensure!(
+                runway.threshold.is_finite() && runway.heading.is_finite(),
+                "invalid runway position"
+            );
+            let transform = Mat4::from_translation(runway.threshold.as_vec3())
+                * Mat4::from_rotation_y(runway.heading as f32);
+            anyhow::ensure!(
+                transform.is_finite(),
+                "runway is outside the renderable scene"
+            );
+            for (markings, color) in [
+                (false, [0.12, 0.12, 0.12, 1.0]),
+                (true, [0.92, 0.92, 0.92, 1.0]),
+            ] {
+                let (vertices, indices) = runway_mesh(markings);
+                runway_draws.push(make_draw(
+                    &device,
+                    &draw_layout,
+                    &sampler,
+                    &white,
+                    DrawData {
+                        vertices: &vertices,
+                        indices: &indices,
+                        transform,
+                        uniform: DrawUniform {
+                            model: Mat4::IDENTITY.to_cols_array_2d(),
+                            normal: Mat4::IDENTITY.to_cols_array_2d(),
+                            diffuse: color,
+                            settings: [0.0, 2.0, 0.0, 0.0],
+                        },
+                        blended: false,
+                        node: None,
+                        pipeline: 0,
+                    },
+                ));
+            }
+        }
         let cockpit_eye = aircraft
             .eyepoint
             .map(|eye| aircraft_origin + eye.as_dvec3());
@@ -436,6 +520,7 @@ impl Renderer {
             interior,
             panels,
             ground,
+            runway: runway_draws,
             centre,
             radius,
             aircraft_origin,
@@ -535,7 +620,16 @@ impl Renderer {
         } else {
             &mut self.exterior
         };
-        for draw in draws.iter_mut().chain(std::iter::once(&mut self.ground)) {
+        self.ground.transform = Mat4::from_translation(Vec3::new(
+            camera.position.x.round() as f32,
+            0.0,
+            camera.position.z.round() as f32,
+        ));
+        for draw in draws
+            .iter_mut()
+            .chain(std::iter::once(&mut self.ground))
+            .chain(self.runway.iter_mut())
+        {
             let (origin, rotation) = if draw.uniform.settings[1] > 0.0 {
                 (DVec3::ZERO, Mat4::IDENTITY)
             } else {
@@ -600,6 +694,9 @@ impl Renderer {
                 pass.draw_indexed(0..draw.count, 0, 0..1);
             };
             draw_one(&mut pass, &self.ground);
+            for draw in &self.runway {
+                draw_one(&mut pass, draw);
+            }
             for draw in draws.iter().filter(|d| d.visible && !d.blended) {
                 draw_one(&mut pass, draw);
             }
@@ -834,5 +931,25 @@ fn make_draw(
         node,
         visible: true,
         pipeline,
+    }
+}
+
+#[cfg(test)]
+mod runway_tests {
+    use super::*;
+
+    #[test]
+    fn runway_surface_and_markings_have_valid_triangles() {
+        for marked in [false, true] {
+            let (vertices, indices) = runway_mesh(marked);
+            assert!(!vertices.is_empty());
+            assert_eq!(indices.len() % 3, 0);
+            assert!(indices.iter().all(|&i| usize::from(i) < vertices.len()));
+            assert!(
+                vertices
+                    .iter()
+                    .all(|v| v.position.iter().all(|x| x.is_finite()))
+            );
+        }
     }
 }

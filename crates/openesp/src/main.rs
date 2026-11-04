@@ -478,9 +478,27 @@ impl App {
                     }
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
+                    let runway = if let (Some(latitude), Some(longitude), Some(course)) = (
+                        self.arguments.vor_latitude,
+                        self.arguments.vor_longitude,
+                        self.arguments.ils_course,
+                    ) {
+                        let origin = navigation::Origin::new(
+                            self.arguments.latitude,
+                            self.arguments.longitude,
+                        )?;
+                        let (north, east) = origin.local_position(latitude, longitude)?;
+                        Some(esp_render::Runway {
+                            threshold: DVec3::new(east, 0.0, north),
+                            heading: (course + self.arguments.magnetic_declination).to_radians(),
+                        })
+                    } else {
+                        None
+                    };
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
+                        runway,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
                     self.interior_state = aircraft
