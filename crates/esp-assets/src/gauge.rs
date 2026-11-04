@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
 
+mod fallback;
 mod mask;
 mod rotation;
 mod text;
@@ -93,6 +94,7 @@ struct Canvas {
     position: (i64, i64),
     layers: Vec<Layer>,
     cached: Option<RgbaImage>,
+    fallback: Option<fallback::Instrument>,
 }
 
 struct Layer {
@@ -305,6 +307,9 @@ impl PanelImage {
         let mut changed = false;
         for gauge in &mut self.gauges {
             let mut dirty = false;
+            if let Some(instrument) = &mut gauge.fallback {
+                dirty |= instrument.update(host);
+            }
             for layer in &mut gauge.layers {
                 for motion in &mut layer.motion {
                     motion.advance(&self.conditions, dt, host);
@@ -355,7 +360,10 @@ impl PanelImage {
             if gauge.cached.is_some() {
                 continue;
             }
-            let mut art = RgbaImage::new(gauge.size.0, gauge.size.1);
+            let mut art = gauge.fallback.as_ref().map_or_else(
+                || RgbaImage::new(gauge.size.0, gauge.size.1),
+                |instrument| instrument.image.clone(),
+            );
             for layer in &gauge.layers {
                 if layer.visible {
                     mask::draw(&layer.image, layer.transform, &layer.masks, &mut art);
@@ -452,7 +460,30 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
             let mut conditions = Vec::new();
             let mut omitted_elements = 0;
             let Some(xml) = panel.read_xml_gauge(gauge.reference, 8 * 1024 * 1024)? else {
-                return Ok(None);
+                let Some(instrument) = fallback::Instrument::new(gauge.reference) else {
+                    return Ok(None);
+                };
+                let target_width =
+                    dimension(gauge.width.unwrap_or(128.0) * f64::from(width) / dimensions.width)?;
+                let target_height =
+                    dimension(gauge.height.unwrap_or(128.0) * f64::from(height) / layout_height)?;
+                return Ok(Some((
+                    Canvas {
+                        size: (128, 128),
+                        target: (target_width, target_height),
+                        position: (
+                            (gauge.x * f64::from(width) / dimensions.width).round() as i64,
+                            (gauge.y * f64::from(height) / layout_height).round() as i64,
+                        ),
+                        layers: Vec::new(),
+                        cached: None,
+                        fallback: Some(instrument),
+                    },
+                    conditions,
+                    omitted_elements,
+                    Vec::new(),
+                    Vec::new(),
+                )));
             };
             let text = std::str::from_utf8(&xml)?;
             let document = Gauge::parse(text)?;
@@ -752,6 +783,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 ),
                 layers,
                 cached: None,
+                fallback: None,
             };
             let mut raw_areas = Vec::new();
             collect_mouse_areas(document.root(), 0.0, 0.0, &mut raw_areas)?;
@@ -1051,6 +1083,33 @@ mod tests {
         fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
             Err(Error::Type)
         }
+    }
+
+    #[test]
+    fn missing_flight_gauge_uses_live_fallback_and_installed_xml_takes_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        std::fs::create_dir_all(&panel_path).unwrap();
+        std::fs::write(panel_path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna172!Airspeed,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = TestHost(50.0);
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        assert!(!image.update(&mut host));
+        host.0 = 120.0;
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        let module = panel_path.join("Cessna172");
+        std::fs::create_dir(&module).unwrap();
+        std::fs::write(
+            module.join("Airspeed.xml"),
+            "<Gauge><Size X=\"128\" Y=\"128\"/></Gauge>",
+        )
+        .unwrap();
+        let original = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert!(original.gauges[0].fallback.is_none());
     }
     #[test]
     fn composes_images_with_hidden_elements() {
