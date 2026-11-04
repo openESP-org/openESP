@@ -41,7 +41,7 @@ struct Output {
         let distance = abs(fract(input.uv - 0.5) - 0.5);
         let width = max(fwidth(input.uv), vec2(0.0001));
         let lines = 1.0 - smoothstep(vec2(0.008), vec2(0.008) + width * 0.5, distance);
-        let fade = 1.0 - smoothstep(0.2, 0.8, max(width.x, width.y));
+        let fade = 1.0 - smoothstep(0.2, 0.5, max(width.x, width.y));
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
         return colour;
     }

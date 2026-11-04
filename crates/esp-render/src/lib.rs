@@ -426,18 +426,50 @@ impl Renderer {
         let aircraft_origin = DVec3::new(0.0, -f64::from(min.y), 0.0);
         let centre = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(1.0);
+        // Grid lines come from interpolated UVs, whose precision degrades with
+        // the vertex span. Only cell-sized lines survive the distance fade, so
+        // the pattern-precise square only needs to cover where lines are
+        // visible; the surrounding fill reaches the horizon.
         let extent = 40_000.0;
-        let vertices = [
-            (-extent, -extent),
+        let pattern = 1_024.0;
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut quad = |points: [(f64, f64); 4]| {
+            let base = vertices.len() as u16;
+            for (x, z) in points {
+                vertices.push(Vertex {
+                    position: [x as f32, 0.0, z as f32],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [x as f32, z as f32],
+                });
+            }
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        quad([(-pattern, -pattern), (-pattern, pattern), (pattern, pattern), (pattern, -pattern)]);
+        quad([
+            (-extent, pattern),
             (-extent, extent),
             (extent, extent),
+            (extent, pattern),
+        ]);
+        quad([
+            (-extent, -extent),
+            (-extent, -pattern),
+            (extent, -pattern),
             (extent, -extent),
-        ]
-        .map(|(x, z)| Vertex {
-            position: [x, 0.0, z],
-            normal: [0.0, 1.0, 0.0],
-            uv: [x, z],
-        });
+        ]);
+        quad([
+            (-extent, -pattern),
+            (-extent, pattern),
+            (-pattern, pattern),
+            (-pattern, -pattern),
+        ]);
+        quad([
+            (pattern, -pattern),
+            (pattern, pattern),
+            (extent, pattern),
+            (extent, -pattern),
+        ]);
         let white = upload_texture(
             &device,
             &queue,
@@ -451,7 +483,7 @@ impl Renderer {
             &white,
             DrawData {
                 vertices: &vertices,
-                indices: &[0, 1, 2, 0, 2, 3],
+                indices: &indices,
                 transform: Mat4::IDENTITY,
                 uniform: DrawUniform {
                     model: Mat4::IDENTITY.to_cols_array_2d(),
