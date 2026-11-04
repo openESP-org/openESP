@@ -13,6 +13,7 @@ enum Kind {
     Airspeed,
     Altimeter,
     Heading,
+    Compass,
     VerticalSpeed,
     Attitude,
     Tachometer,
@@ -43,6 +44,9 @@ impl Instrument {
             ("CESSNA172", "AIRSPEED") => Kind::Airspeed,
             ("CESSNA", "ALTIMETER") => Kind::Altimeter,
             ("CESSNA", "HEADING_INDICATOR") => Kind::Heading,
+            ("CESSNAWALPHA", "WHISKEY_COMPASS_ALPHA")
+            | ("CESSNA", "WHISKEY_COMPASS")
+            | ("CESSNA172", "WHISKEY_COMPASS") => Kind::Compass,
             ("CESSNA", "VERTICAL_SPEED") => Kind::VerticalSpeed,
             ("BELL_206B", "ATTITUDE") | ("CESSNAWALPHA", "ATTITUDE_ALPHA") => Kind::Attitude,
             ("CESSNA172", "TACHOMETER") => Kind::Tachometer,
@@ -60,7 +64,7 @@ impl Instrument {
         };
         Some(Self {
             kind,
-            image: if matches!(kind, Kind::Radio1 | Kind::Radio2) {
+            image: if matches!(kind, Kind::Radio1 | Kind::Radio2 | Kind::Compass) {
                 RgbaImage::new(256, 96)
             } else {
                 RgbaImage::new(128, 128)
@@ -112,6 +116,13 @@ impl Instrument {
             Kind::Altimeter => [read(host, "INDICATED ALTITUDE", "feet"), 0.0, 0.0, 0.0, 0.0],
             Kind::Heading => [
                 read(host, "HEADING INDICATOR", "degrees"),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            Kind::Compass => [
+                read(host, "MAGNETIC COMPASS", "degrees"),
                 0.0,
                 0.0,
                 0.0,
@@ -362,7 +373,48 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         }
         return image;
     }
-    if matches!(kind, Kind::Radio1 | Kind::Radio2) {
+    if matches!(kind, Kind::Compass) {
+        let mut image = RgbaImage::from_pixel(256, 96, Rgba([40, 40, 38, 255]));
+        draw_filled_rect_mut(
+            &mut image,
+            Rect::at(5, 5).of_size(246, 86),
+            Rgba([10, 12, 12, 255]),
+        );
+        let white = Rgba([235, 235, 225, 255]);
+        let yellow = Rgba([255, 200, 50, 255]);
+        if values[0] == f64::MAX {
+            label_scaled(&mut image, 110, 42, "OFF", Rgba([235, 60, 45, 255]), 2);
+        } else {
+            let heading = values[0].rem_euclid(360.0);
+            for bearing in (0..360).step_by(10) {
+                let delta = (bearing as f64 - heading + 180.0).rem_euclid(360.0) - 180.0;
+                let x = (128.0 + delta * 2.0).round() as i32;
+                if !(18..=238).contains(&x) {
+                    continue;
+                }
+                let major = bearing % 30 == 0;
+                line(
+                    &mut image,
+                    (x as f32, 25.0),
+                    (x as f32, if major { 43.0 } else { 35.0 }),
+                    white,
+                );
+                if major {
+                    let text = match bearing {
+                        0 => "N".to_owned(),
+                        90 => "E".to_owned(),
+                        180 => "S".to_owned(),
+                        270 => "W".to_owned(),
+                        _ => (bearing / 10).to_string(),
+                    };
+                    label_scaled(&mut image, x - text.len() as i32 * 4, 50, &text, white, 2);
+                }
+            }
+            line(&mut image, (128.0, 9.0), (128.0, 71.0), yellow);
+        }
+        return image;
+    }
+    if matches!(kind, Kind::Radio1 | Kind::Radio2 | Kind::Compass) {
         let mut image = RgbaImage::from_pixel(256, 96, Rgba([48, 48, 47, 255]));
         draw_filled_rect_mut(
             &mut image,
@@ -672,6 +724,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         Kind::VerticalSpeed => ("FPM", -2000.0, 2000.0, 8),
         Kind::Tachometer => ("RPM", 0.0, 3000.0, 6),
         Kind::Attitude
+        | Kind::Compass
         | Kind::TurnCoordinator
         | Kind::Fuel
         | Kind::FuelFlow

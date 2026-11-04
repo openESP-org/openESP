@@ -1298,6 +1298,40 @@ mod tests {
     }
 
     #[test]
+    fn fallback_magnetic_compass_tracks_heading_and_wraps_at_north() {
+        struct CompassHost(Option<f64>);
+        impl Host for CompassHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                if reference.name == "MAGNETIC COMPASS" {
+                    self.0
+                        .map(Value::Number)
+                        .ok_or_else(|| Error::Variable(reference.name.clone()))
+                } else {
+                    Err(Error::Variable(reference.name.clone()))
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        assert!(fallback::Instrument::new("Cessna172!Whiskey_Compass").is_some());
+        let mut gauge = fallback::Instrument::new("CessnaWAlpha!Whiskey_Compass_Alpha").unwrap();
+        let mut host = CompassHost(None);
+        assert!(gauge.update(&mut host));
+        let missing = gauge.image.clone();
+        host.0 = Some(0.0);
+        assert!(gauge.update(&mut host));
+        let north = gauge.image.clone();
+        assert_ne!(missing, north);
+        host.0 = Some(90.0);
+        assert!(gauge.update(&mut host));
+        assert_ne!(north, gauge.image);
+        host.0 = Some(360.0);
+        assert!(gauge.update(&mut host));
+        assert_eq!(north, gauge.image);
+        assert!(!gauge.update(&mut host));
+    }
+    #[test]
     fn fallback_clock_reads_utc_and_updates_when_seconds_change() {
         struct ClockHost(f64);
         impl Host for ClockHost {
