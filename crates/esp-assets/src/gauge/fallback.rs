@@ -19,6 +19,7 @@ enum Kind {
     Fuel,
     FuelFlow,
     Flaps,
+    Clock,
     TurnCoordinator,
     Vor1,
     Vor2,
@@ -47,6 +48,7 @@ impl Instrument {
             ("CESSNA172", "FUEL") => Kind::Fuel,
             ("CESSNA172", "EGT_FUEL_FLOW") => Kind::FuelFlow,
             ("CESSNA", "FLAPS") => Kind::Flaps,
+            ("CESSNA172", "CLOCK") => Kind::Clock,
             ("CESSNA", "TURN_INDICATOR") => Kind::TurnCoordinator,
             ("CESSNA", "VOR1") | ("CESSNAWALPHA", "VOR1_ALPHA") => Kind::Vor1,
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
@@ -144,6 +146,18 @@ impl Instrument {
             ],
             Kind::Flaps => [
                 read(host, "TRAILING EDGE FLAPS LEFT ANGLE", "degrees"),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            Kind::Clock => [
+                host.read(&Reference::new('E', "ZULU TIME", Some("seconds")))
+                    .ok()
+                    .and_then(|value| value.number().ok())
+                    .filter(|value| value.is_finite())
+                    .map(f64::floor)
+                    .unwrap_or(f64::MAX),
                 0.0,
                 0.0,
                 0.0,
@@ -266,6 +280,7 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
             '-' => [0, 0, 7, 0, 0],
             '+' => [0, 2, 7, 2, 0],
             '.' => [0, 0, 0, 0, 2],
+            ':' => [0, 2, 0, 2, 0],
             'A' => [2, 5, 7, 5, 5],
             'B' => [6, 5, 6, 5, 6],
             'C' => [7, 4, 4, 4, 7],
@@ -499,6 +514,68 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
         return image;
     }
+    if matches!(kind, Kind::Clock) {
+        for i in 0..12 {
+            let angle = i as f64 * PI / 6.0;
+            line(
+                &mut image,
+                point(angle, 46.0),
+                point(angle, if i % 3 == 0 { 39.0 } else { 43.0 }),
+                white,
+            );
+            if i % 3 == 0 {
+                let text = if i == 0 {
+                    "12".to_owned()
+                } else {
+                    i.to_string()
+                };
+                let (x, y) = point(angle, 32.0);
+                label(
+                    &mut image,
+                    x as i32 - text.len() as i32 * 2,
+                    y as i32 - 2,
+                    &text,
+                    white,
+                );
+            }
+        }
+        let seconds = values[0].rem_euclid(86_400.0);
+        let hour = seconds / 3600.0;
+        let minute = seconds / 60.0;
+        line(
+            &mut image,
+            (64.0, 64.0),
+            point(hour * PI / 6.0, 24.0),
+            white,
+        );
+        line(
+            &mut image,
+            (64.0, 64.0),
+            point(minute * PI / 30.0, 37.0),
+            white,
+        );
+        line(
+            &mut image,
+            (64.0, 64.0),
+            point(seconds * PI / 30.0, 43.0),
+            yellow,
+        );
+        draw_filled_circle_mut(&mut image, (64, 64), 3, yellow);
+        label(
+            &mut image,
+            54,
+            87,
+            &format!(
+                "{:02}:{:02}",
+                (seconds / 3600.0) as u32,
+                (seconds / 60.0) as u32 % 60
+            ),
+            white,
+        );
+        label(&mut image, 58, 96, "UTC", white);
+        draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
+        return image;
+    }
     if matches!(kind, Kind::Vor1 | Kind::Vor2) {
         for i in 0..36 {
             let angle = (i as f64 * 10.0 - values[0]).to_radians();
@@ -555,6 +632,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         | Kind::Fuel
         | Kind::FuelFlow
         | Kind::Flaps
+        | Kind::Clock
         | Kind::Vor1
         | Kind::Vor2
         | Kind::Radio1

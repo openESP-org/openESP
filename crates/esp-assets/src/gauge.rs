@@ -1298,6 +1298,32 @@ mod tests {
     }
 
     #[test]
+    fn fallback_clock_reads_utc_and_updates_when_seconds_change() {
+        struct ClockHost(f64);
+        impl Host for ClockHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                if reference.category == 'E' && reference.name == "ZULU TIME" {
+                    Ok(Value::Number(self.0))
+                } else {
+                    Err(Error::Variable(reference.name.clone()))
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut clock = fallback::Instrument::new("Cessna172!Clock").unwrap();
+        let mut host = ClockHost(43_200.0);
+        assert!(clock.update(&mut host));
+        let before = clock.image.clone();
+        host.0 += 0.5;
+        assert!(!clock.update(&mut host));
+        host.0 += 0.5;
+        assert!(clock.update(&mut host));
+        assert_ne!(before, clock.image);
+    }
+
+    #[test]
     fn fallback_fuel_gauges_follow_tank_quantities_and_engine_flow() {
         struct FuelHost {
             left: f64,

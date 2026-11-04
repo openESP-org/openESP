@@ -1,7 +1,59 @@
+use crate::variables::Variables;
 use anyhow::{Result, ensure};
+use esp_script::Value;
 
 pub const STEP: f64 = 1.0 / 60.0;
 const MAX_FRAME: f64 = 0.25;
+
+pub struct SimTime {
+    utc_seconds: f64,
+    elapsed: f64,
+}
+
+impl SimTime {
+    pub fn new(utc_seconds: f64) -> Result<Self> {
+        ensure!(
+            utc_seconds.is_finite() && (0.0..86_400.0).contains(&utc_seconds),
+            "UTC time must be within a day"
+        );
+        Ok(Self {
+            utc_seconds,
+            elapsed: 0.0,
+        })
+    }
+
+    pub fn now() -> Result<Self> {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs_f64();
+        Self::new(seconds.rem_euclid(86_400.0))
+    }
+
+    pub fn advance(&mut self, dt: f64) -> Result<()> {
+        ensure!(
+            dt.is_finite() && dt >= 0.0 && (self.elapsed + dt).is_finite(),
+            "invalid simulation time step"
+        );
+        self.utc_seconds = (self.utc_seconds + dt.rem_euclid(86_400.0)).rem_euclid(86_400.0);
+        self.elapsed += dt;
+        Ok(())
+    }
+
+    pub fn publish(&self, variables: &mut Variables) {
+        variables.set(
+            'E',
+            "ZULU TIME",
+            Some("seconds"),
+            Value::Number(self.utc_seconds),
+        );
+        variables.set(
+            'E',
+            "SIMULATION TIME",
+            Some("seconds"),
+            Value::Number(self.elapsed),
+        );
+    }
+}
 
 #[derive(Default)]
 pub struct Clock {
@@ -37,6 +89,28 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esp_script::{Host, Reference};
+
+    #[test]
+    fn simulation_time_advances_and_utc_wraps_at_midnight() {
+        let mut time = SimTime::new(86_399.5).unwrap();
+        let mut variables = Variables::default();
+        time.publish(&mut variables);
+        let read = |variables: &mut Variables, name| {
+            variables
+                .read(&Reference::new('E', name, Some("seconds")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert_eq!(read(&mut variables, "ZULU TIME"), 86_399.5);
+        time.advance(1.0).unwrap();
+        time.publish(&mut variables);
+        assert_eq!(read(&mut variables, "ZULU TIME"), 0.5);
+        assert_eq!(read(&mut variables, "SIMULATION TIME"), 1.0);
+        assert!(time.advance(-1.0).is_err());
+        assert!(SimTime::new(86_400.0).is_err());
+    }
 
     #[test]
     fn partitions_render_frames_into_identical_simulation_ticks() {

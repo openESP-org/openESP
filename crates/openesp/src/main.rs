@@ -6,7 +6,7 @@ use esp_script::Value;
 use esp_sim::{
     animation::ModelState,
     interaction, picking,
-    time::{Clock, STEP},
+    time::{Clock, STEP, SimTime},
     variables::Variables,
 };
 use glam::{DVec3, Mat4, Vec3};
@@ -42,6 +42,8 @@ struct Arguments {
     variant: u32,
     #[arg(long)]
     cockpit: bool,
+    #[arg(long, value_parser = parse_utc_time, help = "Set starting UTC time as HH:MM or HH:MM:SS")]
+    utc_time: Option<f64>,
     #[arg(
         long,
         alias = "glide",
@@ -209,6 +211,28 @@ struct StartupEvent {
     value: f64,
 }
 
+fn parse_utc_time(text: &str) -> Result<f64, String> {
+    let parts = text.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.len() != 2 || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("expected UTC time HH:MM or HH:MM:SS".into());
+    }
+    let hour = parts[0].parse::<u32>().map_err(|e| e.to_string())?;
+    let minute = parts[1].parse::<u32>().map_err(|e| e.to_string())?;
+    let second = if parts.len() == 3 {
+        parts[2].parse::<u32>().map_err(|e| e.to_string())?
+    } else {
+        0
+    };
+    if hour >= 24 || minute >= 60 || second >= 60 {
+        return Err("invalid UTC time".into());
+    }
+    Ok(f64::from(hour * 3600 + minute * 60 + second))
+}
+
 fn parse_event(text: &str) -> Result<StartupEvent, String> {
     let (name, value) = text.split_once('=').unwrap_or((text, "0"));
     let name = name.trim();
@@ -272,6 +296,7 @@ struct App {
     interior_state: Option<ModelState>,
     variables: Variables,
     clock: Clock,
+    sim_time: SimTime,
     door_open: bool,
     reported_diagnostics: HashSet<String>,
     camera: Camera,
@@ -640,6 +665,8 @@ impl App {
         self.apply_variable_overrides();
         self.variables.interpolate(1.0)?;
         for _ in 0..frame.steps {
+            self.sim_time.advance(STEP)?;
+            self.sim_time.publish(&mut self.variables);
             if let Some(aircraft) = &mut self.aircraft {
                 for panel in aircraft.panel_images.values_mut() {
                     panel.update_scripts(STEP, &mut self.variables)?;
@@ -1081,6 +1108,12 @@ fn main() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
+    let sim_time = if let Some(utc) = arguments.utc_time {
+        SimTime::new(utc)?
+    } else {
+        SimTime::now()?
+    };
+    sim_time.publish(&mut variables);
     variables.set_number("WORLD ORIGIN LATITUDE", "degrees", arguments.latitude);
     variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", arguments.longitude);
     if let (Some(latitude), Some(longitude)) = (
@@ -1170,6 +1203,7 @@ fn main() -> Result<()> {
         interior_state: None,
         variables,
         clock: Clock::default(),
+        sim_time,
         door_open: false,
         reported_diagnostics: HashSet::new(),
         camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
@@ -1202,6 +1236,15 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn parses_utc_time_with_strict_bounds() {
+        assert_eq!(parse_utc_time("23:59:59").unwrap(), 86_399.0);
+        assert_eq!(parse_utc_time("07:05").unwrap(), 25_500.0);
+        for invalid in ["24:00", "12:60", "3:05", "12:00:60", "12:00:00:00"] {
+            assert!(parse_utc_time(invalid).is_err());
+        }
+    }
 
     #[test]
     fn approach_start_requires_ils_and_excludes_manual_placement() {
@@ -1403,6 +1446,7 @@ mod tests {
             interior_state: None,
             variables,
             clock: Clock::default(),
+            sim_time: SimTime::new(0.0).unwrap(),
             door_open: false,
             reported_diagnostics: HashSet::new(),
             camera: Camera::looking_at(DVec3::ZERO, DVec3::Z),
