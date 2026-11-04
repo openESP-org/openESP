@@ -62,6 +62,27 @@ struct Arguments {
     height: f64,
     #[arg(
         long,
+        requires = "airspeed",
+        allow_negative_numbers = true,
+        help = "Starting true heading in degrees"
+    )]
+    heading: Option<f64>,
+    #[arg(
+        long,
+        requires = "airspeed",
+        allow_negative_numbers = true,
+        help = "Starting north offset from the test grid origin in meters"
+    )]
+    start_north: Option<f64>,
+    #[arg(
+        long,
+        requires = "airspeed",
+        allow_negative_numbers = true,
+        help = "Starting east offset from the test grid origin in meters"
+    )]
+    start_east: Option<f64>,
+    #[arg(
+        long,
         default_value_t = 0.0,
         help = "Wind direction in degrees true, measured from where the wind comes"
     )]
@@ -973,6 +994,11 @@ fn main() -> Result<()> {
     let airspeed = arguments.airspeed;
     let engines_running = arguments.engines_running;
     let height = arguments.height;
+    let placement = navigation::InitialPlacement::new(
+        arguments.start_north.unwrap_or(0.0),
+        arguments.start_east.unwrap_or(0.0),
+        arguments.heading.unwrap_or(0.0),
+    )?;
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
@@ -1013,6 +1039,7 @@ fn main() -> Result<()> {
                 let flight = airspeed.map(|knots| {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
                     let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
+                    flight.place_initial(placement);
                     if engines_running {
                         flight.start_running_with_weather(&data, initial_weather)?;
                     } else if let Err(error) = flight.prepare_engines(&data) {
@@ -1147,6 +1174,31 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn parses_starting_position_and_heading_for_flight() {
+        let args = Arguments::try_parse_from([
+            "openesp",
+            "--aircraft",
+            "test",
+            "--airspeed",
+            "80",
+            "--heading",
+            "-90",
+            "--start-north",
+            "-1000",
+            "--start-east",
+            "250",
+        ])
+        .unwrap();
+        assert_eq!(args.heading, Some(-90.0));
+        assert_eq!(args.start_north, Some(-1000.0));
+        assert_eq!(args.start_east, Some(250.0));
+        assert!(
+            Arguments::try_parse_from(["openesp", "--aircraft", "test", "--heading", "90"])
+                .is_err()
+        );
+    }
 
     #[test]
     fn accepts_multiple_vor_stations_on_the_command_line() {

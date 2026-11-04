@@ -6,6 +6,37 @@ use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
 
+#[derive(Clone, Copy)]
+pub struct InitialPlacement {
+    north: f64,
+    east: f64,
+    heading: f64,
+}
+
+impl InitialPlacement {
+    pub fn new(north: f64, east: f64, heading_degrees: f64) -> Result<Self> {
+        ensure!(
+            [north, east, heading_degrees]
+                .iter()
+                .all(|value| value.is_finite()),
+            "starting position and heading must be finite"
+        );
+        Ok(Self {
+            north,
+            east,
+            heading: heading_degrees.rem_euclid(360.0).to_radians(),
+        })
+    }
+
+    pub fn apply(self, state: &mut State) {
+        let rotation = glam::DQuat::from_rotation_z(self.heading);
+        state.position.x = self.north;
+        state.position.y = self.east;
+        state.orientation = rotation * state.orientation;
+        state.velocity = rotation * state.velocity;
+    }
+}
+
 pub fn validate_declination(degrees: f64) -> Result<()> {
     ensure!(
         degrees.is_finite() && (-180.0..=180.0).contains(&degrees),
@@ -481,6 +512,26 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn initial_placement_rotates_velocity_and_preserves_ground_pitch() {
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -2.0),
+            velocity: DVec3::X * 40.0,
+            orientation: DQuat::from_rotation_y(0.1),
+            ..State::default()
+        };
+        InitialPlacement::new(-1000.0, 250.0, -90.0)
+            .unwrap()
+            .apply(&mut state);
+        assert_eq!(state.position, DVec3::new(-1000.0, 250.0, -2.0));
+        assert!(state.velocity.abs_diff_eq(-DVec3::Y * 40.0, 1e-10));
+        let (heading, pitch, _) = state.orientation.to_euler(EulerRot::ZYX);
+        assert!((heading + PI / 2.0).abs() < 1e-10);
+        assert!((pitch - 0.1).abs() < 1e-10);
+        assert!(InitialPlacement::new(f64::NAN, 0.0, 0.0).is_err());
+        assert!(InitialPlacement::new(0.0, 0.0, f64::INFINITY).is_err());
+    }
 
     #[test]
     fn slip_ball_follows_specific_force_and_stays_centered_in_coordinated_bank() {

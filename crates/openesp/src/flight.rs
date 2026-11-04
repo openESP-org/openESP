@@ -229,6 +229,11 @@ impl Flight {
         self.previous = self.current;
     }
 
+    pub fn place_initial(&mut self, placement: crate::navigation::InitialPlacement) {
+        placement.apply(&mut self.current);
+        self.previous = self.current;
+    }
+
     #[cfg(test)]
     pub fn start_running(&mut self, data: &FlightData) -> Result<()> {
         self.start_running_with_weather(data, crate::weather::Conditions::new(1013.25, 15.0)?)
