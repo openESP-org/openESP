@@ -1051,7 +1051,7 @@ impl Flight {
     pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         let wind = crate::weather::wind(variables)?;
         crate::weather::publish(state, wind, variables);
-        crate::navigation::publish(state, variables);
+        crate::navigation::publish(state, variables)?;
         let air = state.air_velocity(wind);
         let speed = air.length();
         let atmosphere = crate::weather::conditions(variables)?.at(-state.position.z)?;

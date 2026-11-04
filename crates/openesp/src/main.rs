@@ -65,6 +65,20 @@ struct Arguments {
         help = "Wind direction in degrees true, measured from where the wind comes"
     )]
     wind_direction: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help = "Latitude of the local test grid origin in degrees"
+    )]
+    latitude: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help = "Longitude of the local test grid origin in degrees"
+    )]
+    longitude: f64,
     #[arg(long, default_value_t = 0.0, help = "Wind speed in knots")]
     wind_speed: f64,
     #[arg(
@@ -867,6 +881,7 @@ fn main() -> Result<()> {
     let height = arguments.height;
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
+    navigation::Origin::new(arguments.latitude, arguments.longitude)?;
     let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
     let initial_weather = weather::Conditions::new(
         arguments.sea_level_pressure,
@@ -899,6 +914,8 @@ fn main() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
+    variables.set_number("WORLD ORIGIN LATITUDE", "degrees", arguments.latitude);
+    variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", arguments.longitude);
     variables.set_number(
         "AMBIENT WIND DIRECTION",
         "degrees",
@@ -965,6 +982,22 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn accepts_negative_geographic_origin() {
+        let args = Arguments::try_parse_from([
+            "openesp",
+            "--aircraft",
+            "test",
+            "--latitude",
+            "-33.9",
+            "--longitude",
+            "-151.2",
+        ])
+        .unwrap();
+        assert_eq!(args.latitude, -33.9);
+        assert_eq!(args.longitude, -151.2);
+    }
 
     #[test]
     fn accepts_negative_sea_level_temperatures() {

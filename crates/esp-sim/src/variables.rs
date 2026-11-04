@@ -56,6 +56,8 @@ impl Default for Variables {
         variables.set_number("AMBIENT WIND VELOCITY", "knots", 0.0);
         variables.set_number("SEA LEVEL PRESSURE", "millibars", 1013.25);
         variables.set_number("SEA LEVEL TEMPERATURE", "celsius", 15.0);
+        variables.set_number("WORLD ORIGIN LATITUDE", "degrees", 0.0);
+        variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
