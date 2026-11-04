@@ -138,6 +138,17 @@ impl Propulsion {
         }
     }
 
+    pub fn tail_wash(
+        &self,
+        air: &Atmosphere,
+        velocity: DVec3,
+        power_fractions: &[f64],
+    ) -> Result<DVec3> {
+        match self {
+            Self::Piston { model, .. } => model.tail_wash(air, velocity, power_fractions),
+            Self::Turbine { .. } => Ok(DVec3::ZERO),
+        }
+    }
     pub fn wrench(
         &self,
         air: &Atmosphere,

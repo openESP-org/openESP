@@ -460,6 +460,47 @@ impl Aerodynamics {
         Ok(Wrench { force, moment })
     }
 
+    /// Extra elevator and rudder loads from the portion of the tail in prop wash.
+    /// Without tail geometry, half the tail is assumed to lie in the wake.
+    pub fn tail_wash_forces(
+        &self,
+        flow: (DVec3, DVec3),
+        angular_velocity: DVec3,
+        density: f64,
+        controls: Controls,
+        flaps: &[f64],
+        cg: DVec3,
+    ) -> Result<Wrench> {
+        let (velocity, wash) = flow;
+        ensure!(wash.is_finite(), "invalid propeller wash");
+        if wash.length_squared() == 0.0
+            || (controls.elevator == 0.0
+                && controls.elevator_trim == 0.0
+                && controls.rudder == 0.0
+                && controls.rudder_trim == 0.0)
+        {
+            return Ok(Wrench::default());
+        }
+        let mut neutral = controls;
+        neutral.elevator = 0.0;
+        neutral.elevator_trim = 0.0;
+        neutral.rudder = 0.0;
+        neutral.rudder_trim = 0.0;
+        let controls_at = |flow| -> Result<Wrench> {
+            let active = self.forces(flow, angular_velocity, density, controls, flaps, cg)?;
+            let neutral = self.forces(flow, angular_velocity, density, neutral, flaps, cg)?;
+            Ok(Wrench {
+                force: active.force - neutral.force,
+                moment: active.moment - neutral.moment,
+            })
+        };
+        let unwound = controls_at(velocity)?;
+        let washed = controls_at(velocity + wash)?;
+        Ok(Wrench {
+            force: (washed.force - unwound.force) * 0.5,
+            moment: (washed.moment - unwound.moment) * 0.5,
+        })
+    }
     pub fn elevator_trim_limit(&self) -> f64 {
         self.elevator_trim_limit
     }

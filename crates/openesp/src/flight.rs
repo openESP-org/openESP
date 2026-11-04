@@ -838,6 +838,18 @@ impl Flight {
                         )?;
                         loads.force += thrust.force;
                         loads.moment += thrust.moment;
+                        let velocity = state.air_velocity(wind);
+                        let wash = engines.tail_wash(&air, velocity, &power_fractions)?;
+                        let wash_loads = self.model.tail_wash_forces(
+                            (velocity, wash),
+                            state.angular_velocity,
+                            air.density,
+                            controls,
+                            &self.flaps,
+                            self.loading.cg,
+                        )?;
+                        loads.force += wash_loads.force;
+                        loads.moment += wash_loads.moment;
                     }
                     let ground =
                         self.gear

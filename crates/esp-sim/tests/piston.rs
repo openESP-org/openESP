@@ -459,3 +459,90 @@ fn original_piston_crossflow_changes_yaw_and_honors_p_factor_scalar() {
     }
     assert!(verified > 0);
 }
+
+#[test]
+#[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
+fn original_piston_wake_improves_low_speed_tail_control() {
+    use esp_sim::aerodynamics::{Aerodynamics, Controls};
+    use glam::DVec3;
+    let air = Atmosphere::standard(0.0).unwrap();
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let data = FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(0.0)
+            || data
+                .configuration
+                .number("propeller", "propeller_type")
+                .unwrap()
+                != Some(1.0)
+        {
+            continue;
+        }
+        let aero = Aerodynamics::from_data(&data).unwrap();
+        let flaps = vec![
+            0.0;
+            esp_formats::cfg::aircraft::flaps(&data.configuration)
+                .unwrap()
+                .iter()
+                .filter(|f| f.kind != 0)
+                .count()
+        ];
+        let mut engine = Pistons::from_data(&data).unwrap();
+        let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
+        let stopped = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
+        assert_eq!(stopped, DVec3::ZERO);
+        engine.start_running(&air, DVec3::ZERO).unwrap();
+        let wake = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
+        assert!(wake.x > 0.0);
+        let no_fuel = vec![0.0; power.len()];
+        assert_eq!(
+            engine.tail_wash(&air, DVec3::ZERO, &no_fuel).unwrap(),
+            DVec3::ZERO
+        );
+        let centered = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, wake),
+                DVec3::ZERO,
+                air.density,
+                Controls::default(),
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        assert_eq!(centered.force, DVec3::ZERO);
+        assert_eq!(centered.moment, DVec3::ZERO);
+        let controls = Controls {
+            rudder: 1.0,
+            elevator: 0.5,
+            ..Controls::default()
+        };
+        let boosted = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, wake),
+                DVec3::ZERO,
+                air.density,
+                controls,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        assert!(boosted.moment.y.abs() > 0.0 && boosted.moment.z.abs() > 0.0);
+        let unpowered = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, stopped),
+                DVec3::ZERO,
+                air.density,
+                controls,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        assert_eq!(unpowered.moment, DVec3::ZERO);
+        verified += 1;
+    }
+    assert!(verified > 0);
+}

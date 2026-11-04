@@ -574,6 +574,43 @@ impl Pistons {
         Ok(())
     }
 
+    /// Approximate axial wake at the centerline tail using actuator-disk
+    /// momentum theory. Only disks overlapping the centerline contribute.
+    pub fn tail_wash(
+        &self,
+        air: &Atmosphere,
+        velocity: DVec3,
+        power_fractions: &[f64],
+    ) -> Result<DVec3> {
+        ensure!(
+            velocity.is_finite()
+                && air.density.is_finite()
+                && air.density > 0.0
+                && power_fractions.len() == self.engines.len()
+                && power_fractions
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invalid propeller wash conditions"
+        );
+        let radius = self.propeller.radius();
+        let area = PI * radius * radius;
+        let mut wash = DVec3::ZERO;
+        for (index, engine) in self.engines.iter().enumerate() {
+            if engine.position.y.abs() >= radius {
+                continue;
+            }
+            let thrust = self.output(index, air, velocity)?.propeller.thrust.max(0.0)
+                * power_fractions[index];
+            let axial_speed = velocity.dot(engine.direction).max(0.0);
+            let wake_speed = (axial_speed * axial_speed + 2.0 * thrust / (air.density * area))
+                .sqrt()
+                - axial_speed;
+            let overlap = 1.0 - (engine.position.y.abs() / radius).powi(2);
+            wash += engine.direction * (wake_speed * overlap);
+        }
+        ensure!(wash.is_finite(), "invalid propeller wake");
+        Ok(wash)
+    }
     pub fn wrench(
         &self,
         air: &Atmosphere,
