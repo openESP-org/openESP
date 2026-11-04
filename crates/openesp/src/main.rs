@@ -79,6 +79,13 @@ struct Arguments {
         help = "Longitude of the local test grid origin in degrees"
     )]
     longitude: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help = "Magnetic declination in degrees, positive east and negative west"
+    )]
+    magnetic_declination: f64,
     #[arg(long, default_value_t = 0.0, help = "Wind speed in knots")]
     wind_speed: f64,
     #[arg(
@@ -882,6 +889,7 @@ fn main() -> Result<()> {
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
+    navigation::validate_declination(arguments.magnetic_declination)?;
     let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
     let initial_weather = weather::Conditions::new(
         arguments.sea_level_pressure,
@@ -916,6 +924,7 @@ fn main() -> Result<()> {
     let mut variables = Variables::default();
     variables.set_number("WORLD ORIGIN LATITUDE", "degrees", arguments.latitude);
     variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", arguments.longitude);
+    variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
     variables.set_number(
         "AMBIENT WIND DIRECTION",
         "degrees",
@@ -993,10 +1002,13 @@ mod tests {
             "-33.9",
             "--longitude",
             "-151.2",
+            "--magnetic-declination",
+            "-12.5",
         ])
         .unwrap();
         assert_eq!(args.latitude, -33.9);
         assert_eq!(args.longitude, -151.2);
+        assert_eq!(args.magnetic_declination, -12.5);
     }
 
     #[test]

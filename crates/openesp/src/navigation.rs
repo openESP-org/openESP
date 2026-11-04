@@ -6,6 +6,14 @@ use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
 
+pub fn validate_declination(degrees: f64) -> Result<()> {
+    ensure!(
+        degrees.is_finite() && (-180.0..=180.0).contains(&degrees),
+        "magnetic declination must be between -180 and 180 degrees"
+    );
+    Ok(())
+}
+
 pub struct Origin {
     latitude: f64,
     longitude: f64,
@@ -78,6 +86,12 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
     }
     let (heading, _, _) = state.orientation.to_euler(EulerRot::ZYX);
     let heading = heading.rem_euclid(TAU);
+    // MAGVAR follows the simulator convention: west is positive, east negative.
+    let variation = variables
+        .read(&Reference::new('A', "MAGVAR", Some("radians")))?
+        .number()?;
+    validate_declination(variation.to_degrees())?;
+    let magnetic_heading = (heading + variation).rem_euclid(TAU);
     let ground_speed = state.velocity.truncate().length();
     let track = if ground_speed > 0.5 {
         state.velocity.y.atan2(state.velocity.x).rem_euclid(TAU)
@@ -107,6 +121,20 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
     }
     variables.set_number("GPS GROUND TRUE HEADING", "radians", heading);
     variables.set_number("GPS GROUND TRUE TRACK", "radians", track);
+    variables.set_number(
+        "GPS GROUND MAGNETIC TRACK",
+        "radians",
+        (track + variation).rem_euclid(TAU),
+    );
+    variables.set_number("GPS MAGVAR", "radians", variation);
+    for name in [
+        "PLANE HEADING DEGREES MAGNETIC",
+        "MAGNETIC COMPASS",
+        "HEADING INDICATOR",
+        "PLANE HEADING DEGREES GYRO",
+    ] {
+        variables.set_number(name, "radians", magnetic_heading);
+    }
     variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
     Ok(())
 }
@@ -115,6 +143,36 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
 mod tests {
     use super::*;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn publishes_magnetic_heading_and_track_with_wraparound() {
+        let mut variables = Variables::default();
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        let state = State {
+            orientation: DQuat::from_rotation_z(5_f64.to_radians()),
+            velocity: DVec3::new(100.0, 0.0, 0.0),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("degrees")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        for name in [
+            "PLANE HEADING DEGREES MAGNETIC",
+            "MAGNETIC COMPASS",
+            "HEADING INDICATOR",
+            "PLANE HEADING DEGREES GYRO",
+        ] {
+            assert!((read(&mut variables, name) - 355.0).abs() < 1e-10);
+        }
+        assert!((read(&mut variables, "GPS GROUND MAGNETIC TRACK") - 350.0).abs() < 1e-10);
+        assert!((read(&mut variables, "GPS MAGVAR") + 10.0).abs() < 1e-10);
+        assert!(validate_declination(f64::NAN).is_err());
+        assert!(validate_declination(181.0).is_err());
+    }
 
     #[test]
     fn position_tracks_the_local_grid_and_crosses_the_date_line() {
