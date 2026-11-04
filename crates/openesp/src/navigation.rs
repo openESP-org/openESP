@@ -14,6 +14,44 @@ pub fn validate_declination(degrees: f64) -> Result<()> {
     Ok(())
 }
 
+pub fn publish_acceleration(
+    before: &State,
+    after: &State,
+    dt: f64,
+    variables: &mut Variables,
+) -> Result<()> {
+    ensure!(dt.is_finite() && dt >= 0.0, "invalid acceleration timestep");
+    if dt == 0.0 {
+        return Ok(());
+    }
+    let acceleration = (after.velocity - before.velocity) / dt;
+    let orientation = before.orientation.slerp(after.orientation, 0.5);
+    let specific_force = orientation.conjugate() * (acceleration - glam::DVec3::Z * 9.80665);
+    ensure!(specific_force.is_finite(), "invalid specific force");
+    let current = variables
+        .read(&Reference::new(
+            'A',
+            "TURN COORDINATOR BALL",
+            Some("position 128"),
+        ))?
+        .number()?;
+    ensure!(
+        current.is_finite(),
+        "invalid turn coordinator ball position"
+    );
+    let magnitude = specific_force.y.hypot(specific_force.z);
+    let target = if magnitude < 0.1 {
+        current
+    } else {
+        (-specific_force.y).atan2(-specific_force.z) / 15_f64.to_radians() * 127.0
+    };
+    let weight = 1.0 - (-dt / 0.5).exp();
+    let ball = (current + (target.clamp(-127.0, 127.0) - current) * weight).clamp(-127.0, 127.0);
+    variables.set_number("TURN COORDINATOR BALL", "position 128", ball);
+    variables.set_number("TURN COORDINATOR BALL INV", "position 128", -ball);
+    Ok(())
+}
+
 pub struct Origin {
     latitude: f64,
     longitude: f64,
@@ -443,6 +481,47 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn slip_ball_follows_specific_force_and_stays_centered_in_coordinated_bank() {
+        let mut variables = Variables::default();
+        let before = State::default();
+        let right_force = State {
+            velocity: DVec3::Y * 3.0,
+            ..before
+        };
+        publish_acceleration(&before, &right_force, 1.0, &mut variables).unwrap();
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let ball = read(&mut variables, "TURN COORDINATOR BALL", "position 128");
+        assert!(ball < -100.0 && ball > -127.0);
+        assert!(
+            (read(&mut variables, "TURN COORDINATOR BALL", "position") - ball / 127.0).abs()
+                < 1e-10
+        );
+        assert_eq!(
+            read(&mut variables, "TURN COORDINATOR BALL INV", "position 128"),
+            -ball
+        );
+        variables.set_number("TURN COORDINATOR BALL", "position 128", 0.0);
+        let orientation = DQuat::from_rotation_x(30_f64.to_radians());
+        let acceleration = orientation * DVec3::new(0.0, 0.0, -9.80665) + DVec3::Z * 9.80665;
+        let banked_before = State {
+            orientation,
+            ..before
+        };
+        let banked_after = State {
+            velocity: acceleration,
+            ..banked_before
+        };
+        publish_acceleration(&banked_before, &banked_after, 1.0, &mut variables).unwrap();
+        assert!(read(&mut variables, "TURN COORDINATOR BALL", "position 128").abs() < 1e-9);
+        assert!(publish_acceleration(&before, &right_force, f64::NAN, &mut variables).is_err());
+    }
 
     #[test]
     fn publishes_turn_rate_and_roll_response_in_supported_units() {

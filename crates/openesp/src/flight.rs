@@ -847,6 +847,7 @@ impl Flight {
             next.position.z < 0.0,
             "aircraft center of gravity penetrated the ground"
         );
+        crate::navigation::publish_acceleration(&self.current, &next, dt, variables)?;
         self.previous = self.current;
         self.previous_cg = self.loading.cg;
         if let Some(loading) = new_loading {

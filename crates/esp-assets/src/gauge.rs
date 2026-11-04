@@ -1214,6 +1214,32 @@ mod tests {
     }
 
     #[test]
+    fn fallback_turn_indicator_shows_slip_ball_position() {
+        struct BallHost(f64);
+        impl Host for BallHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                Ok(Value::Number(
+                    if reference.name == "TURN COORDINATOR BALL" {
+                        self.0
+                    } else {
+                        0.0
+                    },
+                ))
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut gauge = fallback::Instrument::new("Cessna!Turn_Indicator").unwrap();
+        let mut host = BallHost(-1.0);
+        assert!(gauge.update(&mut host));
+        let left = gauge.image.clone();
+        host.0 = 1.0;
+        assert!(gauge.update(&mut host));
+        assert_ne!(left, gauge.image);
+    }
+
+    #[test]
     fn fallback_radio_displays_precise_frequencies_and_dispatches_tuning() {
         struct RadioHost {
             standby: f64,

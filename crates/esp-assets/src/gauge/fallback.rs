@@ -120,7 +120,7 @@ impl Instrument {
             Kind::Tachometer => [read(host, "GENERAL ENG RPM:1", "rpm"), 0.0, 0.0, 0.0, 0.0],
             Kind::TurnCoordinator => [
                 read(host, "TURN COORDINATOR RATE", "degrees per second"),
-                0.0,
+                read(host, "TURN COORDINATOR BALL", "position"),
                 0.0,
                 0.0,
                 0.0,
@@ -367,7 +367,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         }
         label(&mut image, 26, 57, "L", white);
         label(&mut image, 99, 57, "R", white);
-        label(&mut image, 48, 90, "2 MIN", white);
+        label(&mut image, 48, 83, "2 MIN", white);
         let bank = (values[0] / 3.0 * 30.0).clamp(-55.0, 55.0).to_radians();
         let wing = (bank.cos() * 31.0, bank.sin() * 31.0);
         line(
@@ -377,6 +377,13 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
             white,
         );
         draw_filled_circle_mut(&mut image, (64, 64), 4, yellow);
+        line(&mut image, (42.0, 101.0), (86.0, 101.0), white);
+        line(&mut image, (42.0, 109.0), (86.0, 109.0), white);
+        for x in [58.0, 70.0] {
+            line(&mut image, (x, 100.0), (x, 110.0), white);
+        }
+        let ball_x = 64 + (values[1].clamp(-1.0, 1.0) * 18.0).round() as i32;
+        draw_filled_circle_mut(&mut image, (ball_x, 105), 3, yellow);
         draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
         return image;
     }

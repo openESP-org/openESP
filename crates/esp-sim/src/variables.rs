@@ -60,6 +60,8 @@ impl Default for Variables {
         variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", 0.0);
         variables.set_number("MAGVAR", "degrees", 0.0);
         variables.set_number("GYRO DRIFT ERROR", "degrees", 0.0);
+        variables.set_number("TURN COORDINATOR BALL", "position 128", 0.0);
+        variables.set_number("TURN COORDINATOR BALL INV", "position 128", 0.0);
         variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
         variables.set_number("GPS WP NEXT LAT", "degrees", 0.0);
         variables.set_number("GPS WP NEXT LON", "degrees", 0.0);
