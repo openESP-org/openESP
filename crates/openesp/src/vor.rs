@@ -20,6 +20,20 @@ pub fn validate(latitude: f64, longitude: f64, frequency: f64, range: f64) -> Re
     Ok(())
 }
 
+pub fn validate_ils(course: f64, glideslope: f64, frequency: f64) -> Result<()> {
+    ensure!(course.is_finite(), "ILS course must be finite");
+    ensure!(
+        glideslope.is_finite() && (1.0..=6.0).contains(&glideslope),
+        "ILS glideslope must be between 1 and 6 degrees"
+    );
+    let tenths = (frequency * 10.0 + 1e-7).floor() as i64;
+    ensure!(
+        frequency.is_finite() && (108.1..=111.95).contains(&frequency) && tenths % 2 == 1,
+        "ILS frequency must use an odd-tenth channel from 108.10 to 111.95 MHz"
+    );
+    Ok(())
+}
+
 pub fn publish(
     latitude: f64,
     longitude: f64,
@@ -34,6 +48,8 @@ pub fn publish(
     if !station_active {
         variables.set_number("NAV HAS NAV:1", "bool", 0.0);
         variables.set_number("NAV HAS DME:1", "bool", 0.0);
+        variables.set_number("NAV HAS LOCALIZER:1", "bool", 0.0);
+        variables.set_number("NAV HAS GLIDE SLOPE:1", "bool", 0.0);
         return Ok(());
     }
     let station_latitude = read(variables, "VOR STATION LATITUDE", "degrees")?;
@@ -60,32 +76,80 @@ pub fn publish(
     .clamp(0.0, 1.0);
     let ground_distance = 2.0 * EARTH_RADIUS * haversine.sqrt().atan2((1.0 - haversine).sqrt());
     let distance = ground_distance.hypot(altitude);
-    let signal = (tuned - station_frequency).abs() < 0.0005
+    let mut signal = (tuned - station_frequency).abs() < 0.0005
         && ground_distance <= range * 1852.0
         && ground_distance > 1.0;
     let mut radial = 0.0;
     let mut error = 0.0;
     let mut needle = 0.0;
     let mut flag = 0.0;
+    let localizer = read(variables, "VOR STATION LOCALIZER", "bool")? != 0.0;
+    let mut glideslope_signal = false;
+    let mut glideslope_needle = 0.0;
     if signal {
         let true_radial = (delta_lon.sin() * latitude.cos()).atan2(
             station_latitude.cos() * latitude.sin()
                 - station_latitude.sin() * latitude.cos() * delta_lon.cos(),
         );
         radial = (true_radial + variation).rem_euclid(TAU);
-        let difference = (radial - obs + PI).rem_euclid(TAU) - PI;
-        let from = difference.abs() <= PI / 2.0;
-        error = if from {
-            difference
+        if localizer {
+            let course = read(variables, "ILS LOCALIZER COURSE", "degrees")?;
+            let slope = read(variables, "ILS GLIDESLOPE ANGLE", "degrees")?;
+            validate_ils(course, slope, station_frequency)?;
+            let course = course.to_radians().rem_euclid(TAU);
+            error = (radial - course).rem_euclid(TAU) - PI;
+            let sector = if ground_distance <= 10.0 * 1852.0 {
+                35_f64.to_radians()
+            } else {
+                10_f64.to_radians()
+            };
+            signal = ground_distance <= 25.0 * 1852.0 && error.abs() <= sector;
+            if signal {
+                needle = (error / 2.5_f64.to_radians() * 127.0).clamp(-127.0, 127.0);
+                flag = 1.0;
+                let elevation = altitude.atan2(ground_distance);
+                let glide_angle = slope.to_radians();
+                glideslope_signal = ground_distance <= 10.0 * 1852.0
+                    && error.abs() <= 8_f64.to_radians()
+                    && elevation >= 0.45 * glide_angle
+                    && elevation <= 1.75 * glide_angle;
+                if glideslope_signal {
+                    glideslope_needle = ((glide_angle - elevation) / 0.7_f64.to_radians() * 127.0)
+                        .clamp(-127.0, 127.0);
+                }
+            }
         } else {
-            (difference + TAU).rem_euclid(TAU) - PI
-        };
-        needle = ((if from { -error } else { error }) / 10_f64.to_radians() * 127.0)
-            .clamp(-127.0, 127.0);
-        flag = if from { 2.0 } else { 1.0 };
+            let difference = (radial - obs + PI).rem_euclid(TAU) - PI;
+            let from = difference.abs() <= PI / 2.0;
+            error = if from {
+                difference
+            } else {
+                (difference + TAU).rem_euclid(TAU) - PI
+            };
+            needle = ((if from { -error } else { error }) / 10_f64.to_radians() * 127.0)
+                .clamp(-127.0, 127.0);
+            flag = if from { 2.0 } else { 1.0 };
+        }
     }
     variables.set_number("NAV HAS NAV:1", "bool", f64::from(signal));
     variables.set_number("NAV HAS DME:1", "bool", f64::from(signal));
+    variables.set_number(
+        "NAV HAS LOCALIZER:1",
+        "bool",
+        f64::from(signal && localizer),
+    );
+    variables.set_number(
+        "NAV HAS GLIDE SLOPE:1",
+        "bool",
+        f64::from(glideslope_signal),
+    );
+    let localizer_course = if localizer {
+        read(variables, "ILS LOCALIZER COURSE", "degrees")?
+    } else {
+        0.0
+    };
+    variables.set_number("NAV LOCALIZER:1", "degrees", localizer_course);
+    variables.set_number("NAV GSI:1", "number", glideslope_needle);
     variables.set_number("NAV RADIAL:1", "radians", radial);
     variables.set_number("NAV RADIAL ERROR:1", "radians", error);
     variables.set_number(
@@ -109,6 +173,48 @@ mod tests {
     use esp_script::Value;
     use esp_sim::flight::State;
     use glam::DVec3;
+
+    #[test]
+    fn ils_provides_localizer_and_glideslope_only_in_coverage() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        variables.set_number("VOR STATION LOCALIZER", "bool", 1.0);
+        variables.set_number("VOR STATION FREQUENCY", "megahertz", 110.3);
+        variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 110.3);
+        let mut state = State {
+            position: DVec3::new(-10_000.0, 100.0, -10_000.0 * 3_f64.to_radians().tan()),
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS LOCALIZER:1", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI HAS LOCALIZER", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI GSI NEEDLE VALID", "bool"), 1.0);
+        assert!(read(&mut variables, "NAV CDI:1", "number") < 0.0);
+        assert!(read(&mut variables, "NAV GSI:1", "number").abs() < 0.1);
+        state.position.z = -10_000.0 * 2_f64.to_radians().tan();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI GSI NEEDLE", "number"), 119.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI GSI NEEDLE VALID", "bool"), 0.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        state.position.y = 10_000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS LOCALIZER:1", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "HSI GSI NEEDLE VALID", "bool"), 0.0);
+        assert!(validate_ils(0.0, 3.0, 110.0).is_err());
+        assert!(validate_ils(0.0, 0.0, 110.3).is_err());
+    }
 
     #[test]
     fn legacy_gauge_event_ids_control_radio_obs_and_gyro() {

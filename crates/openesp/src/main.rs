@@ -118,6 +118,15 @@ struct Arguments {
     vor_range: f64,
     #[arg(
         long,
+        requires = "vor_latitude",
+        allow_negative_numbers = true,
+        help = "Use the local station as an ILS with this inbound magnetic course"
+    )]
+    ils_course: Option<f64>,
+    #[arg(long, default_value_t = 3.0, help = "ILS glideslope angle in degrees")]
+    ils_glideslope: f64,
+    #[arg(
+        long,
         default_value_t = 0.0,
         allow_negative_numbers = true,
         help = "Magnetic declination in degrees, positive east and negative west"
@@ -949,6 +958,9 @@ fn main() -> Result<()> {
             arguments.vor_frequency,
             arguments.vor_range,
         )?;
+        if let Some(course) = arguments.ils_course {
+            vor::validate_ils(course, arguments.ils_glideslope, arguments.vor_frequency)?;
+        }
     }
     if let (Some(latitude), Some(longitude)) = (
         arguments.destination_latitude,
@@ -1011,6 +1023,11 @@ fn main() -> Result<()> {
             arguments.vor_frequency,
         );
         variables.set_number("VOR STATION RANGE", "nautical miles", arguments.vor_range);
+        if let Some(course) = arguments.ils_course {
+            variables.set_number("VOR STATION LOCALIZER", "bool", 1.0);
+            variables.set_number("ILS LOCALIZER COURSE", "degrees", course.rem_euclid(360.0));
+            variables.set_number("ILS GLIDESLOPE ANGLE", "degrees", arguments.ils_glideslope);
+        }
         variables.set_number(
             "NAV ACTIVE FREQUENCY:1",
             "megahertz",

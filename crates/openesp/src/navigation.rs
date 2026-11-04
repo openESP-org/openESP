@@ -191,10 +191,20 @@ fn publish_hsi(variables: &mut Variables) -> Result<()> {
         } else {
             0.0
         };
+        let localizer = nav_valid && read(variables, "NAV HAS LOCALIZER:1", "bool")? != 0.0;
+        let glide_valid = nav_valid && read(variables, "NAV HAS GLIDE SLOPE:1", "bool")? != 0.0;
+        let glide = if glide_valid {
+            read(variables, "NAV GSI:1", "number")? * 119.0 / 127.0
+        } else {
+            0.0
+        };
         variables.set_number("HSI CDI NEEDLE", "number", needle);
         variables.set_number("HSI BEARING", "radians", 0.0);
         variables.set_number("HSI DISTANCE", "meters", distance);
         variables.set_number("HSI TF FLAGS", "enum", flag);
+        variables.set_number("HSI HAS LOCALIZER", "bool", f64::from(localizer));
+        variables.set_number("HSI GSI NEEDLE VALID", "bool", f64::from(glide_valid));
+        variables.set_number("HSI GSI NEEDLE", "number", glide);
         return Ok(());
     }
     let active = read(variables, "GPS IS ACTIVE WAY POINT", "bool")? != 0.0;

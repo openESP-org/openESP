@@ -72,6 +72,9 @@ impl Default for Variables {
         variables.set_number("VOR STATION LONGITUDE", "degrees", 0.0);
         variables.set_number("VOR STATION FREQUENCY", "megahertz", 113.0);
         variables.set_number("VOR STATION RANGE", "nautical miles", 40.0);
+        variables.set_number("VOR STATION LOCALIZER", "bool", 0.0);
+        variables.set_number("ILS LOCALIZER COURSE", "degrees", 0.0);
+        variables.set_number("ILS GLIDESLOPE ANGLE", "degrees", 3.0);
         variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 113.0);
         variables.set_number("NAV STANDBY FREQUENCY:1", "megahertz", 110.5);
         variables.set_number("NAV OBS:1", "degrees", 0.0);
