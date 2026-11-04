@@ -1240,6 +1240,48 @@ mod tests {
     }
 
     #[test]
+    fn fallback_fuel_gauges_follow_tank_quantities_and_engine_flow() {
+        struct FuelHost {
+            left: f64,
+            flow: f64,
+        }
+        impl Host for FuelHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                let value = match reference.name.as_str() {
+                    "FUEL TANK LEFT MAIN QUANTITY" => self.left,
+                    "FUEL TANK RIGHT MAIN QUANTITY" => 15.0,
+                    "FUEL TANK LEFT MAIN CAPACITY" | "FUEL TANK RIGHT MAIN CAPACITY" => 26.5,
+                    "ENG FUEL FLOW PPH:1" => self.flow,
+                    "FUEL WEIGHT PER GALLON" => 6.0,
+                    _ => return Err(Error::Variable(reference.name.clone())),
+                };
+                Ok(Value::Number(value))
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=256,128\npixel_size=256,128\ntexture=$screen\ngauge00=Cessna172!Fuel,0,0,128,128\ngauge01=Cessna172!EGT_Fuel_Flow,128,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = FuelHost {
+            left: 20.0,
+            flow: 48.0,
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        host.left = 2.0;
+        host.flow = 60.0;
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        assert!(!image.update(&mut host));
+    }
+
+    #[test]
     fn fallback_radio_displays_precise_frequencies_and_dispatches_tuning() {
         struct RadioHost {
             standby: f64,
