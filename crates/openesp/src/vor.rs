@@ -175,6 +175,34 @@ mod tests {
     use glam::DVec3;
 
     #[test]
+    fn legacy_bcd_frequency_round_trips_through_gauge_and_radio_event() {
+        let mut variables = Variables::default();
+        for (encoded, expected_hz) in [
+            (0x1300, 113_000_000.0),
+            (0x1302, 113_025_000.0),
+            (0x1305, 113_050_000.0),
+            (0x1307, 113_075_000.0),
+        ] {
+            variables
+                .dispatch_event("NAV1_RADIO_SET", Value::Number(encoded as f64))
+                .unwrap();
+            let read = |v: &mut Variables, unit| {
+                v.read(&Reference::new('A', "NAV ACTIVE FREQUENCY:1", Some(unit)))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            assert_eq!(read(&mut variables, "hertz"), expected_hz);
+            assert_eq!(read(&mut variables, "frequency bcd16"), encoded as f64);
+        }
+        assert!(
+            variables
+                .dispatch_event("NAV1_RADIO_SET", Value::Number(0x1a00 as f64))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn ils_provides_localizer_and_glideslope_only_in_coverage() {
         let mut variables = Variables::default();
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);

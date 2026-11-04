@@ -1,5 +1,37 @@
 use esp_script::Value;
 
+pub fn frequency_from_bcd16(value: f64) -> Option<f64> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=65535.0).contains(&value) {
+        return None;
+    }
+    let encoded = value as u16;
+    let digits = [
+        (encoded >> 12) & 15,
+        (encoded >> 8) & 15,
+        (encoded >> 4) & 15,
+        encoded & 15,
+    ];
+    if digits.iter().any(|digit| *digit > 9) {
+        return None;
+    }
+    let decimal =
+        digits[0] as u32 * 1000 + digits[1] as u32 * 100 + digits[2] as u32 * 10 + digits[3] as u32;
+    let extra = if matches!(digits[3], 2 | 7) { 5_000 } else { 0 };
+    Some((100_000_000 + decimal * 10_000 + extra) as f64)
+}
+
+fn frequency_to_bcd16(hz: f64) -> Option<f64> {
+    if !hz.is_finite() || !(100_000_000.0..200_000_000.0).contains(&hz) {
+        return None;
+    }
+    let decimal = ((hz - 100_000_000.0 + 0.01) / 10_000.0).floor() as u32;
+    let encoded = ((decimal / 1000) << 12)
+        | (((decimal / 100) % 10) << 8)
+        | (((decimal / 10) % 10) << 4)
+        | (decimal % 10);
+    Some(encoded as f64)
+}
+
 pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Value> {
     let (from, to) = (from?, to?);
     let unit = |name| match name {
@@ -37,6 +69,17 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "megahertz" | "mhz" => Some((11, 1_000_000.0)),
         _ => None,
     };
+    if from == "frequency bcd16" {
+        let hz = frequency_from_bcd16(value.number().ok()?)?;
+        let (dimension, scale) = unit(to)?;
+        return (dimension == 11).then_some(Value::Number(hz / scale));
+    }
+    if to == "frequency bcd16" {
+        let (dimension, scale) = unit(from)?;
+        return (dimension == 11)
+            .then(|| frequency_to_bcd16(value.number().ok()? * scale).map(Value::Number))
+            .flatten();
+    }
     let (from_dimension, from_scale) = unit(from)?;
     let (to_dimension, to_scale) =
         unit(if from_dimension == 7 && matches!(to, "pounds" | "pound") {
@@ -54,4 +97,41 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         value
     };
     value.is_finite().then_some(Value::Number(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bcd_frequency_converts_with_twenty_five_kilohertz_precision() {
+        for (hz, encoded) in [
+            (108_000_000.0, 0x0800),
+            (113_025_000.0, 0x1302),
+            (113_075_000.0, 0x1307),
+            (117_950_000.0, 0x1795),
+        ] {
+            assert_eq!(
+                convert(&Value::Number(hz), Some("hertz"), Some("frequency bcd16")),
+                Some(Value::Number(encoded as f64))
+            );
+            assert_eq!(
+                convert(
+                    &Value::Number(encoded as f64),
+                    Some("frequency bcd16"),
+                    Some("hertz")
+                ),
+                Some(Value::Number(hz))
+            );
+        }
+        assert!(frequency_from_bcd16(0x1a00 as f64).is_none());
+        assert!(
+            convert(
+                &Value::Number(10.0),
+                Some("meters"),
+                Some("frequency bcd16")
+            )
+            .is_none()
+        );
+    }
 }

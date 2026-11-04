@@ -607,25 +607,7 @@ impl Variables {
             let hz = if name.ends_with("SET_HZ") {
                 value
             } else {
-                if value.fract() != 0.0 || !(0.0..=65535.0).contains(&value) {
-                    return Err(Error::Number);
-                }
-                let encoded = value as u16;
-                let digits = [
-                    (encoded >> 12) & 15,
-                    (encoded >> 8) & 15,
-                    (encoded >> 4) & 15,
-                    encoded & 15,
-                ];
-                if digits.iter().any(|digit| *digit > 9) {
-                    return Err(Error::Number);
-                }
-                100_000_000.0
-                    + (digits[0] as f64 * 1000.0
-                        + digits[1] as f64 * 100.0
-                        + digits[2] as f64 * 10.0
-                        + digits[3] as f64)
-                        * 10_000.0
+                crate::units::frequency_from_bcd16(value).ok_or(Error::Number)?
             };
             if !(108_000_000.0..118_000_000.0).contains(&hz) {
                 return Err(Error::Number);
