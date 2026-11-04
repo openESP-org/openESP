@@ -26,6 +26,7 @@ use winit::{
 
 mod flight;
 mod speed_limits;
+mod weather;
 use flight::Flight;
 use speed_limits::SpeedLimits;
 
@@ -57,6 +58,14 @@ struct Arguments {
         help = "Starting height in meters above the test grid; zero starts on the landing gear"
     )]
     height: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Wind direction in degrees true, measured from where the wind comes"
+    )]
+    wind_direction: f64,
+    #[arg(long, default_value_t = 0.0, help = "Wind speed in knots")]
+    wind_speed: f64,
     #[arg(
         long,
         default_value_t = 0.0,
@@ -844,6 +853,7 @@ fn main() -> Result<()> {
     let height = arguments.height;
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
+    let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
     let (sender, loaded) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("aircraft loader".into())
@@ -858,6 +868,7 @@ fn main() -> Result<()> {
                     } else if let Err(error) = flight.prepare_engines(&data) {
                         eprintln!("cold engine unavailable: {error:#}");
                     }
+                    if height > 0.0 { flight.add_initial_wind(starting_wind); }
                     let limits = SpeedLimits::from_data(&data)?;
                     Ok::<_,anyhow::Error>((flight, limits))
                 }).transpose()?;
@@ -869,6 +880,12 @@ fn main() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
+    variables.set_number(
+        "AMBIENT WIND DIRECTION",
+        "degrees",
+        arguments.wind_direction.rem_euclid(360.0),
+    );
+    variables.set_number("AMBIENT WIND VELOCITY", "knots", arguments.wind_speed);
     for event in ["AXIS_AILERONS_SET", "AXIS_ELEVATOR_SET", "AXIS_RUDDER_SET"] {
         variables.dispatch_event(event, Value::Number(0.0))?;
     }
@@ -904,7 +921,7 @@ fn main() -> Result<()> {
     EventLoop::new()?.run_app(&mut app)?;
     if let Some(flight) = &app.flight {
         eprintln!("flight state: {:?}", flight.current);
-        flight.report()?;
+        flight.report(weather::wind(&mut app.variables)?)?;
     }
     if let Some(error) = app.error {
         return Err(error);

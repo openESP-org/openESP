@@ -5,6 +5,7 @@ use esp_formats::{
 };
 use esp_script::{Host, Reference};
 use esp_sim::{atmosphere::Atmosphere, flight::State, variables::Variables};
+#[cfg(test)]
 use glam::DVec3;
 
 pub struct SpeedLimits {
@@ -105,7 +106,7 @@ impl SpeedLimits {
             }
         }
         let atmosphere = Atmosphere::standard(-state.position.z)?;
-        let air_velocity = state.air_velocity(DVec3::ZERO);
+        let air_velocity = state.air_velocity(crate::weather::wind(variables)?);
         let speed = air_velocity.length();
         let sea_level = Atmosphere::standard(0.0)?;
         variables.set_number(

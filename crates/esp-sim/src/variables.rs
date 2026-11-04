@@ -52,6 +52,8 @@ impl Default for Variables {
         }
         variables.set_number("TRUE AIRSPEED SELECTED", "bool", 0.0);
         variables.set_number("AIRSPEED TRUE CALIBRATE", "degrees", 0.0);
+        variables.set_number("AMBIENT WIND DIRECTION", "degrees", 0.0);
+        variables.set_number("AMBIENT WIND VELOCITY", "knots", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }

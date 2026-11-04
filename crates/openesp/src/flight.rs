@@ -224,6 +224,11 @@ impl Flight {
         variables.configure_aileron_travel(self.aileron_up_limit)
     }
 
+    pub fn add_initial_wind(&mut self, wind: DVec3) {
+        self.current.velocity += wind;
+        self.previous = self.current;
+    }
+
     pub fn start_running(&mut self, data: &FlightData) -> Result<()> {
         ensure!(
             self.loading.usable_fuel_gallons > 0.0,
@@ -250,6 +255,7 @@ impl Flight {
     }
 
     pub fn configure_engines(&self, variables: &mut Variables) -> Result<()> {
+        let wind = crate::weather::wind(variables)?;
         if let Some(engines) = &self.engines {
             variables.configure_engines(engines.indices())?;
             variables.configure_throttle_limit(engines.throttle_lower_limit())?;
@@ -267,7 +273,7 @@ impl Flight {
                 let air = Atmosphere::standard(-self.current.position.z)?;
                 for (index, id) in engines.indices().enumerate() {
                     let running = engines
-                        .output(index, &air, self.current.air_velocity(DVec3::ZERO))?
+                        .output(index, &air, self.current.air_velocity(wind))?
                         .combustion();
                     variables.set_number(
                         &format!("RECIP ENG MAGNETO:{id}"),
@@ -298,8 +304,9 @@ impl Flight {
             return Ok(());
         };
         let air = Atmosphere::standard(-self.current.position.z)?;
+        let wind = crate::weather::wind(variables)?;
         for (index, id) in engines.indices().enumerate() {
-            let output = engines.output(index, &air, self.current.air_velocity(DVec3::ZERO))?;
+            let output = engines.output(index, &air, self.current.air_velocity(wind))?;
             match output {
                 EngineOutput::Turbine(output) => {
                     for (name, unit, value) in [
@@ -363,6 +370,7 @@ impl Flight {
             dt.is_finite() && (0.0..=0.25).contains(&dt),
             "invalid aircraft timestep"
         );
+        let wind = crate::weather::wind(variables)?;
         let hydraulic_fraction = self
             .hydraulics
             .as_ref()
@@ -459,7 +467,7 @@ impl Flight {
         let spoiler_handle = control("SPOILERS HANDLE POSITION")?;
         let gear_handle = control("GEAR HANDLE POSITION")? != 0.0;
         let air = Atmosphere::standard(-self.current.position.z)?;
-        let ias = air.calibrated_airspeed(self.current.air_velocity(DVec3::ZERO).length())?
+        let ias = air.calibrated_airspeed(self.current.air_velocity(wind).length())?
             * 3600.0
             / 1852.0;
         let gear_power = match self.gear.system_type() {
@@ -687,7 +695,7 @@ impl Flight {
                 variables.set_number("TURB ENG IGNITION ON", "bool", f64::from(any_ignition));
             }
             let air = Atmosphere::standard(-self.current.position.z)?;
-            let velocity = self.current.air_velocity(DVec3::ZERO);
+            let velocity = self.current.air_velocity(wind);
             engines.advance(
                 dt,
                 &air,
@@ -767,7 +775,7 @@ impl Flight {
                         TEST_SURFACE.elevation,
                     ));
                     let mut loads = self.model.forces(
-                        state.air_velocity(DVec3::ZERO),
+                        state.air_velocity(wind),
                         state.angular_velocity,
                         air.density,
                         controls,
@@ -777,7 +785,7 @@ impl Flight {
                     if let Some(engines) = &self.engines {
                         let thrust = engines.wrench(
                             &air,
-                            state.air_velocity(DVec3::ZERO),
+                            state.air_velocity(wind),
                             self.loading.cg,
                             &power_fractions,
                         )?;
@@ -845,7 +853,7 @@ impl Flight {
                 engines.advance(
                     0.0,
                     &Atmosphere::standard(-next.position.z)?,
-                    next.air_velocity(DVec3::ZERO),
+                    next.air_velocity(wind),
                     &self.commands,
                     self.loading.usable_fuel_gallons > 0.0,
                 )?;
@@ -1003,13 +1011,13 @@ impl Flight {
         );
     }
 
-    pub fn report(&self) -> Result<()> {
+    pub fn report(&self, wind: DVec3) -> Result<()> {
         eprintln!("flight ground: on_ground={}", self.on_ground);
         eprintln!("flight fuel: {} gallons", self.loading.fuel_gallons);
         if let Some(engines) = &self.engines {
             let air = Atmosphere::standard(-self.current.position.z)?;
             for (index, id) in engines.indices().enumerate() {
-                let output = engines.output(index, &air, self.current.air_velocity(DVec3::ZERO))?;
+                let output = engines.output(index, &air, self.current.air_velocity(wind))?;
                 match output {
                     EngineOutput::Turbine(output) => eprintln!(
                         "engine {id}: N1={} N2={} thrust={}N fuel={}kg/s",
@@ -1030,7 +1038,9 @@ impl Flight {
     }
 
     pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
-        let air = state.air_velocity(DVec3::ZERO);
+        let wind = crate::weather::wind(variables)?;
+        crate::weather::publish(state, wind, variables);
+        let air = state.air_velocity(wind);
         let speed = air.length();
         let atmosphere = Atmosphere::standard(-state.position.z)?;
         let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
