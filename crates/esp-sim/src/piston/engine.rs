@@ -13,8 +13,8 @@ use crate::{
 };
 
 /// Naturally aspirated four-stroke engines with fixed-pitch propellers.
-/// Oil viscosity is held at its warm reference value; thermal and propeller
-/// gyroscopic/reaction loads are not connected yet.
+/// Oil temperature and pressure use an approximate thermal model; oil
+/// viscosity and propeller gyroscopic/reaction loads are not connected yet.
 pub struct Pistons {
     cycle: PistonCycle,
     propeller: Propeller,
@@ -25,6 +25,7 @@ pub struct Pistons {
     automatic_mixture: bool,
     automatic_ignition: bool,
     starter_torque: f64,
+    rated_power: f64,
     engines: Vec<Engine>,
 }
 
@@ -36,6 +37,7 @@ struct Engine {
     angle: f64,
     command: Command,
     fuel_available: bool,
+    oil_temperature: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +72,32 @@ pub struct EngineOutput {
     pub propeller: propeller::Output,
     pub fuel_kilograms_per_second: f64,
     pub combustion: bool,
+    pub oil_temperature_c: f64,
+    pub oil_pressure_psi: f64,
+}
+
+fn oil_pressure(rpm: f64, rated_rpm: f64, temperature_c: f64) -> f64 {
+    let viscosity = (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6);
+    (75.0 * (rpm / rated_rpm).max(0.0).sqrt() * viscosity).clamp(0.0, 100.0)
+}
+
+fn oil_temperature_step(
+    previous: f64,
+    ambient: f64,
+    speed: f64,
+    load: f64,
+    running: bool,
+    dt: f64,
+) -> f64 {
+    let cooling = 1.0 + speed / 250.0;
+    let target = ambient
+        + if running {
+            (45.0 + 45.0 * load) / cooling
+        } else {
+            0.0
+        };
+    let tau = (if running { 600.0 } else { 900.0 }) / cooling;
+    previous + (target - previous) * (1.0 - (-dt / tau).exp())
 }
 
 fn curve(config: &cfg::Config, key: &str, defaults: &[(f64, f64)]) -> Result<Curve> {
@@ -168,6 +196,7 @@ impl Pistons {
                     angle: 0.0,
                     command: Command::default(),
                     fuel_available: false,
+                    oil_temperature: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -237,6 +266,7 @@ impl Pistons {
                 .unwrap_or(0.0)
                 != 0.0,
             starter_torque,
+            rated_power,
             engines,
         })
     }
@@ -310,6 +340,8 @@ impl Pistons {
             propeller: self.propeller.sample(air, rpm, speed)?,
             fuel_kilograms_per_second,
             combustion,
+            oil_temperature_c: 0.0,
+            oil_pressure_psi: 0.0,
         })
     }
 
@@ -324,6 +356,9 @@ impl Pistons {
             engine.fuel_available,
         )?;
         output.propeller_angle = engine.angle;
+        output.oil_temperature_c = engine.oil_temperature.unwrap_or(air.temperature - 273.15);
+        output.oil_pressure_psi =
+            oil_pressure(engine.rpm, self.cycle.maximum_rpm, output.oil_temperature_c);
         Ok(output)
     }
 
@@ -355,6 +390,7 @@ impl Pistons {
             engine.rpm = rpm;
             engine.command = Command::default();
             engine.fuel_available = true;
+            engine.oil_temperature = Some(air.temperature - 273.15 + 60.0);
         }
         Ok(())
     }
@@ -422,7 +458,19 @@ impl Pistons {
                 rpm = next;
                 ensure!(rpm.is_finite(), "non-finite piston shaft speed");
             }
+            let output = self.sample(rpm, air, speed, command, fuel_available)?;
+            let ambient = air.temperature - 273.15;
+            let load = (output.cycle.shaft_power.max(0.0) / self.rated_power).clamp(0.0, 1.0);
             let engine = &mut self.engines[index];
+            let initial = engine.oil_temperature.unwrap_or(ambient);
+            engine.oil_temperature = Some(oil_temperature_step(
+                initial,
+                ambient,
+                speed,
+                load,
+                output.combustion,
+                dt,
+            ));
             engine.rpm = rpm;
             engine.angle = angle;
             engine.command = command;
@@ -459,5 +507,25 @@ impl Pistons {
             wrench.moment += (engine.position - cg).cross(force);
         }
         Ok(wrench)
+    }
+}
+
+#[cfg(test)]
+mod oil_tests {
+    use super::*;
+
+    #[test]
+    fn pressure_tracks_shaft_speed_and_oil_warms_and_cools() {
+        assert_eq!(oil_pressure(0.0, 2700.0, 15.0), 0.0);
+        assert!(oil_pressure(1000.0, 2700.0, 80.0) < oil_pressure(2000.0, 2700.0, 80.0));
+        assert!(oil_pressure(2000.0, 2700.0, 15.0) > oil_pressure(2000.0, 2700.0, 80.0));
+        let warmed = oil_temperature_step(15.0, 15.0, 0.0, 0.7, true, 600.0);
+        assert!(warmed > 15.0 && warmed < 100.0);
+        let cooled = oil_temperature_step(warmed, 15.0, 50.0, 0.0, false, 600.0);
+        assert!(cooled > 15.0 && cooled < warmed);
+        assert_eq!(
+            oil_temperature_step(warmed, 15.0, 0.0, 0.7, true, 0.0),
+            warmed
+        );
     }
 }

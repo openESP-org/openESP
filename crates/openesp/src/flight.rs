@@ -357,6 +357,26 @@ impl Flight {
                         ),
                         ("RECIP ENG BRAKE POWER", "watts", output.cycle.shaft_power),
                         ("RECIP ENG FUEL AIR RATIO", "number", output.mixture_ratio),
+                        (
+                            "GENERAL ENG OIL TEMPERATURE",
+                            "celsius",
+                            output.oil_temperature_c,
+                        ),
+                        (
+                            "GENERAL ENG OIL PRESSURE",
+                            "psi",
+                            output.oil_pressure_psi,
+                        ),
+                        (
+                            "ENG OIL TEMPERATURE",
+                            "celsius",
+                            output.oil_temperature_c,
+                        ),
+                        (
+                            "ENG OIL PRESSURE",
+                            "psi",
+                            output.oil_pressure_psi,
+                        ),
                     ] {
                         variables.set_number(&format!("{name}:{id}"), unit, value);
                     }

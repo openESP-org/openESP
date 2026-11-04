@@ -18,6 +18,7 @@ enum Kind {
     Tachometer,
     Fuel,
     FuelFlow,
+    Oil,
     Flaps,
     Clock,
     TurnCoordinator,
@@ -47,6 +48,7 @@ impl Instrument {
             ("CESSNA172", "TACHOMETER") => Kind::Tachometer,
             ("CESSNA172", "FUEL") => Kind::Fuel,
             ("CESSNA172", "EGT_FUEL_FLOW") => Kind::FuelFlow,
+            ("CESSNA182S", "OIL_PRESS_TEMP") => Kind::Oil,
             ("CESSNA", "FLAPS") => Kind::Flaps,
             ("CESSNA172", "CLOCK") => Kind::Clock,
             ("CESSNA", "TURN_INDICATOR") => Kind::TurnCoordinator,
@@ -140,6 +142,13 @@ impl Instrument {
             Kind::FuelFlow => [
                 read(host, "ENG FUEL FLOW PPH:1", "pounds per hour"),
                 read(host, "FUEL WEIGHT PER GALLON", "pounds"),
+                0.0,
+                0.0,
+                0.0,
+            ],
+            Kind::Oil => [
+                read(host, "GENERAL ENG OIL PRESSURE:1", "psi"),
+                read(host, "GENERAL ENG OIL TEMPERATURE:1", "celsius"),
                 0.0,
                 0.0,
                 0.0,
@@ -289,6 +298,7 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
             'F' => [7, 4, 6, 4, 4],
             'G' => [7, 4, 5, 5, 7],
             'H' => [5, 5, 7, 5, 5],
+            'I' => [7, 2, 2, 2, 7],
             'K' => [5, 5, 6, 5, 5],
             'L' => [4, 4, 4, 4, 7],
             'M' => [5, 7, 7, 5, 5],
@@ -393,7 +403,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
     let yellow = Rgba([255, 200, 50, 255]);
     draw_filled_circle_mut(&mut image, (64, 64), 62, Rgba([32, 32, 32, 255]));
     draw_filled_circle_mut(&mut image, (64, 64), 57, Rgba([8, 9, 10, 255]));
-    if matches!(kind, Kind::Fuel | Kind::FuelFlow) {
+    if matches!(kind, Kind::Fuel | Kind::FuelFlow | Kind::Oil) {
         let red = Rgba([235, 60, 45, 255]);
         if matches!(kind, Kind::Fuel) {
             label(&mut image, 56, 20, "FUEL", white);
@@ -427,6 +437,29 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
                     );
                     let amount = format!("{quantity:.1}");
                     label(&mut image, x - amount.len() as i32 * 2, 53, &amount, white);
+                }
+            }
+        } else if matches!(kind, Kind::Oil) {
+            label(&mut image, 58, 20, "OIL", white);
+            for (value, max, title, x) in [
+                (values[0], 100.0, "PSI", 37_i32),
+                (values[1], 120.0, "C", 91_i32),
+            ] {
+                label(&mut image, x - title.len() as i32 * 2, 34, title, white);
+                if value == f64::MAX {
+                    label(&mut image, x - 6, 62, "OFF", red);
+                } else {
+                    let fraction = (value / max).clamp(0.0, 1.0);
+                    line(
+                        &mut image,
+                        ((x - 18) as f32, 82.0),
+                        ((x + 18) as f32, 82.0),
+                        white,
+                    );
+                    let needle = x as f32 - 18.0 + 36.0 * fraction as f32;
+                    line(&mut image, (needle, 70.0), (needle, 84.0), yellow);
+                    let text = format!("{value:.0}");
+                    label(&mut image, x - text.len() as i32 * 2, 53, &text, white);
                 }
             }
         } else {
@@ -631,6 +664,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         | Kind::TurnCoordinator
         | Kind::Fuel
         | Kind::FuelFlow
+        | Kind::Oil
         | Kind::Flaps
         | Kind::Clock
         | Kind::Vor1

@@ -34,6 +34,19 @@ fn frequency_to_bcd16(hz: f64) -> Option<f64> {
 
 pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Value> {
     let (from, to) = (from?, to?);
+    let temperature = |unit: &str| match unit {
+        "celsius" | "celsius degrees" => Some((1.0, 273.15)),
+        "kelvin" => Some((1.0, 0.0)),
+        "fahrenheit" | "farenheit" => Some((5.0 / 9.0, 255.3722222222222)),
+        "rankine" => Some((5.0 / 9.0, 0.0)),
+        _ => None,
+    };
+    if let (Some((scale_from, offset_from)), Some((scale_to, offset_to))) =
+        (temperature(from), temperature(to))
+    {
+        let result = (value.number().ok()? * scale_from + offset_from - offset_to) / scale_to;
+        return result.is_finite().then_some(Value::Number(result));
+    }
     let unit = |name| match name {
         "bool" | "boolean" | "number" | "enum" | "part" | "position" | "percent over 100"
         | "mach" => Some((0, 1.0)),
@@ -105,6 +118,19 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_absolute_temperatures() {
+        let number = |from, to, value| {
+            convert(&Value::Number(value), Some(from), Some(to))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert!((number("celsius", "fahrenheit", 100.0) - 212.0).abs() < 1e-10);
+        assert!((number("farenheit", "celsius", 32.0)).abs() < 1e-10);
+        assert!((number("kelvin", "rankine", 300.0) - 540.0).abs() < 1e-10);
+    }
 
     #[test]
     fn bcd_frequency_converts_with_twenty_five_kilohertz_precision() {

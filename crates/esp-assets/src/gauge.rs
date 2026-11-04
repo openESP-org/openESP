@@ -1366,6 +1366,38 @@ mod tests {
     }
 
     #[test]
+    fn fallback_oil_gauge_tracks_pressure_and_temperature() {
+        struct OilHost {
+            pressure: f64,
+            temperature: f64,
+        }
+        impl Host for OilHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "GENERAL ENG OIL PRESSURE:1" => Ok(Value::Number(self.pressure)),
+                    "GENERAL ENG OIL TEMPERATURE:1" => Ok(Value::Number(self.temperature)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut gauge = fallback::Instrument::new("Cessna182s!Oil_Press_Temp").unwrap();
+        let mut host = OilHost {
+            pressure: 0.0,
+            temperature: 15.0,
+        };
+        assert!(gauge.update(&mut host));
+        let cold = gauge.image.clone();
+        host.pressure = 65.0;
+        host.temperature = 85.0;
+        assert!(gauge.update(&mut host));
+        assert_ne!(cold, gauge.image);
+        assert!(!gauge.update(&mut host));
+    }
+
+    #[test]
     fn fallback_radio_displays_precise_frequencies_and_dispatches_tuning() {
         struct RadioHost {
             standby: f64,

@@ -240,3 +240,49 @@ fn original_piston_shaft_responds_to_controls_load_inertia_and_altitude() {
     }
     assert!(verified > 0);
 }
+
+#[test]
+#[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
+fn original_piston_oil_indications_follow_engine_state() {
+    use glam::DVec3;
+    let air = Atmosphere::standard(0.0).unwrap();
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let data = FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(0.0)
+            || data
+                .configuration
+                .number("propeller", "propeller_type")
+                .unwrap()
+                != Some(1.0)
+        {
+            continue;
+        }
+        let mut engine = Pistons::from_data(&data).unwrap();
+        let cold = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert_eq!(cold.oil_pressure_psi, 0.0);
+        assert!((cold.oil_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
+        engine.start_running(&air, DVec3::ZERO).unwrap();
+        let running = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert!(running.oil_pressure_psi > 0.0);
+        assert!(running.oil_temperature_c > cold.oil_temperature_c);
+        let commands = engine
+            .indices()
+            .map(|_| Command::default())
+            .collect::<Vec<_>>();
+        for _ in 0..100 {
+            engine
+                .advance(0.1, &air, DVec3::ZERO, &commands, false)
+                .unwrap();
+        }
+        let stopped = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert!(stopped.oil_pressure_psi < running.oil_pressure_psi);
+        assert!(stopped.oil_temperature_c < running.oil_temperature_c);
+        verified += 1;
+    }
+    assert!(verified > 0);
+}
