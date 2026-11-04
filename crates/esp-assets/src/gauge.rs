@@ -1366,6 +1366,38 @@ mod tests {
     }
 
     #[test]
+    fn fallback_exhaust_temperature_updates_independently_of_fuel_flow() {
+        struct EngineHost(Option<f64>);
+        impl Host for EngineHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "ENG EXHAUST GAS TEMPERATURE:1" => self
+                        .0
+                        .map(Value::Number)
+                        .ok_or_else(|| Error::Variable(reference.name.clone())),
+                    "ENG FUEL FLOW PPH:1" => Ok(Value::Number(48.0)),
+                    "FUEL WEIGHT PER GALLON" => Ok(Value::Number(6.0)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut gauge = fallback::Instrument::new("Cessna172!EGT_Fuel_Flow").unwrap();
+        let mut host = EngineHost(None);
+        assert!(gauge.update(&mut host));
+        let missing = gauge.image.clone();
+        host.0 = Some(1250.0);
+        assert!(gauge.update(&mut host));
+        let warm = gauge.image.clone();
+        assert_ne!(missing, warm);
+        host.0 = Some(1400.0);
+        assert!(gauge.update(&mut host));
+        assert_ne!(warm, gauge.image);
+        assert!(!gauge.update(&mut host));
+    }
+    #[test]
     fn fallback_oil_gauge_tracks_pressure_and_temperature() {
         struct OilHost {
             pressure: f64,

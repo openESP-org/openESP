@@ -142,7 +142,7 @@ impl Instrument {
             Kind::FuelFlow => [
                 read(host, "ENG FUEL FLOW PPH:1", "pounds per hour"),
                 read(host, "FUEL WEIGHT PER GALLON", "pounds"),
-                0.0,
+                read(host, "ENG EXHAUST GAS TEMPERATURE:1", "fahrenheit"),
                 0.0,
                 0.0,
             ],
@@ -464,7 +464,18 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
             }
         } else {
             label(&mut image, 56, 25, "EGT", white);
-            label(&mut image, 58, 39, "OFF", red);
+            let egt = if values[2] == f64::MAX {
+                "OFF".to_owned()
+            } else {
+                format!("{:.0}F", values[2])
+            };
+            label(
+                &mut image,
+                64 - egt.len() as i32 * 2,
+                39,
+                &egt,
+                if egt == "OFF" { red } else { white },
+            );
             label(&mut image, 56, 65, "GPH", white);
             let text = if values[0] == f64::MAX || values[1] == f64::MAX || values[1] <= 0.0 {
                 "OFF".to_owned()

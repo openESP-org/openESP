@@ -72,10 +72,25 @@ pub struct EngineOutput {
     pub propeller: propeller::Output,
     pub fuel_kilograms_per_second: f64,
     pub combustion: bool,
+    pub exhaust_temperature_c: f64,
     pub oil_temperature_c: f64,
     pub oil_pressure_psi: f64,
 }
 
+// A qualitative exhaust temperature estimate: peak near stoichiometric mixture,
+// falling on both sides of peak. Actual readings depend on probe placement.
+fn exhaust_temperature(
+    ambient_c: f64,
+    ratio: f64,
+    manifold_fraction: f64,
+    combustion: bool,
+) -> f64 {
+    if !combustion {
+        return ambient_c;
+    }
+    let mixture_effect = (-((ratio - 0.067) / 0.035).powi(2)).exp();
+    ambient_c + 760.0 * mixture_effect * (0.65 + 0.35 * manifold_fraction.clamp(0.0, 1.0))
+}
 fn oil_pressure(rpm: f64, rated_rpm: f64, temperature_c: f64) -> f64 {
     let viscosity = (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6);
     (75.0 * (rpm / rated_rpm).max(0.0).sqrt() * viscosity).clamp(0.0, 100.0)
@@ -340,6 +355,12 @@ impl Pistons {
             propeller: self.propeller.sample(air, rpm, speed)?,
             fuel_kilograms_per_second,
             combustion,
+            exhaust_temperature_c: exhaust_temperature(
+                air.temperature - 273.15,
+                ratio,
+                manifold_pressure / air.pressure,
+                combustion,
+            ),
             oil_temperature_c: 0.0,
             oil_pressure_psi: 0.0,
         })
@@ -527,5 +548,19 @@ mod oil_tests {
             oil_temperature_step(warmed, 15.0, 0.0, 0.7, true, 0.0),
             warmed
         );
+    }
+}
+
+#[cfg(test)]
+mod exhaust_tests {
+    use super::exhaust_temperature;
+
+    #[test]
+    fn exhaust_temperature_peaks_near_stoichiometric_and_drops_without_combustion() {
+        let peak = exhaust_temperature(15.0, 0.067, 0.8, true);
+        assert!(peak > exhaust_temperature(15.0, 0.05, 0.8, true));
+        assert!(peak > exhaust_temperature(15.0, 0.085, 0.8, true));
+        assert!(peak > exhaust_temperature(15.0, 0.067, 0.3, true));
+        assert_eq!(exhaust_temperature(15.0, 0.067, 0.8, false), 15.0);
     }
 }

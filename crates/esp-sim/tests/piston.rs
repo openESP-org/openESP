@@ -265,10 +265,12 @@ fn original_piston_oil_indications_follow_engine_state() {
         let mut engine = Pistons::from_data(&data).unwrap();
         let cold = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert_eq!(cold.oil_pressure_psi, 0.0);
+        assert!((cold.exhaust_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
         assert!((cold.oil_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
         engine.start_running(&air, DVec3::ZERO).unwrap();
         let running = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert!(running.oil_pressure_psi > 0.0);
+        assert!(running.exhaust_temperature_c > cold.exhaust_temperature_c);
         assert!(running.oil_temperature_c > cold.oil_temperature_c);
         let commands = engine
             .indices()
@@ -281,6 +283,7 @@ fn original_piston_oil_indications_follow_engine_state() {
         }
         let stopped = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert!(stopped.oil_pressure_psi < running.oil_pressure_psi);
+        assert!((stopped.exhaust_temperature_c - cold.exhaust_temperature_c).abs() < 1e-9);
         assert!(stopped.oil_temperature_c < running.oil_temperature_c);
         verified += 1;
     }

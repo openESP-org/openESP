@@ -358,6 +358,16 @@ impl Flight {
                         ("RECIP ENG BRAKE POWER", "watts", output.cycle.shaft_power),
                         ("RECIP ENG FUEL AIR RATIO", "number", output.mixture_ratio),
                         (
+                            "GENERAL ENG EXHAUST GAS TEMPERATURE",
+                            "celsius",
+                            output.exhaust_temperature_c,
+                        ),
+                        (
+                            "ENG EXHAUST GAS TEMPERATURE",
+                            "celsius",
+                            output.exhaust_temperature_c,
+                        ),
+                        (
                             "GENERAL ENG OIL TEMPERATURE",
                             "celsius",
                             output.oil_temperature_c,
