@@ -832,6 +832,7 @@ impl Flight {
                         let thrust = engines.wrench(
                             &air,
                             state.air_velocity(wind),
+                            state.angular_velocity,
                             self.loading.cg,
                             &power_fractions,
                         )?;

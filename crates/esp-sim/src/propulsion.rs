@@ -142,11 +142,14 @@ impl Propulsion {
         &self,
         air: &Atmosphere,
         velocity: DVec3,
+        angular_velocity: DVec3,
         cg: DVec3,
         power_fractions: &[f64],
     ) -> Result<Wrench> {
         match self {
-            Self::Piston { model, .. } => model.wrench(air, velocity, cg, power_fractions),
+            Self::Piston { model, .. } => {
+                model.wrench(air, velocity, angular_velocity, cg, power_fractions)
+            }
             Self::Turbine { model, .. } => model.wrench(air, velocity, cg, power_fractions),
         }
     }

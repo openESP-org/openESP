@@ -14,7 +14,7 @@ use crate::{
 
 /// Naturally aspirated four-stroke engines with fixed-pitch propellers.
 /// Oil temperature and pressure use an approximate thermal model; oil
-/// viscosity and propeller gyroscopic loads are not connected yet.
+/// viscosity is held at its warm reference value.
 pub struct Pistons {
     cycle: PistonCycle,
     propeller: Propeller,
@@ -27,6 +27,8 @@ pub struct Pistons {
     starter_torque: f64,
     rated_power: f64,
     torque_on_roll: f64,
+    gyro_pitch: f64,
+    gyro_yaw: f64,
     engines: Vec<Engine>,
 }
 
@@ -212,6 +214,18 @@ impl Pistons {
             torque_on_roll.is_finite() && torque_on_roll >= 0.0,
             "invalid torque_on_roll scalar"
         );
+        let gyro_pitch = config
+            .number("flight_tuning", "gyro_precession_on_pitch")?
+            .unwrap_or(1.0);
+        let gyro_yaw = config
+            .number("flight_tuning", "gyro_precession_on_yaw")?
+            .unwrap_or(1.0);
+        ensure!(
+            [gyro_pitch, gyro_yaw]
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0),
+            "invalid gyroscopic tuning scalar"
+        );
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
@@ -312,6 +326,8 @@ impl Pistons {
             starter_torque,
             rated_power,
             torque_on_roll,
+            gyro_pitch,
+            gyro_yaw,
             engines,
         })
     }
@@ -534,11 +550,13 @@ impl Pistons {
         &self,
         air: &Atmosphere,
         velocity: DVec3,
+        angular_velocity: DVec3,
         cg: DVec3,
         power_fractions: &[f64],
     ) -> Result<Wrench> {
         ensure!(
             cg.is_finite()
+                && angular_velocity.is_finite()
                 && power_fractions.len() == self.engines.len()
                 && power_fractions
                     .iter()
@@ -556,6 +574,12 @@ impl Pistons {
             let force = engine.direction * thrust;
             wrench.force += force;
             wrench.moment += (engine.position - cg).cross(force);
+            // In body coordinates, the airframe reacts to the changing
+            // direction of the spinning propeller's angular momentum.
+            let rotor_momentum =
+                engine.direction * (engine.rotation * self.propeller.angular_momentum(output.rpm));
+            let gyro = -angular_velocity.cross(rotor_momentum);
+            wrench.moment += DVec3::new(gyro.x, gyro.y * self.gyro_pitch, gyro.z * self.gyro_yaw);
             // The rotor inertia is reflected through the reduction gearbox. Its
             // casing reaction includes the starter and changes sign when the
             // rotating engine is driven by a windmilling propeller.

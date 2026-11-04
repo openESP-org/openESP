@@ -82,6 +82,10 @@ impl Propeller {
         })
     }
 
+    pub fn angular_momentum(&self, engine_rpm: f64) -> f64 {
+        self.inertia * (engine_rpm / self.reduction) * PI / 30.0
+    }
+
     pub fn engine_shaft_inertia(&self) -> f64 {
         self.inertia / self.reduction.powi(2)
     }

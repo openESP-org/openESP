@@ -328,6 +328,7 @@ fn original_piston_reaction_torque_follows_rotation_and_tuning() {
             continue;
         }
         let mut moments = Vec::new();
+        let mut gyros = Vec::new();
         for (rotation, scale) in [(1, 1), (-1, 1), (1, 0)] {
             let config = config
                 .replace("[propeller]", &format!("[propeller]\nrotation={rotation}"))
@@ -340,8 +341,27 @@ fn original_piston_reaction_torque_follows_rotation_and_tuning() {
             engine.start_running(&air, DVec3::ZERO).unwrap();
             let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
             let wrench = engine
-                .wrench(&air, DVec3::ZERO, DVec3::ZERO, &power)
+                .wrench(&air, DVec3::ZERO, DVec3::ZERO, DVec3::ZERO, &power)
                 .unwrap();
+            let pitch = engine
+                .wrench(&air, DVec3::ZERO, DVec3::Y, DVec3::ZERO, &power)
+                .unwrap();
+            let yaw = engine
+                .wrench(&air, DVec3::ZERO, DVec3::Z, DVec3::ZERO, &power)
+                .unwrap();
+            assert_eq!(pitch.force, wrench.force);
+            gyros.push((pitch.moment - wrench.moment, yaw.moment - wrench.moment));
+            assert!(
+                engine
+                    .wrench(
+                        &air,
+                        DVec3::ZERO,
+                        DVec3::splat(f64::NAN),
+                        DVec3::ZERO,
+                        &power
+                    )
+                    .is_err()
+            );
             moments.push(wrench.moment);
         }
         let clockwise = moments[0] - moments[2];
@@ -349,6 +369,10 @@ fn original_piston_reaction_torque_follows_rotation_and_tuning() {
         assert!(clockwise.x < 0.0);
         assert!(counterclockwise.x > 0.0);
         assert!((clockwise + counterclockwise).length() < 1e-8);
+        assert!(gyros[0].0.z > 0.0 && gyros[0].1.y < 0.0);
+        assert!((gyros[0].0 + gyros[1].0).length() < 1e-8);
+        assert!((gyros[0].1 + gyros[1].1).length() < 1e-8);
+        assert!((gyros[0].0 - gyros[2].0).length() < 1e-8);
         verified += 1;
     }
     assert!(verified > 0);
