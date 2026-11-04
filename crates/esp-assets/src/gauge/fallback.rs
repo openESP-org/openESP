@@ -16,6 +16,7 @@ enum Kind {
     VerticalSpeed,
     Attitude,
     Tachometer,
+    TurnCoordinator,
     Vor1,
     Vor2,
     Radio1,
@@ -40,6 +41,7 @@ impl Instrument {
             ("CESSNA", "VERTICAL_SPEED") => Kind::VerticalSpeed,
             ("BELL_206B", "ATTITUDE") | ("CESSNAWALPHA", "ATTITUDE_ALPHA") => Kind::Attitude,
             ("CESSNA172", "TACHOMETER") => Kind::Tachometer,
+            ("CESSNA", "TURN_INDICATOR") => Kind::TurnCoordinator,
             ("CESSNA", "VOR1") | ("CESSNAWALPHA", "VOR1_ALPHA") => Kind::Vor1,
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
             ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 1") => Kind::Radio1,
@@ -116,6 +118,13 @@ impl Instrument {
                 0.0,
             ],
             Kind::Tachometer => [read(host, "GENERAL ENG RPM:1", "rpm"), 0.0, 0.0, 0.0, 0.0],
+            Kind::TurnCoordinator => [
+                read(host, "TURN COORDINATOR RATE", "degrees per second"),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
             Kind::Radio1 | Kind::Radio2 => {
                 let index = if matches!(self.kind, Kind::Radio1) {
                     1
@@ -234,6 +243,7 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
             'G' => [7, 4, 5, 5, 7],
             'H' => [5, 5, 7, 5, 5],
             'K' => [5, 5, 6, 5, 5],
+            'L' => [4, 4, 4, 4, 7],
             'M' => [5, 7, 7, 5, 5],
             'N' => [5, 7, 7, 7, 5],
             'O' => [7, 5, 5, 5, 7],
@@ -241,6 +251,7 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
             'R' => [6, 5, 6, 5, 5],
             'S' => [7, 4, 7, 1, 7],
             'T' => [7, 2, 2, 2, 2],
+            'U' => [5, 5, 5, 5, 7],
             'V' => [5, 5, 5, 5, 2],
             'W' => [5, 5, 7, 7, 5],
             'Y' => [5, 5, 2, 2, 2],
@@ -345,6 +356,30 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         draw_hollow_circle_mut(&mut image, (64, 64), 53, white);
         return image;
     }
+    if matches!(kind, Kind::TurnCoordinator) {
+        for angle in [-30_f64, 0.0, 30.0] {
+            line(
+                &mut image,
+                point(angle.to_radians(), 46.0),
+                point(angle.to_radians(), 53.0),
+                white,
+            );
+        }
+        label(&mut image, 26, 57, "L", white);
+        label(&mut image, 99, 57, "R", white);
+        label(&mut image, 48, 90, "2 MIN", white);
+        let bank = (values[0] / 3.0 * 30.0).clamp(-55.0, 55.0).to_radians();
+        let wing = (bank.cos() * 31.0, bank.sin() * 31.0);
+        line(
+            &mut image,
+            ((64.0 - wing.0) as f32, (64.0 - wing.1) as f32),
+            ((64.0 + wing.0) as f32, (64.0 + wing.1) as f32),
+            white,
+        );
+        draw_filled_circle_mut(&mut image, (64, 64), 4, yellow);
+        draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
+        return image;
+    }
     if matches!(kind, Kind::Vor1 | Kind::Vor2) {
         for i in 0..36 {
             let angle = (i as f64 * 10.0 - values[0]).to_radians();
@@ -396,7 +431,12 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         Kind::Heading => ("HDG", 0.0, 360.0, 12),
         Kind::VerticalSpeed => ("FPM", -2000.0, 2000.0, 8),
         Kind::Tachometer => ("RPM", 0.0, 3000.0, 6),
-        Kind::Attitude | Kind::Vor1 | Kind::Vor2 | Kind::Radio1 | Kind::Radio2 => unreachable!(),
+        Kind::Attitude
+        | Kind::TurnCoordinator
+        | Kind::Vor1
+        | Kind::Vor2
+        | Kind::Radio1
+        | Kind::Radio2 => unreachable!(),
     };
     let heading = matches!(kind, Kind::Heading);
     for i in 0..=ticks {

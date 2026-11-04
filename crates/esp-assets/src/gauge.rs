@@ -1194,6 +1194,26 @@ mod tests {
     }
 
     #[test]
+    fn fallback_turn_indicator_moves_in_response_to_turn_rate() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        std::fs::create_dir_all(&panel_path).unwrap();
+        std::fs::write(panel_path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna!Turn_Indicator,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = TestHost(0.0);
+        assert!(image.update(&mut host));
+        let level = image.image.clone();
+        host.0 = 3.0;
+        assert!(image.update(&mut host));
+        let right = image.image.clone();
+        assert_ne!(right, level);
+        host.0 = -3.0;
+        assert!(image.update(&mut host));
+        assert_ne!(right, image.image);
+    }
+
+    #[test]
     fn fallback_radio_displays_precise_frequencies_and_dispatches_tuning() {
         struct RadioHost {
             standby: f64,

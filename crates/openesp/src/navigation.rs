@@ -140,6 +140,17 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         variables.set_number(name, "meters per second", value);
     }
     variables.set_number("GPS GROUND TRUE HEADING", "radians", heading);
+    let yaw_rate = state.angular_velocity.z;
+    // Approximate a coordinator's 30-degree canted gyro, normalized to yaw rate.
+    let coordinator_rate = yaw_rate + state.angular_velocity.x * (30_f64.to_radians()).tan();
+    for name in ["TURN INDICATOR RATE", "TURN INDICATOR RATE:1"] {
+        variables.set_number(name, "radians per second", yaw_rate);
+    }
+    variables.set_number(
+        "TURN COORDINATOR RATE",
+        "radians per second",
+        coordinator_rate,
+    );
     variables.set_number("GPS GROUND TRUE TRACK", "radians", track);
     variables.set_number(
         "GPS GROUND MAGNETIC TRACK",
@@ -432,6 +443,40 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn publishes_turn_rate_and_roll_response_in_supported_units() {
+        let mut variables = Variables::default();
+        let state = State {
+            angular_velocity: DVec3::new(6_f64.to_radians(), 0.0, 3_f64.to_radians()),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert!(
+            (read(
+                &mut variables,
+                "TURN INDICATOR RATE:1",
+                "degrees per second"
+            ) - 3.0)
+                .abs()
+                < 1e-10
+        );
+        assert!(
+            (read(
+                &mut variables,
+                "TURN COORDINATOR RATE",
+                "degrees per second"
+            ) - (3.0 + 6.0 * 30_f64.to_radians().tan()))
+            .abs()
+                < 1e-10
+        );
+    }
 
     #[test]
     fn hsi_follows_selected_gps_source_and_clears_when_switched_off() {

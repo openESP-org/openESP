@@ -67,6 +67,8 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "hertz" | "hz" => Some((11, 1.0)),
         "kilohertz" | "khz" => Some((11, 1000.0)),
         "megahertz" | "mhz" => Some((11, 1_000_000.0)),
+        "radians per second" | "radian per second" => Some((12, 1.0)),
+        "degrees per second" | "degree per second" => Some((12, std::f64::consts::PI / 180.0)),
         _ => None,
     };
     if from == "frequency bcd16" {
