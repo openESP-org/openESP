@@ -467,6 +467,17 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     dimension(gauge.width.unwrap_or(128.0) * f64::from(width) / dimensions.width)?;
                 let target_height =
                     dimension(gauge.height.unwrap_or(128.0) * f64::from(height) / layout_height)?;
+                let mut raw_areas = Vec::new();
+                if let Some(index) = instrument.obs_index() {
+                    for (bounds, event) in [((0.0, 80.0, 64.0, 48.0), "DEC"), ((64.0, 80.0, 64.0, 48.0), "INC")] {
+                        raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:VOR{index}_OBI_{event})"), events: vec![MouseEvent::LeftSingle], repeat: true, visibility: Vec::new() });
+                    }
+                    raw_areas.push(MouseAreaSource {
+                        bounds: (0.0, 0.0, 128.0, 128.0),
+                        source: format!("(M:Event) 'WheelUp' scmp 0 == if{{ 0 (>K:VOR{index}_OBI_INC) }} (M:Event) 'WheelDown' scmp 0 == if{{ 0 (>K:VOR{index}_OBI_DEC) }}"),
+                        events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
+                    });
+                }
                 return Ok(Some((
                     Canvas {
                         size: (128, 128),
@@ -481,7 +492,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     },
                     conditions,
                     omitted_elements,
-                    Vec::new(),
+                    raw_areas,
                     Vec::new(),
                 )));
             };
@@ -1110,6 +1121,59 @@ mod tests {
         .unwrap();
         let original = load_panel(&panel, "$screen").unwrap().unwrap();
         assert!(original.gauges[0].fallback.is_none());
+    }
+
+    #[test]
+    fn fallback_vor_displays_signal_and_dispatches_obs_controls() {
+        struct NavHost {
+            needle: f64,
+            events: Vec<String>,
+        }
+        impl Host for NavHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                Ok(Value::Number(match reference.name.as_str() {
+                    "NAV OBS:1" => 90.0,
+                    "HSI CDI NEEDLE VALID" => 1.0,
+                    "HSI CDI NEEDLE" => self.needle,
+                    "HSI TF FLAGS" => 1.0,
+                    _ => 0.0,
+                }))
+            }
+            fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+                if reference.category == 'K' {
+                    self.events.push(reference.name.clone());
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        std::fs::create_dir_all(&panel_path).unwrap();
+        std::fs::write(panel_path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna!VOR1,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = NavHost {
+            needle: -80.0,
+            events: Vec::new(),
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        host.needle = 80.0;
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        assert!(image.left_click(20.0, 100.0, &mut host).unwrap());
+        assert!(image.left_click(100.0, 100.0, &mut host).unwrap());
+        let areas = image.mouse_areas_at(50.0, 40.0);
+        assert!(
+            image
+                .mouse_event(MouseEvent::WheelUp, &areas, [50.0, 40.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(
+            host.events,
+            ["VOR1_OBI_DEC", "VOR1_OBI_INC", "VOR1_OBI_INC"]
+        );
     }
     #[test]
     fn composes_images_with_hidden_elements() {
