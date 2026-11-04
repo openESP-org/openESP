@@ -494,14 +494,14 @@ fn original_piston_wake_improves_low_speed_tail_control() {
         let mut engine = Pistons::from_data(&data).unwrap();
         let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
         let stopped = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-        assert_eq!(stopped, DVec3::ZERO);
+        assert_eq!(stopped, (DVec3::ZERO, DVec3::ZERO));
         engine.start_running(&air, DVec3::ZERO).unwrap();
         let wake = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-        assert!(wake.x > 0.0);
+        assert!(wake.0.x > 0.0 && wake.1.y < 0.0);
         let no_fuel = vec![0.0; power.len()];
         assert_eq!(
             engine.tail_wash(&air, DVec3::ZERO, &no_fuel).unwrap(),
-            DVec3::ZERO
+            (DVec3::ZERO, DVec3::ZERO)
         );
         let centered = aero
             .tail_wash_forces(
@@ -513,8 +513,38 @@ fn original_piston_wake_improves_low_speed_tail_control() {
                 DVec3::ZERO,
             )
             .unwrap();
-        assert_eq!(centered.force, DVec3::ZERO);
-        assert_eq!(centered.moment, DVec3::ZERO);
+        assert!(centered.moment.z < 0.0);
+        let config = String::from_utf8(std::fs::read(path.join("aircraft.cfg")).unwrap()).unwrap();
+        if config.contains("[propeller]")
+            && data
+                .configuration
+                .value("propeller", "rotation")
+                .unwrap()
+                .is_none()
+        {
+            let mut reversed_data = FlightData::load(&path, 0).unwrap();
+            reversed_data.configuration = esp_formats::cfg::Config::parse(
+                &config.replace("[propeller]", "[propeller]\nrotation=-1"),
+            )
+            .unwrap();
+            let mut reversed = Pistons::from_data(&reversed_data).unwrap();
+            reversed.start_running(&air, DVec3::ZERO).unwrap();
+            let reverse_wake = reversed.tail_wash(&air, DVec3::ZERO, &power).unwrap();
+            assert!((wake.0 - reverse_wake.0).length() < 1e-10);
+            assert!((wake.1 + reverse_wake.1).length() < 1e-10);
+            let reversed_load = aero
+                .tail_wash_forces(
+                    (DVec3::ZERO, reverse_wake),
+                    DVec3::ZERO,
+                    air.density,
+                    Controls::default(),
+                    &flaps,
+                    DVec3::ZERO,
+                )
+                .unwrap();
+            assert!(reversed_load.moment.z > 0.0);
+            assert!((centered.moment.z + reversed_load.moment.z).abs() < 1e-8);
+        }
         let controls = Controls {
             rudder: 1.0,
             elevator: 0.5,

@@ -143,10 +143,10 @@ impl Propulsion {
         air: &Atmosphere,
         velocity: DVec3,
         power_fractions: &[f64],
-    ) -> Result<DVec3> {
+    ) -> Result<(DVec3, DVec3)> {
         match self {
             Self::Piston { model, .. } => model.tail_wash(air, velocity, power_fractions),
-            Self::Turbine { .. } => Ok(DVec3::ZERO),
+            Self::Turbine { .. } => Ok((DVec3::ZERO, DVec3::ZERO)),
         }
     }
     pub fn wrench(

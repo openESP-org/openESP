@@ -574,14 +574,14 @@ impl Pistons {
         Ok(())
     }
 
-    /// Approximate axial wake at the centerline tail using actuator-disk
+    /// Approximate axial wake and upper-tail swirl using actuator-disk
     /// momentum theory. Only disks overlapping the centerline contribute.
     pub fn tail_wash(
         &self,
         air: &Atmosphere,
         velocity: DVec3,
         power_fractions: &[f64],
-    ) -> Result<DVec3> {
+    ) -> Result<(DVec3, DVec3)> {
         ensure!(
             velocity.is_finite()
                 && air.density.is_finite()
@@ -595,21 +595,38 @@ impl Pistons {
         let radius = self.propeller.radius();
         let area = PI * radius * radius;
         let mut wash = DVec3::ZERO;
+        let mut swirl = DVec3::ZERO;
         for (index, engine) in self.engines.iter().enumerate() {
             if engine.position.y.abs() >= radius {
                 continue;
             }
-            let thrust = self.output(index, air, velocity)?.propeller.thrust.max(0.0)
-                * power_fractions[index];
+            let output = self.output(index, air, velocity)?;
+            let thrust = output.propeller.thrust.max(0.0) * power_fractions[index];
             let axial_speed = velocity.dot(engine.direction).max(0.0);
             let wake_speed = (axial_speed * axial_speed + 2.0 * thrust / (air.density * area))
                 .sqrt()
                 - axial_speed;
             let overlap = 1.0 - (engine.position.y.abs() / radius).powi(2);
             wash += engine.direction * (wake_speed * overlap);
+            // Wake swirl follows angular-momentum flux. The representative
+            // half-radius and attenuation approximate the upper vertical tail.
+            let mass_flow = air.density * area * (axial_speed + wake_speed * 0.5);
+            if mass_flow > 1e-9 && thrust > 0.0 {
+                let torque = output.propeller.absorbed_torque.max(0.0)
+                    * self.propeller.gear_reduction_ratio()
+                    * power_fractions[index];
+                let tangential = (torque / (mass_flow * radius * 0.5))
+                    .min((axial_speed + wake_speed) * 0.5)
+                    * 0.05;
+                swirl +=
+                    engine.direction.cross(DVec3::Z) * (engine.rotation * tangential * overlap);
+            }
         }
-        ensure!(wash.is_finite(), "invalid propeller wake");
-        Ok(wash)
+        ensure!(
+            wash.is_finite() && swirl.is_finite(),
+            "invalid propeller wake"
+        );
+        Ok((wash, swirl))
     }
     pub fn wrench(
         &self,
