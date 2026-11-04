@@ -124,6 +124,10 @@ impl Variables {
         Ok(current)
     }
 
+    pub fn static_line_pressure(&self) -> Option<f64> {
+        self.air_data_pressures.map(|pressures| pressures[1])
+    }
+
     pub fn configure_aileron_travel(&mut self, up_limit_degrees: f64) -> anyhow::Result<()> {
         anyhow::ensure!(
             up_limit_degrees.is_finite() && up_limit_degrees >= 0.0,

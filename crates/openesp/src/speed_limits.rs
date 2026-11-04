@@ -97,7 +97,12 @@ impl SpeedLimits {
         variables.set_number(
             "PRESSURE ALTITUDE",
             "meters",
-            Atmosphere::indicated_altitude(atmosphere.pressure, 101_325.0)?,
+            Atmosphere::indicated_altitude(
+                variables
+                    .static_line_pressure()
+                    .unwrap_or(atmosphere.pressure),
+                101_325.0,
+            )?,
         );
         variables.set_number(
             "ANGLE OF ATTACK INDICATOR",
@@ -284,6 +289,44 @@ mod tests {
         limits.publish(&state, &mut variables).unwrap();
         assert!(high_density_ratio < 1.0);
         assert_eq!(read(&mut variables, "SIGMA SQRT", "number"), 1.0);
+    }
+
+    #[test]
+    fn pressure_altitude_tracks_static_line_independently_of_altimeter_setting() {
+        use esp_script::Value;
+        let limits = SpeedLimits::from_config(&Config::parse("").unwrap()).unwrap();
+        let mut variables = Variables::default();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -1000.0),
+            velocity: DVec3::X * 100.0,
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("meters")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        limits.publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "PRESSURE ALTITUDE") - 1000.0).abs() < 1e-8);
+        variables
+            .dispatch_event("KOHLSMAN_SET", Value::Number(1000.0 * 16.0))
+            .unwrap();
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        state.position.z = -3000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        limits.publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "PRESSURE ALTITUDE") - 1000.0).abs() < 1e-8);
+        assert!((read(&mut variables, "INDICATED ALTITUDE") - 1000.0).abs() > 1.0);
+        variables
+            .dispatch_event("TOGGLE_STATIC_PORT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        limits.publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "PRESSURE ALTITUDE") - 3000.0).abs() < 1e-8);
     }
 
     #[test]
