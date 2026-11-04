@@ -73,6 +73,7 @@ impl Default for Variables {
         variables.set_number("VOR STATION FREQUENCY", "megahertz", 113.0);
         variables.set_number("VOR STATION RANGE", "nautical miles", 40.0);
         variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 113.0);
+        variables.set_number("NAV STANDBY FREQUENCY:1", "megahertz", 110.5);
         variables.set_number("NAV OBS:1", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
@@ -87,6 +88,16 @@ struct Variable {
 }
 
 fn variable_name(category: char, name: &str) -> String {
+    if category == 'A' {
+        for prefix in ["NAV", "NAV1", "NAV2"] {
+            let index = if prefix == "NAV2" { 2 } else { 1 };
+            for suffix in ["ACTIVE FREQUENCY", "STANDBY FREQUENCY"] {
+                if name == format!("{prefix} {suffix}") {
+                    return format!("NAV {suffix}:{index}");
+                }
+            }
+        }
+    }
     if category == 'A' {
         for prefix in [
             "KOHLSMAN SETTING MB",
@@ -548,6 +559,81 @@ impl Variables {
         Ok(())
     }
 
+    fn nav1_radio_event(&mut self, name: &str, value: f64) -> Result<(), Error> {
+        let active = "NAV ACTIVE FREQUENCY:1";
+        let standby = "NAV STANDBY FREQUENCY:1";
+        let read_hz = |v: &mut Self, name| -> Result<f64, Error> {
+            let value = v
+                .read(&Reference::new('A', name, Some("hertz")))?
+                .number()?;
+            if !value.is_finite() || !(108_000_000.0..118_000_000.0).contains(&value) {
+                return Err(Error::Number);
+            }
+            Ok(value.round())
+        };
+        if name == "NAV1_RADIO_SWAP" {
+            let active_value = read_hz(self, active)?;
+            let standby_value = read_hz(self, standby)?;
+            self.set_number(active, "hertz", standby_value);
+            self.set_number(standby, "hertz", active_value);
+            return Ok(());
+        }
+        if name.ends_with("SET") || name.ends_with("SET_HZ") {
+            if !value.is_finite() {
+                return Err(Error::Number);
+            }
+            let hz = if name.ends_with("SET_HZ") {
+                value
+            } else {
+                if value.fract() != 0.0 || !(0.0..=65535.0).contains(&value) {
+                    return Err(Error::Number);
+                }
+                let encoded = value as u16;
+                let digits = [
+                    (encoded >> 12) & 15,
+                    (encoded >> 8) & 15,
+                    (encoded >> 4) & 15,
+                    encoded & 15,
+                ];
+                if digits.iter().any(|digit| *digit > 9) {
+                    return Err(Error::Number);
+                }
+                100_000_000.0
+                    + (digits[0] as f64 * 1000.0
+                        + digits[1] as f64 * 100.0
+                        + digits[2] as f64 * 10.0
+                        + digits[3] as f64)
+                        * 10_000.0
+            };
+            if !(108_000_000.0..118_000_000.0).contains(&hz) {
+                return Err(Error::Number);
+            }
+            self.set_number(
+                if name.starts_with("NAV1_STBY") {
+                    standby
+                } else {
+                    active
+                },
+                "hertz",
+                hz,
+            );
+            return Ok(());
+        }
+        let hz = read_hz(self, standby)? as i64;
+        let increase = name.contains("_INC");
+        let direction = if increase { 1 } else { -1 };
+        let next = if name.contains("WHOLE") {
+            108_000_000 + (hz - 108_000_000 + direction * 1_000_000).rem_euclid(10_000_000)
+        } else if name.ends_with("CARRY") {
+            108_000_000 + (hz - 108_000_000 + direction * 50_000).rem_euclid(10_000_000)
+        } else {
+            hz - hz.rem_euclid(1_000_000)
+                + (hz.rem_euclid(1_000_000) + direction * 25_000).rem_euclid(1_000_000)
+        };
+        self.set_number(standby, "hertz", next as f64);
+        Ok(())
+    }
+
     pub fn dispatch_event(&mut self, name: &str, value: Value) -> Result<(), Error> {
         let value = value.number()?;
         let step = match name {
@@ -961,7 +1047,8 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),
-            "VOR1_SET" | "VOR1_OBI_INC" | "VOR1_OBI_DEC" => {
+            "VOR1_SET" | "VOR1_OBI_INC" | "VOR1_OBI_DEC" | "VOR1_OBI_FAST_INC"
+            | "VOR1_OBI_FAST_DEC" => {
                 if !value.is_finite() {
                     return Err(Error::Number);
                 }
@@ -971,18 +1058,24 @@ impl Variables {
                 let selected = match name {
                     "VOR1_SET" => value,
                     "VOR1_OBI_INC" => current + 1.0,
+                    "VOR1_OBI_FAST_INC" => (current + 10.0).min(360.0),
+                    "VOR1_OBI_FAST_DEC" => (current - 10.0).max(0.0),
                     _ => current - 1.0,
                 };
                 self.set_number("NAV OBS:1", "degrees", selected.rem_euclid(360.0));
                 Ok(())
             }
-            "NAV1_RADIO_SET_HZ" => {
-                if !value.is_finite() || !(108_000_000.0..=117_950_000.0).contains(&value) {
-                    return Err(Error::Number);
-                }
-                self.set_number("NAV ACTIVE FREQUENCY:1", "hertz", value);
-                Ok(())
-            }
+            "NAV1_RADIO_SET_HZ"
+            | "NAV1_STBY_SET_HZ"
+            | "NAV1_RADIO_SET"
+            | "NAV1_STBY_SET"
+            | "NAV1_RADIO_SWAP"
+            | "NAV1_RADIO_WHOLE_INC"
+            | "NAV1_RADIO_WHOLE_DEC"
+            | "NAV1_RADIO_FRACT_INC"
+            | "NAV1_RADIO_FRACT_DEC"
+            | "NAV1_RADIO_FRACT_INC_CARRY"
+            | "NAV1_RADIO_FRACT_DEC_CARRY" => self.nav1_radio_event(name, value),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
             "SPOILERS_ARM_TOGGLE" => self.toggle("SPOILERS ARMED"),
             "SPOILERS_ARM_ON" | "SPOILERS_ARM_OFF" | "SPOILERS_ARM_SET" => {

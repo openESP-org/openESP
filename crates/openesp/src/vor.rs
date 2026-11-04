@@ -111,6 +111,76 @@ mod tests {
     use glam::DVec3;
 
     #[test]
+    fn nav_radio_tuning_and_swap_drive_receiver() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        let state = State {
+            position: DVec3::new(-10_000.0, 0.0, -1000.0),
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_event("NAV1_STBY_SET", Value::Number(0x1400 as f64))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV1 STANDBY FREQUENCY", "megahertz"),
+            114.0
+        );
+        variables
+            .dispatch_event("NAV1_RADIO_SWAP", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV ACTIVE FREQUENCY:1", "megahertz"),
+            114.0
+        );
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:1", "bool"), 0.0);
+        variables
+            .dispatch_event("NAV1_RADIO_SWAP", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:1", "bool"), 1.0);
+        variables
+            .dispatch_event("NAV1_STBY_SET_HZ", Value::Number(117_975_000.0))
+            .unwrap();
+        variables
+            .dispatch_event("NAV1_RADIO_FRACT_INC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV STANDBY FREQUENCY:1", "hertz"),
+            117_000_000.0
+        );
+        variables
+            .dispatch_event("NAV1_RADIO_WHOLE_INC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV STANDBY FREQUENCY:1", "hertz"),
+            108_000_000.0
+        );
+        variables
+            .dispatch_event("NAV1_RADIO_FRACT_DEC_CARRY", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV STANDBY FREQUENCY:1", "hertz"),
+            117_950_000.0
+        );
+        assert!(
+            variables
+                .dispatch_event("NAV1_STBY_SET", Value::Number(0x1a00 as f64))
+                .is_err()
+        );
+        assert_eq!(
+            read(&mut variables, "NAV STANDBY FREQUENCY:1", "hertz"),
+            117_950_000.0
+        );
+    }
+
+    #[test]
     fn vor_receiver_tracks_obs_tuning_range_and_hsi_source() {
         let mut variables = Variables::default();
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
