@@ -1400,6 +1400,48 @@ mod tests {
         assert_eq!(original, image.image);
     }
     #[test]
+    fn fallback_altimeter_hands_move_continuously_through_thousand_foot_rollover() {
+        struct AltitudeHost(f64);
+        impl Host for AltitudeHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "INDICATED ALTITUDE" => Ok(Value::Number(self.0)),
+                    "KOHLSMAN SETTING HG:1" => Ok(Value::Number(29.92)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut gauge = fallback::Instrument::new("Cessna!Altimeter").unwrap();
+        let mut host = AltitudeHost(999.9);
+        assert!(gauge.update(&mut host));
+        let before = gauge.image.clone();
+        host.0 = 1000.1;
+        assert!(gauge.update(&mut host));
+        let changed = before
+            .pixels()
+            .zip(gauge.image.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            changed < 100,
+            "hands jumped at 1000 feet: {changed} pixels changed"
+        );
+        host.0 = 250.0;
+        assert!(gauge.update(&mut host));
+        let hundreds = gauge.image.clone();
+        host.0 = 1250.0;
+        assert!(gauge.update(&mut host));
+        let thousands = gauge.image.clone();
+        assert_ne!(hundreds, thousands);
+        host.0 = 10250.0;
+        assert!(gauge.update(&mut host));
+        assert_ne!(hundreds, gauge.image);
+        assert_ne!(thousands, gauge.image);
+    }
+    #[test]
     fn fallback_altimeter_displays_and_adjusts_barometric_setting() {
         struct AltimeterHost {
             setting: f64,

@@ -659,6 +659,48 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
         return image;
     }
+    if matches!(kind, Kind::Altimeter) {
+        for tick in 0..50 {
+            let angle = tick as f64 / 50.0 * 2.0 * PI;
+            let major = tick % 5 == 0;
+            line(
+                &mut image,
+                point(angle, if major { 44.0 } else { 48.0 }),
+                point(angle, 53.0),
+                white,
+            );
+            if major {
+                let text = (tick / 5).to_string();
+                let (x, y) = point(angle, 37.0);
+                label(&mut image, x as i32 - 2, y as i32 - 2, &text, white);
+            }
+        }
+        let pressure = if values[1] == f64::MAX {
+            "OFF".to_owned()
+        } else {
+            format!("{:.2}", values[1])
+        };
+        label(
+            &mut image,
+            64 - pressure.len() as i32 * 2,
+            89,
+            &pressure,
+            white,
+        );
+        label(&mut image, 60, 100, "FT", white);
+        // Each hand makes one clockwise turn per 1,000, 10,000, or 100,000 feet.
+        for (period, length, color) in [
+            (100_000.0, 15.0, yellow),
+            (10_000.0, 28.0, white),
+            (1_000.0, 43.0, white),
+        ] {
+            let angle = values[0].rem_euclid(period) / period * 2.0 * PI;
+            line(&mut image, (64.0, 64.0), point(angle, length), color);
+        }
+        draw_filled_circle_mut(&mut image, (64, 64), 3, yellow);
+        draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
+        return image;
+    }
     if matches!(kind, Kind::Attitude) {
         let pitch = values[0].clamp(-30.0, 30.0) * 1.2;
         let bank = values[1].to_radians();
@@ -825,11 +867,11 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
     }
     let (title, min, max, ticks) = match kind {
         Kind::Airspeed => ("KTS", 0.0, 200.0, 10),
-        Kind::Altimeter => ("FT", 0.0, 1000.0, 10),
         Kind::Heading => ("HDG", 0.0, 360.0, 12),
         Kind::VerticalSpeed => ("FPM", -2000.0, 2000.0, 8),
         Kind::Tachometer => ("RPM", 0.0, 3000.0, 6),
-        Kind::Attitude
+        Kind::Altimeter
+        | Kind::Attitude
         | Kind::NavGpsSwitch
         | Kind::NavGpsAnnunciator
         | Kind::Compass
@@ -857,8 +899,6 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         let value = min + (max - min) * fraction;
         let number = if heading {
             (value / 10.0).round() as i32 % 36
-        } else if matches!(kind, Kind::Altimeter) {
-            (value / 100.0).round() as i32 % 10
         } else if matches!(kind, Kind::Tachometer) {
             (value / 100.0).round() as i32
         } else if matches!(kind, Kind::VerticalSpeed) {
@@ -876,37 +916,11 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
             white,
         );
     }
-    if matches!(kind, Kind::Altimeter) {
-        let altitude = format!("{:.0}", values[0]);
-        label(
-            &mut image,
-            64 - altitude.len() as i32 * 2,
-            74,
-            &altitude,
-            white,
-        );
-        let pressure = if values[1] == f64::MAX {
-            "OFF".to_owned()
-        } else {
-            format!("{:.2}", values[1])
-        };
-        label(
-            &mut image,
-            64 - pressure.len() as i32 * 2,
-            98,
-            &pressure,
-            white,
-        );
-    }
     label(&mut image, 64 - title.len() as i32 * 2, 85, title, white);
     let angle = if heading {
         0.0
     } else {
-        let value = if matches!(kind, Kind::Altimeter) {
-            values[0].rem_euclid(1000.0)
-        } else {
-            values[0].clamp(min, max)
-        };
+        let value = values[0].clamp(min, max);
         (-135.0 + 270.0 * (value - min) / (max - min)).to_radians()
     };
     if heading {
