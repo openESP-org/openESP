@@ -81,6 +81,8 @@ struct Arguments {
         help = "Starting east offset from the test grid origin in meters"
     )]
     start_east: Option<f64>,
+    #[arg(long, requires_all = ["airspeed", "ils_course"], conflicts_with_all = ["heading", "start_north", "start_east", "height"], help = "Start on the ILS glideslope this many nautical miles before the threshold (0.5 to 10)")]
+    approach_distance: Option<f64>,
     #[arg(
         long,
         default_value_t = 0.0,
@@ -993,12 +995,6 @@ fn main() -> Result<()> {
     let fsx_root = arguments.fsx_root.clone();
     let airspeed = arguments.airspeed;
     let engines_running = arguments.engines_running;
-    let height = arguments.height;
-    let placement = navigation::InitialPlacement::new(
-        arguments.start_north.unwrap_or(0.0),
-        arguments.start_east.unwrap_or(0.0),
-        arguments.heading.unwrap_or(0.0),
-    )?;
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
@@ -1025,6 +1021,34 @@ fn main() -> Result<()> {
     }
     navigation::validate_declination(arguments.magnetic_declination)?;
     let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
+    let (placement, height) = if let Some(distance) = arguments.approach_distance {
+        let origin = navigation::Origin::new(arguments.latitude, arguments.longitude)?;
+        let (north, east) = origin.local_position(
+            arguments.vor_latitude.context("ILS latitude is required")?,
+            arguments
+                .vor_longitude
+                .context("ILS longitude is required")?,
+        )?;
+        navigation::approach_start(
+            north,
+            east,
+            arguments.ils_course.context("ILS course is required")?
+                + arguments.magnetic_declination,
+            arguments.ils_glideslope,
+            distance,
+            airspeed.context("airspeed is required")?,
+            starting_wind,
+        )?
+    } else {
+        (
+            navigation::InitialPlacement::new(
+                arguments.start_north.unwrap_or(0.0),
+                arguments.start_east.unwrap_or(0.0),
+                arguments.heading.unwrap_or(0.0),
+            )?,
+            arguments.height,
+        )
+    };
     let initial_weather = weather::Conditions::new(
         arguments.sea_level_pressure,
         arguments.sea_level_temperature,
@@ -1066,7 +1090,11 @@ fn main() -> Result<()> {
         variables.set_number("GPS WP NEXT LAT", "degrees", latitude);
         variables.set_number("GPS WP NEXT LON", "degrees", longitude);
         variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
-        variables.set_number("GPS DRIVES NAV1", "bool", 1.0);
+        variables.set_number(
+            "GPS DRIVES NAV1",
+            "bool",
+            f64::from(arguments.approach_distance.is_none()),
+        );
     }
     variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
     variables.set_number(
@@ -1174,6 +1202,42 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn approach_start_requires_ils_and_excludes_manual_placement() {
+        let base = [
+            "openesp",
+            "--aircraft",
+            "test",
+            "--airspeed",
+            "80",
+            "--vor-latitude",
+            "0",
+            "--vor-longitude",
+            "0",
+            "--ils-course",
+            "90",
+            "--approach-distance",
+            "5",
+        ];
+        let args = Arguments::try_parse_from(base).unwrap();
+        assert_eq!(args.approach_distance, Some(5.0));
+        assert!(
+            Arguments::try_parse_from([
+                "openesp",
+                "--aircraft",
+                "test",
+                "--airspeed",
+                "80",
+                "--approach-distance",
+                "5"
+            ])
+            .is_err()
+        );
+        let mut conflicting = base.to_vec();
+        conflicting.extend(["--height", "500"]);
+        assert!(Arguments::try_parse_from(conflicting).is_err());
+    }
 
     #[test]
     fn parses_starting_position_and_heading_for_flight() {

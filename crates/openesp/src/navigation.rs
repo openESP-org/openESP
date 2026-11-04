@@ -11,6 +11,8 @@ pub struct InitialPlacement {
     north: f64,
     east: f64,
     heading: f64,
+    velocity_scale: f64,
+    vertical_air_velocity: Option<f64>,
 }
 
 impl InitialPlacement {
@@ -25,6 +27,8 @@ impl InitialPlacement {
             north,
             east,
             heading: heading_degrees.rem_euclid(360.0).to_radians(),
+            velocity_scale: 1.0,
+            vertical_air_velocity: None,
         })
     }
 
@@ -33,8 +37,77 @@ impl InitialPlacement {
         state.position.x = self.north;
         state.position.y = self.east;
         state.orientation = rotation * state.orientation;
-        state.velocity = rotation * state.velocity;
+        state.velocity = rotation * state.velocity * self.velocity_scale;
+        if let Some(vertical) = self.vertical_air_velocity {
+            state.velocity.z = vertical;
+        }
     }
+}
+
+pub fn approach_start(
+    threshold_north: f64,
+    threshold_east: f64,
+    true_course: f64,
+    slope_degrees: f64,
+    distance_nm: f64,
+    airspeed_knots: f64,
+    wind: DVec3,
+) -> Result<(InitialPlacement, f64)> {
+    ensure!(
+        [
+            threshold_north,
+            threshold_east,
+            true_course,
+            slope_degrees,
+            distance_nm,
+            airspeed_knots
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && wind.is_finite(),
+        "approach parameters must be finite"
+    );
+    ensure!(
+        (0.5..=10.0).contains(&distance_nm),
+        "approach distance must be between 0.5 and 10 nautical miles"
+    );
+    ensure!(
+        (1.0..=6.0).contains(&slope_degrees),
+        "approach glideslope must be between 1 and 6 degrees"
+    );
+    let speed = airspeed_knots * 1852.0 / 3600.0;
+    ensure!(speed > 0.0, "approach airspeed must be positive");
+    let course = true_course.to_radians();
+    let forward = DVec3::new(course.cos(), course.sin(), 0.0);
+    let right = DVec3::new(-course.sin(), course.cos(), 0.0);
+    let crosswind = wind.dot(right);
+    let along_wind = wind.dot(forward);
+    let slope = slope_degrees.to_radians().tan();
+    let offset = along_wind * slope - wind.z;
+    let a = 1.0 + slope * slope;
+    let b = 2.0 * slope * offset;
+    let c = crosswind * crosswind + offset * offset - speed * speed;
+    let discriminant = b * b - 4.0 * a * c;
+    ensure!(
+        discriminant >= 0.0 && discriminant.is_finite(),
+        "wind exceeds the available approach airspeed"
+    );
+    let forward_air = (-b + discriminant.sqrt()) / (2.0 * a);
+    let ground_speed = forward_air + along_wind;
+    ensure!(
+        forward_air > 0.0 && ground_speed > 0.0,
+        "wind prevents forward progress on approach"
+    );
+    let correction = (-crosswind).atan2(forward_air);
+    let distance = distance_nm * 1852.0;
+    let mut placement = InitialPlacement::new(
+        threshold_north - forward.x * distance,
+        threshold_east - forward.y * distance,
+        true_course + correction.to_degrees(),
+    )?;
+    placement.velocity_scale = forward_air.hypot(crosswind) / speed;
+    placement.vertical_air_velocity = Some(ground_speed * slope - wind.z);
+    Ok((placement, distance * slope))
 }
 
 pub fn validate_declination(degrees: f64) -> Result<()> {
@@ -512,6 +585,30 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn approach_starts_on_course_and_glideslope_with_crosswind_correction() {
+        let wind = DVec3::new(-5.0, 0.0, 0.0);
+        let (placement, height) = approach_start(200.0, 300.0, 90.0, 3.0, 5.0, 80.0, wind).unwrap();
+        let speed = 80.0 * 1852.0 / 3600.0;
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -height),
+            velocity: DVec3::X * speed,
+            ..State::default()
+        };
+        placement.apply(&mut state);
+        state.velocity += wind;
+        assert!((state.position.x - 200.0).abs() < 1e-9);
+        assert!((state.position.y - (300.0 - 5.0 * 1852.0)).abs() < 1e-9);
+        assert!((height - 5.0 * 1852.0 * 3_f64.to_radians().tan()).abs() < 1e-9);
+        assert!(state.velocity.x.abs() < 1e-9 && state.velocity.y > 0.0);
+        assert!((state.velocity.z / state.velocity.y - 3_f64.to_radians().tan()).abs() < 1e-10);
+        assert!(((state.velocity - wind).length() - speed).abs() < 1e-9);
+        let (heading, _, _) = state.orientation.to_euler(EulerRot::ZYX);
+        assert!(heading.to_degrees() < 90.0);
+        assert!(approach_start(0.0, 0.0, 90.0, 3.0, 5.0, 80.0, DVec3::X * 100.0).is_err());
+        assert!(approach_start(0.0, 0.0, 0.0, 3.0, 0.0, 80.0, DVec3::ZERO).is_err());
+    }
 
     #[test]
     fn initial_placement_rotates_velocity_and_preserves_ground_pitch() {
