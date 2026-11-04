@@ -111,6 +111,52 @@ mod tests {
     use glam::DVec3;
 
     #[test]
+    fn legacy_gauge_event_ids_control_radio_obs_and_gyro() {
+        let mut variables = Variables::default();
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_key_event(0x100b4, Value::Number(90.0))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x1007f, Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x1033f, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "NAV OBS:1", "degrees"), 81.0);
+        variables
+            .dispatch_key_event(0x1038f, Value::Number(0x1400 as f64))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x10390, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "NAV ACTIVE FREQUENCY:1", "megahertz"),
+            114.0
+        );
+        variables
+            .dispatch_key_event(0x10347, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "GPS DRIVES NAV1", "bool"), 1.0);
+        variables
+            .dispatch_key_event(0x101fe, Value::Number(10.0))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x10155, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "GYRO DRIFT ERROR", "degrees"), 11.0);
+        variables
+            .dispatch_key_event(0x10020, Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "GYRO DRIFT ERROR", "degrees"), 0.0);
+    }
+
+    #[test]
     fn nav_radio_tuning_and_swap_drive_receiver() {
         let mut variables = Variables::default();
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
