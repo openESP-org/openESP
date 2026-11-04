@@ -11,18 +11,27 @@ pub struct Station {
     pub longitude: f64,
     pub frequency: f64,
     pub range: f64,
+    pub elevation: f64,
 }
 
 impl std::str::FromStr for Station {
     type Err = anyhow::Error;
     fn from_str(text: &str) -> Result<Self> {
         let fields = text.split(',').collect::<Vec<_>>();
-        ensure!(fields.len() == 4, "expected LAT,LON,MHZ,RANGE_NM");
+        ensure!(
+            (4..=5).contains(&fields.len()),
+            "expected LAT,LON,MHZ,RANGE_NM[,ELEVATION_M]"
+        );
         let station = Self {
             latitude: fields[0].trim().parse()?,
             longitude: fields[1].trim().parse()?,
             frequency: fields[2].trim().parse()?,
             range: fields[3].trim().parse()?,
+            elevation: fields
+                .get(4)
+                .map(|v| v.trim().parse())
+                .transpose()?
+                .unwrap_or(0.0),
         };
         validate(
             station.latitude,
@@ -30,6 +39,10 @@ impl std::str::FromStr for Station {
             station.frequency,
             station.range,
         )?;
+        ensure!(
+            station.elevation.is_finite(),
+            "VOR elevation must be finite"
+        );
         Ok(station)
     }
 }
@@ -120,6 +133,7 @@ fn publish_receiver(
             longitude: read(variables, &station_key("LONGITUDE"), "degrees")?,
             frequency: read(variables, &station_key("FREQUENCY"), "megahertz")?,
             range: read(variables, &station_key("RANGE"), "nautical miles")?,
+            elevation: read(variables, &station_key("ELEVATION"), "meters").unwrap_or(0.0),
         };
         validate(
             station.latitude,
@@ -127,6 +141,10 @@ fn publish_receiver(
             station.frequency,
             station.range,
         )?;
+        ensure!(
+            station.elevation.is_finite(),
+            "VOR elevation must be finite"
+        );
         if (tuned - station.frequency).abs() >= 0.0005 {
             continue;
         }
@@ -181,7 +199,8 @@ fn publish_receiver(
         + station_latitude.cos() * latitude.cos() * (delta_lon / 2.0).sin().powi(2))
     .clamp(0.0, 1.0);
     let ground_distance = 2.0 * EARTH_RADIUS * haversine.sqrt().atan2((1.0 - haversine).sqrt());
-    let distance = ground_distance.hypot(altitude);
+    let relative_altitude = altitude - station.elevation;
+    let distance = ground_distance.hypot(relative_altitude);
     // Model every configured station as collocated with a DME transponder.
     // DME range does not depend on directional localizer or VOR reception.
     let dme_signal =
@@ -223,7 +242,7 @@ fn publish_receiver(
             if signal {
                 needle = (error / 2.5_f64.to_radians() * 127.0).clamp(-127.0, 127.0);
                 flag = 1.0;
-                let elevation = altitude.atan2(ground_distance);
+                let elevation = relative_altitude.atan2(ground_distance);
                 let glide_angle = slope.to_radians();
                 glideslope_signal = ground_distance <= 10.0 * 1852.0
                     && error.abs() <= 8_f64.to_radians()
@@ -456,6 +475,38 @@ mod tests {
     }
 
     #[test]
+    fn elevated_station_uses_relative_altitude_for_dme_and_glideslope() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        variables.set_number("VOR STATION LOCALIZER", "bool", 1.0);
+        variables.set_number("VOR STATION FREQUENCY", "megahertz", 110.3);
+        variables.set_number("VOR STATION ELEVATION", "meters", 1500.0);
+        variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 110.3);
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let relative_height = 10_000.0 * 3_f64.to_radians().tan();
+        let state = State {
+            position: DVec3::new(-10_000.0, 0.0, -1500.0 - relative_height),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS GLIDE SLOPE:1", "bool"), 1.0);
+        assert!(read(&mut variables, "NAV GSI:1", "number").abs() < 1e-5);
+        assert!(
+            (read(&mut variables, "NAV DME:1", "meters") - 10_000.0_f64.hypot(relative_height))
+                .abs()
+                < 0.01
+        );
+        variables.set_number("VOR STATION ELEVATION", "meters", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS GLIDE SLOPE:1", "bool"), 0.0);
+        assert!(read(&mut variables, "NAV DME:1", "meters") > 10_000.0_f64.hypot(relative_height));
+    }
+    #[test]
     fn dme_remains_available_overhead_and_outside_localizer_sector() {
         let mut variables = Variables::default();
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
@@ -674,5 +725,11 @@ mod tests {
         assert!(validate(90.1, 0.0, 113.0, 40.0).is_err());
         assert!(validate(0.0, 0.0, 113.01, 40.0).is_err());
         assert!(validate(0.0, 0.0, 113.0, 0.0).is_err());
+        assert!("0,0,113,40,NaN".parse::<Station>().is_err());
+        assert_eq!("0,0,113,40".parse::<Station>().unwrap().elevation, 0.0);
+        assert_eq!(
+            "0,0,113,40,1234".parse::<Station>().unwrap().elevation,
+            1234.0
+        );
     }
 }

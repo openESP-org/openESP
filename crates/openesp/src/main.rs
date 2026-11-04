@@ -142,8 +142,15 @@ struct Arguments {
     )]
     vor_range: f64,
     #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help = "Primary VOR or ILS station elevation in meters above the test grid"
+    )]
+    vor_elevation: f64,
+    #[arg(
         long = "vor-station",
-        value_name = "LAT,LON,MHZ,RANGE_NM",
+        value_name = "LAT,LON,MHZ,RANGE_NM[,ELEVATION_M]",
         allow_hyphen_values = true,
         help = "Add a VOR station; may be repeated"
     )]
@@ -1029,6 +1036,10 @@ fn main() -> Result<()> {
         arguments.vor_stations.len() <= 63,
         "at most 63 additional VOR stations are supported"
     );
+    anyhow::ensure!(
+        arguments.vor_elevation.is_finite(),
+        "VOR elevation must be finite"
+    );
     if let (Some(latitude), Some(longitude)) = (arguments.vor_latitude, arguments.vor_longitude) {
         vor::validate(
             latitude,
@@ -1056,7 +1067,7 @@ fn main() -> Result<()> {
                 .vor_longitude
                 .context("ILS longitude is required")?,
         )?;
-        navigation::approach_start(
+        let (placement, relative_height) = navigation::approach_start(
             north,
             east,
             arguments.ils_course.context("ILS course is required")?
@@ -1065,7 +1076,8 @@ fn main() -> Result<()> {
             distance,
             airspeed.context("airspeed is required")?,
             starting_wind,
-        )?
+        )?;
+        (placement, relative_height + arguments.vor_elevation)
     } else {
         (
             navigation::InitialPlacement::new(
@@ -1143,6 +1155,7 @@ fn main() -> Result<()> {
             ("LONGITUDE", "degrees", station.longitude),
             ("FREQUENCY", "megahertz", station.frequency),
             ("RANGE", "nautical miles", station.range),
+            ("ELEVATION", "meters", station.elevation),
             ("LOCALIZER", "bool", 0.0),
         ] {
             variables.set_number(&format!("VOR STATION {name}:{index}"), unit, value);
@@ -1152,6 +1165,7 @@ fn main() -> Result<()> {
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
         variables.set_number("VOR STATION LATITUDE", "degrees", latitude);
         variables.set_number("VOR STATION LONGITUDE", "degrees", longitude);
+        variables.set_number("VOR STATION ELEVATION", "meters", arguments.vor_elevation);
         variables.set_number(
             "VOR STATION FREQUENCY",
             "megahertz",
@@ -1316,12 +1330,14 @@ mod tests {
             "--vor-station",
             "-33.9,151.2,113.5,40",
             "--vor-station",
-            "-34,150,114.0,30",
+            "-34,150,114.0,30,550",
         ])
         .unwrap();
         assert_eq!(args.vor_stations.len(), 2);
         assert_eq!(args.vor_stations[0].latitude, -33.9);
         assert_eq!(args.vor_stations[1].frequency, 114.0);
+        assert_eq!(args.vor_stations[0].elevation, 0.0);
+        assert_eq!(args.vor_stations[1].elevation, 550.0);
     }
 
     #[test]
