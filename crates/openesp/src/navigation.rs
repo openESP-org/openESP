@@ -147,6 +147,64 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         track,
         variables,
     )?;
+    publish_hsi(variables)?;
+    Ok(())
+}
+
+fn publish_hsi(variables: &mut Variables) -> Result<()> {
+    let read = |variables: &mut Variables, name, unit| -> Result<f64> {
+        Ok(variables
+            .read(&Reference::new('A', name, Some(unit)))?
+            .number()?)
+    };
+    let gps_selected = read(variables, "GPS DRIVES NAV1", "bool")? != 0.0;
+    let previously_selected = read(variables, "HSI GPS SOURCE ACTIVE", "bool")? != 0.0;
+    variables.set_number("HSI GPS SOURCE ACTIVE", "bool", f64::from(gps_selected));
+    if !gps_selected {
+        if previously_selected {
+            variables.set_number("NAV CDI:1", "number", 0.0);
+        }
+        for name in [
+            "HSI CDI NEEDLE VALID",
+            "HSI BEARING VALID",
+            "HSI GSI NEEDLE VALID",
+            "HSI HAS LOCALIZER",
+        ] {
+            variables.set_number(name, "bool", 0.0);
+        }
+        variables.set_number("HSI CDI NEEDLE", "number", 0.0);
+        variables.set_number("HSI BEARING", "radians", 0.0);
+        variables.set_number("HSI DISTANCE", "meters", 0.0);
+        variables.set_number("HSI TF FLAGS", "enum", 0.0);
+        return Ok(());
+    }
+    let active = read(variables, "GPS IS ACTIVE WAY POINT", "bool")? != 0.0;
+    let leg_valid = active && read(variables, "GPS WP PREV VALID", "bool")? != 0.0;
+    let distance = read(variables, "GPS WP DISTANCE", "meters")?;
+    let bearing_valid = active && distance > 1e-6;
+    let bearing = read(variables, "GPS WP BEARING", "radians")?;
+    let desired = read(variables, "GPS WP DESIRED TRACK", "radians")?;
+    let needle = if leg_valid {
+        read(variables, "GPS CDI NEEDLE", "number")?
+    } else {
+        0.0
+    };
+    let to_from = if !leg_valid || !bearing_valid {
+        0.0
+    } else if (bearing - desired).cos() >= 0.0 {
+        1.0
+    } else {
+        2.0
+    };
+    variables.set_number("NAV CDI:1", "number", needle);
+    variables.set_number("HSI CDI NEEDLE", "number", needle);
+    variables.set_number("HSI CDI NEEDLE VALID", "bool", f64::from(leg_valid));
+    variables.set_number("HSI BEARING", "radians", bearing);
+    variables.set_number("HSI BEARING VALID", "bool", f64::from(bearing_valid));
+    variables.set_number("HSI DISTANCE", "meters", distance);
+    variables.set_number("HSI TF FLAGS", "enum", to_from);
+    variables.set_number("HSI GSI NEEDLE VALID", "bool", 0.0);
+    variables.set_number("HSI HAS LOCALIZER", "bool", 0.0);
     Ok(())
 }
 
@@ -330,6 +388,56 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn hsi_follows_selected_gps_source_and_clears_when_switched_off() {
+        let mut variables = Variables::default();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", 1.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        state.position.x = 500.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI BEARING VALID", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI TF FLAGS", "enum"), 1.0);
+        let cdi = read(&mut variables, "GPS CDI NEEDLE", "number");
+        assert!(cdi > 0.0);
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE", "number"), cdi);
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), cdi);
+        assert_eq!(
+            read(&mut variables, "HSI DISTANCE", "meters"),
+            read(&mut variables, "GPS WP DISTANCE", "meters")
+        );
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), 0.0);
+        variables.set_number("NAV CDI:1", "number", 42.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), 42.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "HSI BEARING VALID", "bool"), 0.0);
+    }
 
     #[test]
     fn direct_to_course_tracks_cross_track_and_recaptures_changed_destination() {

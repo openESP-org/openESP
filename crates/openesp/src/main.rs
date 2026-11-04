@@ -802,6 +802,14 @@ impl ApplicationHandler for App {
                                         eprintln!("heading gyro input: {error}");
                                     }
                                 }
+                                KeyCode::KeyN => {
+                                    if let Err(error) = self.variables.dispatch_event(
+                                        "TOGGLE_GPS_DRIVES_NAV1",
+                                        Value::Number(0.0),
+                                    ) {
+                                        eprintln!("navigation source input: {error}");
+                                    }
+                                }
                                 KeyCode::KeyO => self.door_open = !self.door_open,
                                 KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8 => {
                                     let name = match key {
@@ -959,6 +967,7 @@ fn main() -> Result<()> {
         variables.set_number("GPS WP NEXT LAT", "degrees", latitude);
         variables.set_number("GPS WP NEXT LON", "degrees", longitude);
         variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS DRIVES NAV1", "bool", 1.0);
     }
     variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
     variables.set_number(

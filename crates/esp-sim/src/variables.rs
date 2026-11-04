@@ -65,6 +65,8 @@ impl Default for Variables {
         variables.set_number("GPS WP NEXT LON", "degrees", 0.0);
         variables.set_number("GPS DIRECT LEG VALID", "bool", 0.0);
         variables.set_number("GPS CDI SCALING", "meters", 9260.0);
+        variables.set_number("GPS DRIVES NAV1", "bool", 0.0);
+        variables.set_number("HSI GPS SOURCE ACTIVE", "bool", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -951,6 +953,7 @@ impl Variables {
             "STROBES_TOGGLE" => self.toggle("LIGHT STROBE"),
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
+            "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
             "SPOILERS_ARM_TOGGLE" => self.toggle("SPOILERS ARMED"),
             "SPOILERS_ARM_ON" | "SPOILERS_ARM_OFF" | "SPOILERS_ARM_SET" => {
