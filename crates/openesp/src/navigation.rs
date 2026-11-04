@@ -92,6 +92,11 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         .number()?;
     validate_declination(variation.to_degrees())?;
     let magnetic_heading = (heading + variation).rem_euclid(TAU);
+    let drift = variables
+        .read(&Reference::new('A', "GYRO DRIFT ERROR", Some("radians")))?
+        .number()?;
+    ensure!(drift.is_finite(), "gyro drift error must be finite");
+    let gyro_heading = (magnetic_heading + drift).rem_euclid(TAU);
     let ground_speed = state.velocity.truncate().length();
     let track = if ground_speed > 0.5 {
         state.velocity.y.atan2(state.velocity.x).rem_euclid(TAU)
@@ -127,13 +132,11 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         (track + variation).rem_euclid(TAU),
     );
     variables.set_number("GPS MAGVAR", "radians", variation);
-    for name in [
-        "PLANE HEADING DEGREES MAGNETIC",
-        "MAGNETIC COMPASS",
-        "HEADING INDICATOR",
-        "PLANE HEADING DEGREES GYRO",
-    ] {
+    for name in ["PLANE HEADING DEGREES MAGNETIC", "MAGNETIC COMPASS"] {
         variables.set_number(name, "radians", magnetic_heading);
+    }
+    for name in ["HEADING INDICATOR", "PLANE HEADING DEGREES GYRO"] {
+        variables.set_number(name, "radians", gyro_heading);
     }
     variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
     Ok(())
@@ -142,7 +145,44 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn gyro_adjustment_moves_indicator_without_moving_compass_and_can_be_synchronized() {
+        let mut variables = Variables::default();
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        let state = State {
+            orientation: DQuat::from_rotation_z(5_f64.to_radians()),
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("degrees")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_event("GYRO_DRIFT_SET", Value::Number(8.0))
+            .unwrap();
+        variables
+            .dispatch_event("GYRO_DRIFT_DEC", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "MAGNETIC COMPASS") - 355.0).abs() < 1e-10);
+        assert!((read(&mut variables, "HEADING INDICATOR") - 2.0).abs() < 1e-10);
+        assert!((read(&mut variables, "GYRO DRIFT ERROR") - 7.0).abs() < 1e-10);
+        variables
+            .dispatch_event("HEADING_GYRO_SET", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "PLANE HEADING DEGREES GYRO") - 355.0).abs() < 1e-10);
+        assert!(
+            variables
+                .dispatch_event("GYRO_DRIFT_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+    }
 
     #[test]
     fn publishes_magnetic_heading_and_track_with_wraparound() {

@@ -780,6 +780,14 @@ impl ApplicationHandler for App {
                                     self.reset_camera();
                                 }
                                 KeyCode::Home => self.reset_camera(),
+                                KeyCode::KeyH => {
+                                    if let Err(error) = self
+                                        .variables
+                                        .dispatch_event("HEADING_GYRO_SET", Value::Number(0.0))
+                                    {
+                                        eprintln!("heading gyro input: {error}");
+                                    }
+                                }
                                 KeyCode::KeyO => self.door_open = !self.door_open,
                                 KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8 => {
                                     let name = match key {

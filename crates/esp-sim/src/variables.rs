@@ -59,6 +59,7 @@ impl Default for Variables {
         variables.set_number("WORLD ORIGIN LATITUDE", "degrees", 0.0);
         variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", 0.0);
         variables.set_number("MAGVAR", "degrees", 0.0);
+        variables.set_number("GYRO DRIFT ERROR", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -1060,6 +1061,30 @@ impl Variables {
                     "SPOILERS HANDLE POSITION",
                     "percent",
                     position.clamp(0.0, 100.0),
+                );
+                Ok(())
+            }
+            "HEADING_GYRO_SET" | "GYRO_DRIFT_SET" | "GYRO_DRIFT_INC" | "GYRO_DRIFT_DEC" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let drift = match name {
+                    "HEADING_GYRO_SET" => 0.0,
+                    "GYRO_DRIFT_SET" => value,
+                    _ => {
+                        let current = self
+                            .read(&Reference::new('A', "GYRO DRIFT ERROR", Some("degrees")))?
+                            .number()?;
+                        current + if name == "GYRO_DRIFT_INC" { 1.0 } else { -1.0 }
+                    }
+                };
+                if !drift.is_finite() {
+                    return Err(Error::Number);
+                }
+                self.set_number(
+                    "GYRO DRIFT ERROR",
+                    "degrees",
+                    (drift + 180.0).rem_euclid(360.0) - 180.0,
                 );
                 Ok(())
             }
