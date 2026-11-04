@@ -41,15 +41,30 @@ pub fn publish(
     variation: f64,
     variables: &mut Variables,
 ) -> Result<()> {
+    for index in 1..=2 {
+        publish_receiver(index, latitude, longitude, altitude, variation, variables)?;
+    }
+    Ok(())
+}
+
+fn publish_receiver(
+    index: u32,
+    latitude: f64,
+    longitude: f64,
+    altitude: f64,
+    variation: f64,
+    variables: &mut Variables,
+) -> Result<()> {
+    let key = |name: &str| format!("{name}:{index}");
     let read = |v: &mut Variables, name, unit| -> Result<f64> {
         Ok(v.read(&Reference::new('A', name, Some(unit)))?.number()?)
     };
     let station_active = read(variables, "VOR STATION ACTIVE", "bool")? != 0.0;
     if !station_active {
-        variables.set_number("NAV HAS NAV:1", "bool", 0.0);
-        variables.set_number("NAV HAS DME:1", "bool", 0.0);
-        variables.set_number("NAV HAS LOCALIZER:1", "bool", 0.0);
-        variables.set_number("NAV HAS GLIDE SLOPE:1", "bool", 0.0);
+        variables.set_number(&key("NAV HAS NAV"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS DME"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS LOCALIZER"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS GLIDE SLOPE"), "bool", 0.0);
         return Ok(());
     }
     let station_latitude = read(variables, "VOR STATION LATITUDE", "degrees")?;
@@ -62,8 +77,10 @@ pub fn publish(
         station_frequency,
         range,
     )?;
-    let tuned = read(variables, "NAV ACTIVE FREQUENCY:1", "megahertz")?;
-    let obs = read(variables, "NAV OBS:1", "radians")?;
+    let frequency_name = key("NAV ACTIVE FREQUENCY");
+    let obs_name = key("NAV OBS");
+    let tuned = read(variables, &frequency_name, "megahertz")?;
+    let obs = read(variables, &obs_name, "radians")?;
     ensure!(
         tuned.is_finite() && obs.is_finite(),
         "invalid NAV radio setting"
@@ -131,15 +148,15 @@ pub fn publish(
             flag = if from { 2.0 } else { 1.0 };
         }
     }
-    variables.set_number("NAV HAS NAV:1", "bool", f64::from(signal));
-    variables.set_number("NAV HAS DME:1", "bool", f64::from(signal));
+    variables.set_number(&key("NAV HAS NAV"), "bool", f64::from(signal));
+    variables.set_number(&key("NAV HAS DME"), "bool", f64::from(signal));
     variables.set_number(
-        "NAV HAS LOCALIZER:1",
+        &key("NAV HAS LOCALIZER"),
         "bool",
         f64::from(signal && localizer),
     );
     variables.set_number(
-        "NAV HAS GLIDE SLOPE:1",
+        &key("NAV HAS GLIDE SLOPE"),
         "bool",
         f64::from(glideslope_signal),
     );
@@ -148,21 +165,25 @@ pub fn publish(
     } else {
         0.0
     };
-    variables.set_number("NAV LOCALIZER:1", "degrees", localizer_course);
-    variables.set_number("NAV GSI:1", "number", glideslope_needle);
-    variables.set_number("NAV RADIAL:1", "radians", radial);
-    variables.set_number("NAV RADIAL ERROR:1", "radians", error);
+    variables.set_number(&key("NAV LOCALIZER"), "degrees", localizer_course);
+    variables.set_number(&key("NAV GSI"), "number", glideslope_needle);
+    variables.set_number(&key("NAV RADIAL"), "radians", radial);
+    variables.set_number(&key("NAV RADIAL ERROR"), "radians", error);
     variables.set_number(
-        "NAV VOR DISTANCE:1",
+        &key("NAV VOR DISTANCE"),
         "meters",
         if signal { ground_distance } else { 0.0 },
     );
-    variables.set_number("NAV DME:1", "meters", if signal { distance } else { 0.0 });
-    variables.set_number("NAV SIGNAL:1", "number", if signal { 1.0 } else { 0.0 });
-    variables.set_number("NAV TOFROM:1", "enum", flag);
-    variables.set_number("NAV RADIO CDI:1", "number", needle);
-    if read(variables, "GPS DRIVES NAV1", "bool")? == 0.0 {
-        variables.set_number("NAV CDI:1", "number", needle);
+    variables.set_number(
+        &key("NAV DME"),
+        "meters",
+        if signal { distance } else { 0.0 },
+    );
+    variables.set_number(&key("NAV SIGNAL"), "number", if signal { 1.0 } else { 0.0 });
+    variables.set_number(&key("NAV TOFROM"), "enum", flag);
+    variables.set_number(&key("NAV RADIO CDI"), "number", needle);
+    if index != 1 || read(variables, "GPS DRIVES NAV1", "bool")? == 0.0 {
+        variables.set_number(&key("NAV CDI"), "number", needle);
     }
     Ok(())
 }
@@ -173,6 +194,52 @@ mod tests {
     use esp_script::Value;
     use esp_sim::flight::State;
     use glam::DVec3;
+
+    #[test]
+    fn two_receivers_tune_and_select_courses_independently() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        let state = State {
+            position: DVec3::new(-10_000.0, 1000.0, -1000.0),
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_key_event(0x100ad, Value::Number(0x1400 as f64))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x100b5, Value::Number(90.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:1", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "NAV HAS NAV:2", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV OBS:1", "degrees"), 0.0);
+        assert_eq!(read(&mut variables, "NAV OBS:2", "degrees"), 90.0);
+        variables
+            .dispatch_event("NAV2_STBY_SET", Value::Number(0x1300 as f64))
+            .unwrap();
+        variables
+            .dispatch_key_event(0x10394, Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:2", "bool"), 1.0);
+        let second = read(&mut variables, "NAV CDI:2", "number");
+        assert_ne!(read(&mut variables, "NAV CDI:1", "number"), second);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV CDI:2", "number"), second);
+        assert_eq!(
+            read(&mut variables, "NAV2 STANDBY FREQUENCY", "megahertz"),
+            114.0
+        );
+    }
 
     #[test]
     fn legacy_bcd_frequency_round_trips_through_gauge_and_radio_event() {

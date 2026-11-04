@@ -78,6 +78,9 @@ impl Default for Variables {
         variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 113.0);
         variables.set_number("NAV STANDBY FREQUENCY:1", "megahertz", 110.5);
         variables.set_number("NAV OBS:1", "degrees", 0.0);
+        variables.set_number("NAV ACTIVE FREQUENCY:2", "megahertz", 113.0);
+        variables.set_number("NAV STANDBY FREQUENCY:2", "megahertz", 110.5);
+        variables.set_number("NAV OBS:2", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -428,20 +431,34 @@ impl Variables {
             0x10069 => "NAV1_RADIO_WHOLE_INC",
             0x1006a => "NAV1_RADIO_FRACT_DEC",
             0x1006b => "NAV1_RADIO_FRACT_INC",
+            0x1006c => "NAV2_RADIO_WHOLE_DEC",
+            0x1006d => "NAV2_RADIO_WHOLE_INC",
+            0x1006e => "NAV2_RADIO_FRACT_DEC",
+            0x1006f => "NAV2_RADIO_FRACT_INC",
             0x1007e => "VOR1_OBI_DEC",
             0x1007f => "VOR1_OBI_INC",
+            0x10080 => "VOR2_OBI_DEC",
+            0x10081 => "VOR2_OBI_INC",
             0x100ac => "NAV1_RADIO_SET",
+            0x100ad => "NAV2_RADIO_SET",
             0x100b4 => "VOR1_SET",
+            0x100b5 => "VOR2_SET",
             0x10155 => "GYRO_DRIFT_INC",
             0x10156 => "GYRO_DRIFT_DEC",
             0x101fe => "GYRO_DRIFT_SET",
             0x1033f => "VOR1_OBI_FAST_DEC",
             0x10340 => "VOR1_OBI_FAST_INC",
+            0x10341 => "VOR2_OBI_FAST_DEC",
+            0x10342 => "VOR2_OBI_FAST_INC",
             0x10347 => "TOGGLE_GPS_DRIVES_NAV1",
             0x1038d => "NAV1_RADIO_FRACT_DEC_CARRY",
             0x1038e => "NAV1_RADIO_FRACT_INC_CARRY",
             0x1038f => "NAV1_STBY_SET",
             0x10390 => "NAV1_RADIO_SWAP",
+            0x10391 => "NAV2_RADIO_FRACT_DEC_CARRY",
+            0x10392 => "NAV2_RADIO_FRACT_INC_CARRY",
+            0x10393 => "NAV2_STBY_SET",
+            0x10394 => "NAV2_RADIO_SWAP",
             0x10018 => "STROBES_TOGGLE",
             0x10030 => "BAROMETRIC",
             0x10022 => "GEAR_TOGGLE",
@@ -581,9 +598,14 @@ impl Variables {
         Ok(())
     }
 
-    fn nav1_radio_event(&mut self, name: &str, value: f64) -> Result<(), Error> {
-        let active = "NAV ACTIVE FREQUENCY:1";
-        let standby = "NAV STANDBY FREQUENCY:1";
+    fn nav_radio_event(&mut self, name: &str, value: f64) -> Result<(), Error> {
+        let index = if name.starts_with("NAV2") { 2 } else { 1 };
+        let name = name.replacen("NAV2", "NAV1", 1);
+        let name = name.as_str();
+        let active_name = format!("NAV ACTIVE FREQUENCY:{index}");
+        let standby_name = format!("NAV STANDBY FREQUENCY:{index}");
+        let active = active_name.as_str();
+        let standby = standby_name.as_str();
         let read_hz = |v: &mut Self, name| -> Result<f64, Error> {
             let value = v
                 .read(&Reference::new('A', name, Some("hertz")))?
@@ -1052,21 +1074,28 @@ impl Variables {
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),
             "VOR1_SET" | "VOR1_OBI_INC" | "VOR1_OBI_DEC" | "VOR1_OBI_FAST_INC"
-            | "VOR1_OBI_FAST_DEC" => {
+            | "VOR1_OBI_FAST_DEC" | "VOR2_SET" | "VOR2_OBI_INC" | "VOR2_OBI_DEC"
+            | "VOR2_OBI_FAST_INC" | "VOR2_OBI_FAST_DEC" => {
                 if !value.is_finite() {
                     return Err(Error::Number);
                 }
+                let index = if name.starts_with("VOR2") { 2 } else { 1 };
+                let variable = format!("NAV OBS:{index}");
                 let current = self
-                    .read(&Reference::new('A', "NAV OBS:1", Some("degrees")))?
+                    .read(&Reference::new('A', &variable, Some("degrees")))?
                     .number()?;
-                let selected = match name {
-                    "VOR1_SET" => value,
-                    "VOR1_OBI_INC" => current + 1.0,
-                    "VOR1_OBI_FAST_INC" => (current + 10.0).min(360.0),
-                    "VOR1_OBI_FAST_DEC" => (current - 10.0).max(0.0),
-                    _ => current - 1.0,
+                let selected = if name.ends_with("_SET") {
+                    value
+                } else if name.ends_with("FAST_INC") {
+                    (current + 10.0).min(360.0)
+                } else if name.ends_with("FAST_DEC") {
+                    (current - 10.0).max(0.0)
+                } else if name.ends_with("_INC") {
+                    current + 1.0
+                } else {
+                    current - 1.0
                 };
-                self.set_number("NAV OBS:1", "degrees", selected.rem_euclid(360.0));
+                self.set_number(&variable, "degrees", selected.rem_euclid(360.0));
                 Ok(())
             }
             "NAV1_RADIO_SET_HZ"
@@ -1079,7 +1108,18 @@ impl Variables {
             | "NAV1_RADIO_FRACT_INC"
             | "NAV1_RADIO_FRACT_DEC"
             | "NAV1_RADIO_FRACT_INC_CARRY"
-            | "NAV1_RADIO_FRACT_DEC_CARRY" => self.nav1_radio_event(name, value),
+            | "NAV1_RADIO_FRACT_DEC_CARRY"
+            | "NAV2_RADIO_SET_HZ"
+            | "NAV2_STBY_SET_HZ"
+            | "NAV2_RADIO_SET"
+            | "NAV2_STBY_SET"
+            | "NAV2_RADIO_SWAP"
+            | "NAV2_RADIO_WHOLE_INC"
+            | "NAV2_RADIO_WHOLE_DEC"
+            | "NAV2_RADIO_FRACT_INC"
+            | "NAV2_RADIO_FRACT_DEC"
+            | "NAV2_RADIO_FRACT_INC_CARRY"
+            | "NAV2_RADIO_FRACT_DEC_CARRY" => self.nav_radio_event(name, value),
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
             "SPOILERS_ARM_TOGGLE" => self.toggle("SPOILERS ARMED"),
             "SPOILERS_ARM_ON" | "SPOILERS_ARM_OFF" | "SPOILERS_ARM_SET" => {
