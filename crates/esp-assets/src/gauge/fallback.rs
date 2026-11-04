@@ -14,6 +14,8 @@ enum Kind {
     Altimeter,
     Heading,
     Compass,
+    NavGpsSwitch,
+    NavGpsAnnunciator,
     VerticalSpeed,
     Attitude,
     Tachometer,
@@ -43,6 +45,8 @@ impl Instrument {
         let kind = match (module.as_str(), gauge.as_str()) {
             ("CESSNA172", "AIRSPEED") => Kind::Airspeed,
             ("CESSNA", "ALTIMETER") => Kind::Altimeter,
+            ("CESSNA", "NAV GPS SWITCH") => Kind::NavGpsSwitch,
+            ("CESSNA", "NAV_GPS_ANNUNCIATOR") => Kind::NavGpsAnnunciator,
             ("CESSNA", "HEADING_INDICATOR") => Kind::Heading,
             ("CESSNAWALPHA", "WHISKEY_COMPASS_ALPHA")
             | ("CESSNA", "WHISKEY_COMPASS")
@@ -93,6 +97,10 @@ impl Instrument {
         (self.image.width(), self.image.height())
     }
 
+    pub fn is_nav_gps_switch(&self) -> bool {
+        matches!(self.kind, Kind::NavGpsSwitch)
+    }
+
     pub fn is_flaps(&self) -> bool {
         matches!(self.kind, Kind::Flaps)
     }
@@ -128,6 +136,9 @@ impl Instrument {
                 0.0,
                 0.0,
             ],
+            Kind::NavGpsSwitch | Kind::NavGpsAnnunciator => {
+                [read(host, "GPS DRIVES NAV1", "bool"), 0.0, 0.0, 0.0, 0.0]
+            }
             Kind::VerticalSpeed => [
                 read(host, "VERTICAL SPEED", "feet per minute"),
                 0.0,
@@ -349,6 +360,39 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
 }
 
 fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
+    if matches!(kind, Kind::NavGpsSwitch | Kind::NavGpsAnnunciator) {
+        let mut image = RgbaImage::from_pixel(128, 128, Rgba([25, 25, 23, 255]));
+        let dim = Rgba([105, 105, 100, 255]);
+        let lit = Rgba([110, 235, 120, 255]);
+        let white = Rgba([235, 235, 225, 255]);
+        if values[0] == f64::MAX {
+            label_scaled(&mut image, 40, 54, "OFF", Rgba([235, 60, 45, 255]), 4);
+        } else if matches!(kind, Kind::NavGpsAnnunciator) {
+            label_scaled(
+                &mut image,
+                8,
+                45,
+                "NAV",
+                if values[0] == 0.0 { lit } else { dim },
+                3,
+            );
+            label_scaled(
+                &mut image,
+                74,
+                45,
+                "GPS",
+                if values[0] != 0.0 { lit } else { dim },
+                3,
+            );
+        } else {
+            label_scaled(&mut image, 8, 12, "NAV", white, 2);
+            label_scaled(&mut image, 92, 12, "GPS", white, 2);
+            draw_filled_rect_mut(&mut image, Rect::at(15, 51).of_size(98, 38), dim);
+            let x = if values[0] == 0.0 { 20 } else { 76 };
+            draw_filled_rect_mut(&mut image, Rect::at(x, 44).of_size(32, 52), white);
+        }
+        return image;
+    }
     if matches!(kind, Kind::Flaps) {
         let mut image = RgbaImage::from_pixel(128, 128, Rgba([31, 31, 30, 255]));
         draw_filled_rect_mut(
@@ -724,6 +768,8 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         Kind::VerticalSpeed => ("FPM", -2000.0, 2000.0, 8),
         Kind::Tachometer => ("RPM", 0.0, 3000.0, 6),
         Kind::Attitude
+        | Kind::NavGpsSwitch
+        | Kind::NavGpsAnnunciator
         | Kind::Compass
         | Kind::TurnCoordinator
         | Kind::Fuel

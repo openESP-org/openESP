@@ -477,6 +477,13 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
                     });
                 }
+                if instrument.is_nav_gps_switch() {
+                    raw_areas.push(MouseAreaSource {
+                        bounds: (0.0, 0.0, 128.0, 128.0),
+                        source: "0 (>K:TOGGLE_GPS_DRIVES_NAV1)".to_owned(),
+                        events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new(),
+                    });
+                }
                 if instrument.is_flaps() {
                     for (bounds, event) in [((0.0, 0.0, 128.0, 64.0), "FLAPS_DECR"), ((0.0, 64.0, 128.0, 64.0), "FLAPS_INCR")] {
                         raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new() });
@@ -1297,6 +1304,59 @@ mod tests {
         assert_eq!(host.events, ["FLAPS_INCR", "FLAPS_DECR", "FLAPS_INCR"]);
     }
 
+    #[test]
+    fn fallback_nav_gps_selector_controls_and_displays_the_selected_source() {
+        struct NavHost {
+            gps: bool,
+            toggles: usize,
+        }
+        impl Host for NavHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                if reference.name == "GPS DRIVES NAV1" {
+                    Ok(Value::Number(f64::from(self.gps)))
+                } else {
+                    Err(Error::Variable(reference.name.clone()))
+                }
+            }
+            fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+                if reference.category == 'K' && reference.name == "TOGGLE_GPS_DRIVES_NAV1" {
+                    self.gps = !self.gps;
+                    self.toggles += 1;
+                    Ok(())
+                } else {
+                    Err(Error::Variable(reference.name.clone()))
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=256,128\npixel_size=256,128\ntexture=$screen\ngauge00=Cessna!Nav GPS Switch,0,0,128,128\ngauge01=Cessna!Nav_GPS_Annunciator,128,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = NavHost {
+            gps: false,
+            toggles: 0,
+        };
+        assert!(image.update(&mut host));
+        let nav = image.image.clone();
+        assert!(image.left_click(64.0, 64.0, &mut host).unwrap());
+        assert!(host.gps);
+        assert_eq!(host.toggles, 1);
+        assert!(image.update(&mut host));
+        let gps = image.image.clone();
+        assert_ne!(nav, gps);
+        assert_ne!(
+            image::imageops::crop_imm(&nav, 128, 0, 128, 128).to_image(),
+            image::imageops::crop_imm(&gps, 128, 0, 128, 128).to_image()
+        );
+        assert!(!image.left_click(192.0, 64.0, &mut host).unwrap());
+        assert!(image.left_click(64.0, 64.0, &mut host).unwrap());
+        assert!(!host.gps);
+        assert!(image.update(&mut host));
+        assert_eq!(nav, image.image);
+    }
     #[test]
     fn fallback_magnetic_compass_tracks_heading_and_wraps_at_north() {
         struct CompassHost(Option<f64>);
