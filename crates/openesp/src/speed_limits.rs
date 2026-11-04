@@ -105,7 +105,7 @@ impl SpeedLimits {
                 variables.set_number(name, "knots", speed);
             }
         }
-        let atmosphere = Atmosphere::standard(-state.position.z)?;
+        let atmosphere = crate::weather::conditions(variables)?.at(-state.position.z)?;
         let air_velocity = state.air_velocity(crate::weather::wind(variables)?);
         let speed = air_velocity.length();
         let sea_level = Atmosphere::standard(0.0)?;

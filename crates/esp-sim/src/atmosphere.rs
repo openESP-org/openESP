@@ -45,14 +45,25 @@ impl Atmosphere {
 
     // U.S. Standard Atmosphere 1976, lower atmosphere; SI units.
     pub fn standard(altitude: f64) -> Result<Self> {
+        Self::with_sea_level(altitude, SEA_PRESSURE, SEA_TEMPERATURE)
+    }
+
+    pub fn with_sea_level(altitude: f64, sea_pressure: f64, sea_temperature: f64) -> Result<Self> {
         ensure!(
             altitude.is_finite() && (-2000.0..=86_000.0).contains(&altitude),
             "altitude is outside the standard atmosphere model (-2 to 86 km)"
         );
+        ensure!(
+            sea_pressure.is_finite()
+                && sea_pressure > 0.0
+                && sea_temperature.is_finite()
+                && sea_temperature > 0.0,
+            "invalid sea level atmosphere"
+        );
         let height = RADIUS * altitude / (RADIUS + altitude);
         let mut base = 0.0;
-        let mut temperature = SEA_TEMPERATURE;
-        let mut pressure = SEA_PRESSURE;
+        let mut temperature = sea_temperature;
+        let mut pressure = sea_pressure;
         for (ceiling, lapse) in [
             (11_000.0, -0.0065),
             (20_000.0, 0.0),
@@ -64,6 +75,10 @@ impl Atmosphere {
         ] {
             let thickness = height.min(ceiling) - base;
             let next_temperature = temperature + lapse * thickness;
+            ensure!(
+                next_temperature > 0.0,
+                "atmospheric temperature reaches absolute zero"
+            );
             pressure *= if lapse == 0.0 {
                 (-GRAVITY * thickness / (GAS_CONSTANT * temperature)).exp()
             } else {
@@ -75,6 +90,10 @@ impl Atmosphere {
             }
             base = ceiling;
         }
+        ensure!(
+            pressure.is_finite() && pressure > 0.0,
+            "invalid atmospheric pressure"
+        );
         Ok(Self {
             temperature,
             pressure,
@@ -153,6 +172,22 @@ fn impact_ratio(mach: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sea_level_weather_changes_pressure_density_and_temperature() {
+        let standard = Atmosphere::standard(2000.0).unwrap();
+        let equivalent = Atmosphere::with_sea_level(2000.0, 101_325.0, 288.15).unwrap();
+        assert_eq!(standard.pressure, equivalent.pressure);
+        assert_eq!(standard.density, equivalent.density);
+        let hot = Atmosphere::with_sea_level(0.0, 101_325.0, 308.15).unwrap();
+        let cold = Atmosphere::with_sea_level(0.0, 101_325.0, 268.15).unwrap();
+        assert_eq!(hot.pressure, cold.pressure);
+        assert!(hot.density < cold.density && hot.sound_speed > cold.sound_speed);
+        let low = Atmosphere::with_sea_level(2000.0, 98_000.0, 288.15).unwrap();
+        assert!(low.pressure < standard.pressure && low.density < standard.density);
+        assert!(Atmosphere::with_sea_level(0.0, -1.0, 288.15).is_err());
+        assert!(Atmosphere::with_sea_level(80_000.0, 101_325.0, 10.0).is_err());
+    }
 
     #[test]
     fn altimeter_pressure_round_trips_across_atmosphere_layers() {

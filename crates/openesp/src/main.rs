@@ -68,6 +68,19 @@ struct Arguments {
     wind_speed: f64,
     #[arg(
         long,
+        default_value_t = 1013.25,
+        help = "Sea-level pressure in hectopascals"
+    )]
+    sea_level_pressure: f64,
+    #[arg(
+        long,
+        default_value_t = 15.0,
+        allow_negative_numbers = true,
+        help = "Sea-level temperature in degrees Celsius"
+    )]
+    sea_level_temperature: f64,
+    #[arg(
+        long,
         default_value_t = 0.0,
         requires = "airspeed",
         help = "Fill usable fuel tanks to this percentage for the airborne test"
@@ -854,6 +867,11 @@ fn main() -> Result<()> {
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
+    let initial_weather = weather::Conditions::new(
+        arguments.sea_level_pressure,
+        arguments.sea_level_temperature,
+    )?;
+    initial_weather.at(height)?;
     let (sender, loaded) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("aircraft loader".into())
@@ -864,7 +882,7 @@ fn main() -> Result<()> {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
                     let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
                     if engines_running {
-                        flight.start_running(&data)?;
+                        flight.start_running_with_weather(&data, initial_weather)?;
                     } else if let Err(error) = flight.prepare_engines(&data) {
                         eprintln!("cold engine unavailable: {error:#}");
                     }
@@ -886,6 +904,16 @@ fn main() -> Result<()> {
         arguments.wind_direction.rem_euclid(360.0),
     );
     variables.set_number("AMBIENT WIND VELOCITY", "knots", arguments.wind_speed);
+    variables.set_number(
+        "SEA LEVEL PRESSURE",
+        "millibars",
+        arguments.sea_level_pressure,
+    );
+    variables.set_number(
+        "SEA LEVEL TEMPERATURE",
+        "celsius",
+        arguments.sea_level_temperature,
+    );
     for event in ["AXIS_AILERONS_SET", "AXIS_ELEVATOR_SET", "AXIS_RUDDER_SET"] {
         variables.dispatch_event(event, Value::Number(0.0))?;
     }
@@ -921,7 +949,10 @@ fn main() -> Result<()> {
     EventLoop::new()?.run_app(&mut app)?;
     if let Some(flight) = &app.flight {
         eprintln!("flight state: {:?}", flight.current);
-        flight.report(weather::wind(&mut app.variables)?)?;
+        flight.report(
+            weather::wind(&mut app.variables)?,
+            weather::conditions(&mut app.variables)?,
+        )?;
     }
     if let Some(error) = app.error {
         return Err(error);
@@ -933,6 +964,19 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn accepts_negative_sea_level_temperatures() {
+        let args = Arguments::try_parse_from([
+            "openesp",
+            "--aircraft",
+            "test",
+            "--sea-level-temperature",
+            "-20",
+        ])
+        .unwrap();
+        assert_eq!(args.sea_level_temperature, -20.0);
+    }
 
     #[test]
     fn parses_startup_events_with_finite_optional_values() {

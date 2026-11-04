@@ -1,7 +1,49 @@
 use anyhow::{Result, ensure};
 use esp_script::{Host, Reference};
-use esp_sim::{flight::State, variables::Variables};
+use esp_sim::{atmosphere::Atmosphere, flight::State, variables::Variables};
 use glam::DVec3;
+
+#[derive(Clone, Copy)]
+pub struct Conditions {
+    pub sea_pressure: f64,
+    pub sea_temperature: f64,
+}
+
+impl Conditions {
+    pub fn new(pressure_hpa: f64, temperature_celsius: f64) -> Result<Self> {
+        ensure!(
+            (800.0..=1100.0).contains(&pressure_hpa)
+                && (-60.0..=60.0).contains(&temperature_celsius),
+            "invalid sea level weather"
+        );
+        Ok(Self {
+            sea_pressure: pressure_hpa * 100.0,
+            sea_temperature: temperature_celsius + 273.15,
+        })
+    }
+
+    pub fn at(self, altitude: f64) -> Result<Atmosphere> {
+        Atmosphere::with_sea_level(altitude, self.sea_pressure, self.sea_temperature)
+    }
+}
+
+pub fn conditions(variables: &mut Variables) -> Result<Conditions> {
+    let pressure = variables
+        .read(&Reference::new(
+            'A',
+            "SEA LEVEL PRESSURE",
+            Some("millibars"),
+        ))?
+        .number()?;
+    let temperature = variables
+        .read(&Reference::new(
+            'A',
+            "SEA LEVEL TEMPERATURE",
+            Some("celsius"),
+        ))?
+        .number()?;
+    Conditions::new(pressure, temperature)
+}
 
 pub fn vector(direction_degrees: f64, speed_knots: f64) -> Result<DVec3> {
     ensure!(
@@ -50,6 +92,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nonstandard_weather_updates_instruments_and_barometric_setting() {
+        use crate::{flight::Flight, speed_limits::SpeedLimits};
+        use esp_script::Value;
+        let mut vars = Variables::default();
+        vars.set_number("SEA LEVEL PRESSURE", "millibars", 980.0);
+        vars.set_number("SEA LEVEL TEMPERATURE", "celsius", 15.0);
+        let state = State {
+            position: DVec3::new(0.0, 0.0, -2000.0),
+            velocity: DVec3::X * 100.0,
+            ..State::default()
+        };
+        let limits =
+            SpeedLimits::from_config(&esp_formats::cfg::Config::parse("").unwrap()).unwrap();
+        let read = |vars: &mut Variables, name, unit| {
+            vars.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        Flight::publish(&state, &mut vars).unwrap();
+        limits.publish(&state, &mut vars).unwrap();
+        assert!(read(&mut vars, "PRESSURE ALTITUDE", "meters") > 2000.0);
+        vars.dispatch_event("BAROMETRIC", Value::Number(0.0))
+            .unwrap();
+        Flight::publish(&state, &mut vars).unwrap();
+        limits.publish(&state, &mut vars).unwrap();
+        assert!((read(&mut vars, "INDICATED ALTITUDE", "meters") - 2000.0).abs() < 1e-8);
+        assert!((read(&mut vars, "KOHLSMAN SETTING MB", "millibars") - 980.0).abs() < 1e-10);
+        let cool_pressure = read(&mut vars, "DYNAMIC PRESSURE", "pascals");
+        vars.set_number("SEA LEVEL TEMPERATURE", "celsius", 45.0);
+        Flight::publish(&state, &mut vars).unwrap();
+        limits.publish(&state, &mut vars).unwrap();
+        assert!(read(&mut vars, "DYNAMIC PRESSURE", "pascals") < cool_pressure);
+        assert!(read(&mut vars, "AMBIENT TEMPERATURE", "celsius") > 30.0);
+        vars.set_number("PLANE ALTITUDE", "feet", 18_000.0);
+        vars.dispatch_event("BAROMETRIC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut vars, "KOHLSMAN SETTING MB", "millibars"), 1013.25);
+        assert!(Conditions::new(0.0, 15.0).is_err());
+        assert!(Conditions::new(1013.25, f64::NAN).is_err());
+    }
+
+    #[test]
     fn winds_use_meteorological_from_direction_and_body_axes() {
         let north = vector(0.0, 20.0).unwrap();
         assert!((north.x + 20.0 * 1852.0 / 3600.0).abs() < 1e-12);
@@ -73,7 +158,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires original aircraft and OPENESP_AIRCRAFT_PATHS"]
-    fn headwind_changes_airspeed_and_flight_forces() {
+    fn wind_and_temperature_change_flight_forces() {
         use crate::flight::Flight;
         let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").expect("set OPENESP_AIRCRAFT_PATHS");
         let paths: Vec<_> = std::env::split_paths(&paths).collect();
@@ -120,6 +205,20 @@ mod tests {
             assert!(
                 headwind.current.velocity.z < calm.current.velocity.z,
                 "headwind did not increase lift"
+            );
+            let mut cold_vars = setup();
+            let mut hot_vars = setup();
+            cold_vars.set_number("SEA LEVEL TEMPERATURE", "celsius", -20.0);
+            hot_vars.set_number("SEA LEVEL TEMPERATURE", "celsius", 45.0);
+            let mut cold = Flight::new(&data, 130.0, 1500.0, 0.5, true).unwrap();
+            let mut hot = Flight::new(&data, 130.0, 1500.0, 0.5, true).unwrap();
+            for _ in 0..60 {
+                cold.advance(1.0 / 60.0, &mut cold_vars).unwrap();
+                hot.advance(1.0 / 60.0, &mut hot_vars).unwrap();
+            }
+            assert!(
+                cold.current.velocity.z < hot.current.velocity.z,
+                "denser air did not increase lift"
             );
         }
     }

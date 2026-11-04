@@ -54,6 +54,8 @@ impl Default for Variables {
         variables.set_number("AIRSPEED TRUE CALIBRATE", "degrees", 0.0);
         variables.set_number("AMBIENT WIND DIRECTION", "degrees", 0.0);
         variables.set_number("AMBIENT WIND VELOCITY", "knots", 0.0);
+        variables.set_number("SEA LEVEL PRESSURE", "millibars", 1013.25);
+        variables.set_number("SEA LEVEL TEMPERATURE", "celsius", 15.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -749,6 +751,19 @@ impl Variables {
                     "KOHLSMAN_INC" => current + 33.863_895,
                     "KOHLSMAN_DEC" => current - 33.863_895,
                     "KOHLSMAN_SET" => value * 100.0 / 16.0,
+                    "BAROMETRIC" => {
+                        let altitude = self
+                            .read(&Reference::new('A', "PLANE ALTITUDE", Some("feet")))
+                            .ok()
+                            .and_then(|value| value.number().ok())
+                            .unwrap_or(0.0);
+                        if altitude >= 18_000.0 {
+                            101_325.0
+                        } else {
+                            self.read(&Reference::new('A', "SEA LEVEL PRESSURE", Some("pascals")))?
+                                .number()?
+                        }
+                    }
                     _ => 101_325.0,
                 };
                 if !(80_000.0..=110_000.0).contains(&pressure) {
