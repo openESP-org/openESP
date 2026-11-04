@@ -13,8 +13,7 @@ use crate::{
 };
 
 /// Naturally aspirated four-stroke engines with fixed-pitch propellers.
-/// Oil temperature and pressure use an approximate thermal model; oil
-/// viscosity is held at its warm reference value.
+/// Oil temperature, pressure and viscosity use an approximate thermal model.
 pub struct Pistons {
     cycle: PistonCycle,
     propeller: Propeller,
@@ -172,9 +171,12 @@ fn tail_surface(
         vertical,
     }))
 }
+fn oil_viscosity(temperature_c: f64) -> f64 {
+    (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6)
+}
+
 fn oil_pressure(rpm: f64, rated_rpm: f64, temperature_c: f64) -> f64 {
-    let viscosity = (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6);
-    (75.0 * (rpm / rated_rpm).max(0.0).sqrt() * viscosity).clamp(0.0, 100.0)
+    (75.0 * (rpm / rated_rpm).max(0.0).sqrt() * oil_viscosity(temperature_c)).clamp(0.0, 100.0)
 }
 
 fn oil_temperature_step(
@@ -443,6 +445,7 @@ impl Pistons {
         speed: f64,
         command: Command,
         fuel: bool,
+        oil_temperature_c: f64,
     ) -> Result<EngineOutput> {
         ensure!(
             air.pressure.is_finite()
@@ -483,7 +486,7 @@ impl Pistons {
                 } else {
                     0.0
                 },
-                oil_viscosity: 1.0,
+                oil_viscosity: oil_viscosity(oil_temperature_c),
             },
         )?;
         let fuel_kilograms_per_second = if combustion {
@@ -521,6 +524,7 @@ impl Pistons {
             velocity.dot(engine.direction).max(0.0),
             engine.command,
             engine.fuel_available,
+            engine.oil_temperature.unwrap_or(air.temperature - 273.15),
         )?;
         output.propeller_angle = engine.angle;
         output.exhaust_temperature_c = engine
@@ -538,7 +542,14 @@ impl Pistons {
         for engine in &self.engines {
             let speed = velocity.dot(engine.direction).max(0.0);
             let torque = |rpm| -> Result<f64> {
-                let output = self.sample(rpm, air, speed, Command::default(), true)?;
+                let output = self.sample(
+                    rpm,
+                    air,
+                    speed,
+                    Command::default(),
+                    true,
+                    air.temperature - 273.15 + 60.0,
+                )?;
                 Ok(output.cycle.shaft_torque - output.propeller.absorbed_torque)
             };
             let (mut lo, mut hi) = (self.cycle.maximum_rpm * 0.04, self.cycle.maximum_rpm * 2.0);
@@ -556,7 +567,14 @@ impl Pistons {
             }
             let rpm = (lo + hi) * 0.5;
             let exhaust = self
-                .sample(rpm, air, speed, Command::default(), true)?
+                .sample(
+                    rpm,
+                    air,
+                    speed,
+                    Command::default(),
+                    true,
+                    air.temperature - 273.15 + 60.0,
+                )?
                 .exhaust_temperature_c;
             speeds.push((rpm, exhaust));
         }
@@ -596,8 +614,18 @@ impl Pistons {
         let h = dt / f64::from(steps);
         for (index, &command) in commands.iter().enumerate() {
             let speed = velocity.dot(self.engines[index].direction).max(0.0);
+            let oil_temperature_c = self.engines[index]
+                .oil_temperature
+                .unwrap_or(air.temperature - 273.15);
             let derivative = |rpm: f64| -> Result<f64> {
-                let output = self.sample(rpm.max(0.0), air, speed, command, fuel_available)?;
+                let output = self.sample(
+                    rpm.max(0.0),
+                    air,
+                    speed,
+                    command,
+                    fuel_available,
+                    oil_temperature_c,
+                )?;
                 Ok(
                     (output.cycle.shaft_torque - output.propeller.absorbed_torque
                         + if command.starter {
@@ -633,7 +661,8 @@ impl Pistons {
                 rpm = next;
                 ensure!(rpm.is_finite(), "non-finite piston shaft speed");
             }
-            let output = self.sample(rpm, air, speed, command, fuel_available)?;
+            let output =
+                self.sample(rpm, air, speed, command, fuel_available, oil_temperature_c)?;
             let ambient = air.temperature - 273.15;
             let load = (output.cycle.shaft_power.max(0.0) / self.rated_power).clamp(0.0, 1.0);
             let engine = &mut self.engines[index];

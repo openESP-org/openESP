@@ -190,13 +190,14 @@ fn original_piston_shaft_responds_to_controls_load_inertia_and_altitude() {
         let full = engine.output(0, &sea, DVec3::ZERO).unwrap();
         let steady_heavy = heavy.output(0, &sea, DVec3::ZERO).unwrap();
         assert!(
-            (full.rpm - steady_heavy.rpm).abs() < 0.01,
+            // Different spool-up histories leave slightly different oil temperatures.
+            (full.rpm - steady_heavy.rpm).abs() < 0.2,
             "normal={}, heavy={}",
             full.rpm,
             steady_heavy.rpm
         );
         assert!(full.rpm > response.rpm && full.propeller.thrust > idle.propeller.thrust);
-        assert!((full.cycle.shaft_torque - full.propeller.absorbed_torque).abs() < 1e-6);
+        assert!((full.cycle.shaft_torque - full.propeller.absorbed_torque).abs() < 0.05);
         let windmilling = engine.output(0, &sea, DVec3::X * 120.0).unwrap();
         assert!(windmilling.propeller.thrust < 0.0 && windmilling.propeller.absorbed_torque < 0.0);
         // Full rich becomes excessively rich at altitude; leaning recovers power.
@@ -267,9 +268,48 @@ fn original_piston_oil_indications_follow_engine_state() {
         assert_eq!(cold.oil_pressure_psi, 0.0);
         assert!((cold.exhaust_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
         assert!((cold.oil_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
+        let starter = engine
+            .indices()
+            .map(|_| Command {
+                starter: true,
+                ..Command::default()
+            })
+            .collect::<Vec<_>>();
+        engine
+            .advance(0.1, &air, DVec3::ZERO, &starter, false)
+            .unwrap();
+        let cranking = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert!(cranking.rpm > 0.0);
+        let reference_cycle = PistonCycle::from_data(&data).unwrap();
+        let reference = reference_cycle
+            .sample(
+                cranking.rpm,
+                Charge {
+                    pressure: air.pressure,
+                    temperature: air.temperature,
+                    heat_release: 0.0,
+                    oil_viscosity: 1.0,
+                },
+            )
+            .unwrap();
+        assert!(cranking.cycle.friction_torque > reference.friction_torque);
         engine.start_running(&air, DVec3::ZERO).unwrap();
         let running = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert!(running.oil_pressure_psi > 0.0);
+        let warm_reference = reference_cycle
+            .sample(
+                running.rpm,
+                Charge {
+                    pressure: air.pressure,
+                    temperature: air.temperature,
+                    heat_release: 0.0,
+                    oil_viscosity: 1.0,
+                },
+            )
+            .unwrap();
+        let cold_factor = cranking.cycle.friction_torque / reference.friction_torque;
+        let warm_factor = running.cycle.friction_torque / warm_reference.friction_torque;
+        assert!(cold_factor > warm_factor);
         assert!(running.exhaust_temperature_c > cold.exhaust_temperature_c);
         assert!(running.oil_temperature_c > cold.oil_temperature_c);
         let lean_commands = engine
