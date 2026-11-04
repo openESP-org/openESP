@@ -1,6 +1,11 @@
 use esp_script::{Host, Reference};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_circle_mut, draw_line_segment_mut};
+use imageproc::{
+    drawing::{
+        draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut,
+    },
+    rect::Rect,
+};
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy)]
@@ -13,6 +18,8 @@ enum Kind {
     Tachometer,
     Vor1,
     Vor2,
+    Radio1,
+    Radio2,
 }
 
 pub(super) struct Instrument {
@@ -35,11 +42,17 @@ impl Instrument {
             ("CESSNA172", "TACHOMETER") => Kind::Tachometer,
             ("CESSNA", "VOR1") | ("CESSNAWALPHA", "VOR1_ALPHA") => Kind::Vor1,
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
+            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 1") => Kind::Radio1,
+            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 2") => Kind::Radio2,
             _ => return None,
         };
         Some(Self {
             kind,
-            image: RgbaImage::new(128, 128),
+            image: if matches!(kind, Kind::Radio1 | Kind::Radio2) {
+                RgbaImage::new(256, 96)
+            } else {
+                RgbaImage::new(128, 128)
+            },
             last: None,
         })
     }
@@ -50,6 +63,18 @@ impl Instrument {
             Kind::Vor2 => Some(2),
             _ => None,
         }
+    }
+
+    pub fn radio_index(&self) -> Option<u32> {
+        match self.kind {
+            Kind::Radio1 => Some(1),
+            Kind::Radio2 => Some(2),
+            _ => None,
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.image.width(), self.image.height())
     }
 
     pub fn update(&mut self, host: &mut impl Host) -> bool {
@@ -91,6 +116,20 @@ impl Instrument {
                 0.0,
             ],
             Kind::Tachometer => [read(host, "GENERAL ENG RPM:1", "rpm"), 0.0, 0.0, 0.0, 0.0],
+            Kind::Radio1 | Kind::Radio2 => {
+                let index = if matches!(self.kind, Kind::Radio1) {
+                    1
+                } else {
+                    2
+                };
+                [
+                    read(host, &format!("NAV ACTIVE FREQUENCY:{index}"), "hertz"),
+                    read(host, &format!("NAV STANDBY FREQUENCY:{index}"), "hertz"),
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            }
             Kind::Vor1 | Kind::Vor2 => {
                 let index = if matches!(self.kind, Kind::Vor1) {
                     1
@@ -144,7 +183,7 @@ impl Instrument {
             if v == f64::MAX {
                 v
             } else {
-                (v.clamp(-1e8, 1e8) * 10.0).round() / 10.0
+                (v.clamp(-1e12, 1e12) * 10.0).round() / 10.0
             }
         });
         if self.last == Some(values) {
@@ -168,6 +207,10 @@ fn point(angle: f64, radius: f64) -> (f32, f32) {
 }
 
 fn label(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>) {
+    label_scaled(image, x, y, text, color, 1);
+}
+
+fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>, scale: i32) {
     for (i, c) in text.chars().enumerate() {
         let rows: [u8; 5] = match c {
             '0' => [7, 5, 5, 5, 7],
@@ -181,28 +224,44 @@ fn label(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>) {
             '8' => [7, 5, 7, 5, 7],
             '9' => [7, 5, 7, 1, 7],
             '-' => [0, 0, 7, 0, 0],
+            '+' => [0, 2, 7, 2, 0],
+            '.' => [0, 0, 0, 0, 2],
             'A' => [2, 5, 7, 5, 5],
+            'B' => [6, 5, 6, 5, 6],
+            'C' => [7, 4, 4, 4, 7],
             'D' => [6, 5, 5, 5, 6],
             'F' => [7, 4, 6, 4, 4],
             'G' => [7, 4, 5, 5, 7],
             'H' => [5, 5, 7, 5, 5],
             'K' => [5, 5, 6, 5, 5],
             'M' => [5, 7, 7, 5, 5],
+            'N' => [5, 7, 7, 7, 5],
             'O' => [7, 5, 5, 5, 7],
             'P' => [6, 5, 6, 4, 4],
             'R' => [6, 5, 6, 5, 5],
             'S' => [7, 4, 7, 1, 7],
             'T' => [7, 2, 2, 2, 2],
             'V' => [5, 5, 5, 5, 2],
+            'W' => [5, 5, 7, 7, 5],
+            'Y' => [5, 5, 2, 2, 2],
             _ => [0; 5],
         };
         for (dy, row) in rows.iter().enumerate() {
             for dx in 0..3 {
                 if row & (1 << (2 - dx)) != 0 {
-                    let px = x + i as i32 * 4 + dx;
-                    let py = y + dy as i32;
-                    if (0..128).contains(&px) && (0..128).contains(&py) {
-                        image.put_pixel(px as u32, py as u32, color);
+                    let px = x + (i as i32 * 4 + dx) * scale;
+                    let py = y + dy as i32 * scale;
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let (px, py) = (px + sx, py + sy);
+                            if px >= 0
+                                && py >= 0
+                                && (px as u32) < image.width()
+                                && (py as u32) < image.height()
+                            {
+                                image.put_pixel(px as u32, py as u32, color);
+                            }
+                        }
                     }
                 }
             }
@@ -211,6 +270,42 @@ fn label(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>) {
 }
 
 fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
+    if matches!(kind, Kind::Radio1 | Kind::Radio2) {
+        let mut image = RgbaImage::from_pixel(256, 96, Rgba([48, 48, 47, 255]));
+        draw_filled_rect_mut(
+            &mut image,
+            Rect::at(4, 4).of_size(248, 88),
+            Rgba([18, 18, 17, 255]),
+        );
+        let dim = Rgba([170, 170, 160, 255]);
+        let display = Rgba([135, 230, 145, 255]);
+        label_scaled(
+            &mut image,
+            10,
+            8,
+            if matches!(kind, Kind::Radio1) {
+                "NAV 1"
+            } else {
+                "NAV 2"
+            },
+            dim,
+            2,
+        );
+        label_scaled(&mut image, 10, 25, "ACT", dim, 2);
+        label_scaled(&mut image, 104, 25, "STBY", dim, 2);
+        for (x, frequency) in [(10, values[0]), (104, values[1])] {
+            let text = if frequency == f64::MAX {
+                "OFF".to_owned()
+            } else {
+                format!("{:.3}", frequency / 1_000_000.0)
+            };
+            label_scaled(&mut image, x, 47, &text, display, 3);
+        }
+        label_scaled(&mut image, 191, 38, "SW", dim, 2);
+        label_scaled(&mut image, 211, 12, "- +", dim, 2);
+        label_scaled(&mut image, 211, 60, "- +", dim, 2);
+        return image;
+    }
     let mut image = RgbaImage::new(128, 128);
     let white = Rgba([235, 235, 230, 255]);
     let yellow = Rgba([255, 200, 50, 255]);
@@ -301,7 +396,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         Kind::Heading => ("HDG", 0.0, 360.0, 12),
         Kind::VerticalSpeed => ("FPM", -2000.0, 2000.0, 8),
         Kind::Tachometer => ("RPM", 0.0, 3000.0, 6),
-        Kind::Attitude | Kind::Vor1 | Kind::Vor2 => unreachable!(),
+        Kind::Attitude | Kind::Vor1 | Kind::Vor2 | Kind::Radio1 | Kind::Radio2 => unreachable!(),
     };
     let heading = matches!(kind, Kind::Heading);
     for i in 0..=ticks {

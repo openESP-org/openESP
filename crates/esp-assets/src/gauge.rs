@@ -463,10 +463,9 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                 let Some(instrument) = fallback::Instrument::new(gauge.reference) else {
                     return Ok(None);
                 };
-                let target_width =
-                    dimension(gauge.width.unwrap_or(128.0) * f64::from(width) / dimensions.width)?;
-                let target_height =
-                    dimension(gauge.height.unwrap_or(128.0) * f64::from(height) / layout_height)?;
+                let (native_width, native_height) = instrument.size();
+                let target_width = dimension(gauge.width.unwrap_or(f64::from(native_width)) * f64::from(width) / dimensions.width)?;
+                let target_height = dimension(gauge.height.unwrap_or(f64::from(native_height)) * f64::from(height) / layout_height)?;
                 let mut raw_areas = Vec::new();
                 if let Some(index) = instrument.obs_index() {
                     for (bounds, event) in [((0.0, 80.0, 64.0, 48.0), "DEC"), ((64.0, 80.0, 64.0, 48.0), "INC")] {
@@ -478,9 +477,27 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
                     });
                 }
+                if let Some(index) = instrument.radio_index() {
+                    for (bounds, event) in [
+                        ((188.0, 20.0, 20.0, 56.0), "SWAP"),
+                        ((208.0, 0.0, 24.0, 48.0), "WHOLE_DEC"),
+                        ((232.0, 0.0, 24.0, 48.0), "WHOLE_INC"),
+                        ((208.0, 48.0, 24.0, 48.0), "FRACT_DEC"),
+                        ((232.0, 48.0, 24.0, 48.0), "FRACT_INC"),
+                    ] {
+                        raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:NAV{index}_RADIO_{event})"), events: vec![MouseEvent::LeftSingle], repeat: event != "SWAP", visibility: Vec::new() });
+                    }
+                    for (bounds, part) in [((208.0, 0.0, 48.0, 48.0), "WHOLE"), ((208.0, 48.0, 48.0, 48.0), "FRACT")] {
+                        raw_areas.push(MouseAreaSource {
+                            bounds,
+                            source: format!("(M:Event) 'WheelUp' scmp 0 == if{{ 0 (>K:NAV{index}_RADIO_{part}_INC) }} (M:Event) 'WheelDown' scmp 0 == if{{ 0 (>K:NAV{index}_RADIO_{part}_DEC) }}"),
+                            events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
+                        });
+                    }
+                }
                 return Ok(Some((
                     Canvas {
-                        size: (128, 128),
+                        size: (native_width, native_height),
                         target: (target_width, target_height),
                         position: (
                             (gauge.x * f64::from(width) / dimensions.width).round() as i64,
@@ -1173,6 +1190,65 @@ mod tests {
         assert_eq!(
             host.events,
             ["VOR1_OBI_DEC", "VOR1_OBI_INC", "VOR1_OBI_INC"]
+        );
+    }
+
+    #[test]
+    fn fallback_radio_displays_precise_frequencies_and_dispatches_tuning() {
+        struct RadioHost {
+            standby: f64,
+            events: Vec<String>,
+        }
+        impl Host for RadioHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                Ok(Value::Number(
+                    if reference.name == "NAV STANDBY FREQUENCY:1" {
+                        self.standby
+                    } else {
+                        113_000_000.0
+                    },
+                ))
+            }
+            fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+                if reference.category == 'K' {
+                    self.events.push(reference.name.clone());
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let panel_path = root.path().join("panel");
+        std::fs::create_dir_all(&panel_path).unwrap();
+        std::fs::write(panel_path.join("panel.cfg"), "[VCockpit01]\nsize_mm=256,96\npixel_size=256,96\ntexture=$screen\ngauge00=Bendix_King_Radio!Bendix-King Radio Nav-Comm 1,0,0,256,96").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = RadioHost {
+            standby: 110_025_000.0,
+            events: Vec::new(),
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        host.standby = 110_050_000.0;
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        assert!(image.left_click(195.0, 40.0, &mut host).unwrap());
+        assert!(image.left_click(240.0, 20.0, &mut host).unwrap());
+        assert!(image.left_click(215.0, 70.0, &mut host).unwrap());
+        let areas = image.mouse_areas_at(240.0, 70.0);
+        assert!(
+            image
+                .mouse_event(MouseEvent::WheelUp, &areas, [240.0, 70.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(
+            host.events,
+            [
+                "NAV1_RADIO_SWAP",
+                "NAV1_RADIO_WHOLE_INC",
+                "NAV1_RADIO_FRACT_DEC",
+                "NAV1_RADIO_FRACT_INC"
+            ]
         );
     }
     #[test]
