@@ -1305,6 +1305,57 @@ mod tests {
     }
 
     #[test]
+    fn fallback_dme_displays_each_receiver_and_blanks_lost_signals() {
+        struct DmeHost {
+            signals: [bool; 2],
+            distances: [f64; 2],
+        }
+        impl Host for DmeHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                let value = match reference.name.as_str() {
+                    "NAV HAS DME:1" => f64::from(self.signals[0]),
+                    "NAV HAS DME:2" => f64::from(self.signals[1]),
+                    "NAV DME:1" => self.distances[0],
+                    "NAV DME:2" => self.distances[1],
+                    _ => return Err(Error::Variable(reference.name.clone())),
+                };
+                Ok(Value::Number(value))
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=256,96\npixel_size=256,96\ntexture=$screen\ngauge00=Bendix_King_Radio!Bendix-King Radio DME,0,0,256,96").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = DmeHost {
+            signals: [true, false],
+            distances: [10.0, 12.0],
+        };
+        assert!(image.update(&mut host));
+        let first = image.image.clone();
+        host.distances[0] = 9.0;
+        assert!(image.update(&mut host));
+        assert_ne!(first, image.image);
+        host.signals[1] = true;
+        assert!(image.update(&mut host));
+        let both = image.image.clone();
+        host.signals[1] = false;
+        assert!(image.update(&mut host));
+        assert_ne!(both, image.image);
+        let lost = image.image.clone();
+        host.distances[1] = 99.0;
+        image.update(&mut host);
+        assert_eq!(lost, image.image);
+        host.signals[0] = false;
+        assert!(image.update(&mut host));
+        assert_ne!(lost, image.image);
+    }
+    #[test]
     fn fallback_nav_gps_selector_controls_and_displays_the_selected_source() {
         struct NavHost {
             gps: bool,

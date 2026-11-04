@@ -29,6 +29,7 @@ enum Kind {
     Vor2,
     Radio1,
     Radio2,
+    Dme,
 }
 
 pub(super) struct Instrument {
@@ -64,11 +65,15 @@ impl Instrument {
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
             ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 1") => Kind::Radio1,
             ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 2") => Kind::Radio2,
+            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO DME") => Kind::Dme,
             _ => return None,
         };
         Some(Self {
             kind,
-            image: if matches!(kind, Kind::Radio1 | Kind::Radio2 | Kind::Compass) {
+            image: if matches!(
+                kind,
+                Kind::Radio1 | Kind::Radio2 | Kind::Compass | Kind::Dme
+            ) {
                 RgbaImage::new(256, 96)
             } else {
                 RgbaImage::new(128, 128)
@@ -215,6 +220,13 @@ impl Instrument {
                     0.0,
                 ]
             }
+            Kind::Dme => [
+                read(host, "NAV HAS DME:1", "bool"),
+                read(host, "NAV DME:1", "nautical miles"),
+                read(host, "NAV HAS DME:2", "bool"),
+                read(host, "NAV DME:2", "nautical miles"),
+                0.0,
+            ],
             Kind::Vor1 | Kind::Vor2 => {
                 let index = if matches!(self.kind, Kind::Vor1) {
                     1
@@ -458,7 +470,35 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         }
         return image;
     }
-    if matches!(kind, Kind::Radio1 | Kind::Radio2 | Kind::Compass) {
+    if matches!(kind, Kind::Dme) {
+        let mut image = RgbaImage::from_pixel(256, 96, Rgba([48, 48, 47, 255]));
+        draw_filled_rect_mut(
+            &mut image,
+            Rect::at(4, 4).of_size(248, 88),
+            Rgba([18, 18, 17, 255]),
+        );
+        let dim = Rgba([170, 170, 160, 255]);
+        let display = Rgba([135, 230, 145, 255]);
+        label_scaled(&mut image, 10, 10, "DME", dim, 2);
+        label_scaled(&mut image, 188, 10, "NM", dim, 2);
+        for (x, name, signal, distance) in [
+            (10, "NAV 1", values[0], values[1]),
+            (130, "NAV 2", values[2], values[3]),
+        ] {
+            label_scaled(&mut image, x, 31, name, dim, 2);
+            let text = if signal == 1.0 && distance != f64::MAX && distance >= 0.0 {
+                format!("{:.1}", distance.min(999.9))
+            } else {
+                "---".to_owned()
+            };
+            label_scaled(&mut image, x, 58, &text, display, 3);
+        }
+        return image;
+    }
+    if matches!(
+        kind,
+        Kind::Radio1 | Kind::Radio2 | Kind::Compass | Kind::Dme
+    ) {
         let mut image = RgbaImage::from_pixel(256, 96, Rgba([48, 48, 47, 255]));
         draw_filled_rect_mut(
             &mut image,
@@ -780,7 +820,8 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         | Kind::Vor1
         | Kind::Vor2
         | Kind::Radio1
-        | Kind::Radio2 => unreachable!(),
+        | Kind::Radio2
+        | Kind::Dme => unreachable!(),
     };
     let heading = matches!(kind, Kind::Heading);
     for i in 0..=ticks {
