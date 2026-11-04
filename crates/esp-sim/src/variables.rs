@@ -68,6 +68,7 @@ impl Default for Variables {
         variables.set_number("GPS DRIVES NAV1", "bool", 0.0);
         variables.set_number("HSI GPS SOURCE ACTIVE", "bool", 0.0);
         variables.set_number("VOR STATION ACTIVE", "bool", 0.0);
+        variables.set_number("VOR STATION COUNT", "number", 1.0);
         variables.set_number("VOR STATION LATITUDE", "degrees", 0.0);
         variables.set_number("VOR STATION LONGITUDE", "degrees", 0.0);
         variables.set_number("VOR STATION FREQUENCY", "megahertz", 113.0);

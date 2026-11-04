@@ -162,7 +162,7 @@ fn publish_hsi(variables: &mut Variables) -> Result<()> {
     let previously_selected = read(variables, "HSI GPS SOURCE ACTIVE", "bool")? != 0.0;
     variables.set_number("HSI GPS SOURCE ACTIVE", "bool", f64::from(gps_selected));
     if !gps_selected {
-        let vor_configured = read(variables, "VOR STATION ACTIVE", "bool")? != 0.0;
+        let vor_configured = read(variables, "NAV RADIO OWNED:1", "bool")? != 0.0;
         let nav_valid = read(variables, "NAV HAS NAV:1", "bool")? != 0.0;
         if previously_selected && !vor_configured {
             variables.set_number("NAV CDI:1", "number", 0.0);

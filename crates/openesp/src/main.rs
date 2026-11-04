@@ -117,6 +117,13 @@ struct Arguments {
     )]
     vor_range: f64,
     #[arg(
+        long = "vor-station",
+        value_name = "LAT,LON,MHZ,RANGE_NM",
+        allow_hyphen_values = true,
+        help = "Add a VOR station; may be repeated"
+    )]
+    vor_stations: Vec<vor::Station>,
+    #[arg(
         long,
         requires = "vor_latitude",
         allow_negative_numbers = true,
@@ -951,6 +958,10 @@ fn main() -> Result<()> {
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
+    anyhow::ensure!(
+        arguments.vor_stations.len() <= 63,
+        "at most 63 additional VOR stations are supported"
+    );
     if let (Some(latitude), Some(longitude)) = (arguments.vor_latitude, arguments.vor_longitude) {
         vor::validate(
             latitude,
@@ -1013,6 +1024,24 @@ fn main() -> Result<()> {
         variables.set_number("GPS DRIVES NAV1", "bool", 1.0);
     }
     variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
+    variables.set_number(
+        "VOR STATION COUNT",
+        "number",
+        (arguments.vor_stations.len() + 1) as f64,
+    );
+    for (offset, station) in arguments.vor_stations.iter().enumerate() {
+        let index = offset + 2;
+        for (name, unit, value) in [
+            ("ACTIVE", "bool", 1.0),
+            ("LATITUDE", "degrees", station.latitude),
+            ("LONGITUDE", "degrees", station.longitude),
+            ("FREQUENCY", "megahertz", station.frequency),
+            ("RANGE", "nautical miles", station.range),
+            ("LOCALIZER", "bool", 0.0),
+        ] {
+            variables.set_number(&format!("VOR STATION {name}:{index}"), unit, value);
+        }
+    }
     if let (Some(latitude), Some(longitude)) = (arguments.vor_latitude, arguments.vor_longitude) {
         variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
         variables.set_number("VOR STATION LATITUDE", "degrees", latitude);
@@ -1100,6 +1129,23 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn accepts_multiple_vor_stations_on_the_command_line() {
+        let args = Arguments::try_parse_from([
+            "openesp",
+            "--aircraft",
+            "test",
+            "--vor-station",
+            "-33.9,151.2,113.5,40",
+            "--vor-station",
+            "-34,150,114.0,30",
+        ])
+        .unwrap();
+        assert_eq!(args.vor_stations.len(), 2);
+        assert_eq!(args.vor_stations[0].latitude, -33.9);
+        assert_eq!(args.vor_stations[1].frequency, 114.0);
+    }
 
     #[test]
     fn direct_to_requires_both_coordinates() {

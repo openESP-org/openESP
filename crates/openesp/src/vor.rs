@@ -5,6 +5,35 @@ use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS: f64 = 6_371_008.8;
 
+#[derive(Clone, Debug)]
+pub struct Station {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub frequency: f64,
+    pub range: f64,
+}
+
+impl std::str::FromStr for Station {
+    type Err = anyhow::Error;
+    fn from_str(text: &str) -> Result<Self> {
+        let fields = text.split(',').collect::<Vec<_>>();
+        ensure!(fields.len() == 4, "expected LAT,LON,MHZ,RANGE_NM");
+        let station = Self {
+            latitude: fields[0].trim().parse()?,
+            longitude: fields[1].trim().parse()?,
+            frequency: fields[2].trim().parse()?,
+            range: fields[3].trim().parse()?,
+        };
+        validate(
+            station.latitude,
+            station.longitude,
+            station.frequency,
+            station.range,
+        )?;
+        Ok(station)
+    }
+}
+
 pub fn validate(latitude: f64, longitude: f64, frequency: f64, range: f64) -> Result<()> {
     crate::navigation::Origin::new(latitude, longitude)?;
     ensure!(
@@ -56,27 +85,14 @@ fn publish_receiver(
     variables: &mut Variables,
 ) -> Result<()> {
     let key = |name: &str| format!("{name}:{index}");
-    let read = |v: &mut Variables, name, unit| -> Result<f64> {
+    fn read(v: &mut Variables, name: &str, unit: &str) -> Result<f64> {
         Ok(v.read(&Reference::new('A', name, Some(unit)))?.number()?)
-    };
-    let station_active = read(variables, "VOR STATION ACTIVE", "bool")? != 0.0;
-    if !station_active {
-        variables.set_number(&key("NAV HAS NAV"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS DME"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS LOCALIZER"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS GLIDE SLOPE"), "bool", 0.0);
-        return Ok(());
     }
-    let station_latitude = read(variables, "VOR STATION LATITUDE", "degrees")?;
-    let station_longitude = read(variables, "VOR STATION LONGITUDE", "degrees")?;
-    let station_frequency = read(variables, "VOR STATION FREQUENCY", "megahertz")?;
-    let range = read(variables, "VOR STATION RANGE", "nautical miles")?;
-    validate(
-        station_latitude,
-        station_longitude,
-        station_frequency,
-        range,
-    )?;
+    let count = read(variables, "VOR STATION COUNT", "number")?;
+    ensure!(
+        count.is_finite() && count.fract() == 0.0 && (1.0..=64.0).contains(&count),
+        "invalid VOR station count"
+    );
     let frequency_name = key("NAV ACTIVE FREQUENCY");
     let obs_name = key("NAV OBS");
     let tuned = read(variables, &frequency_name, "megahertz")?;
@@ -85,7 +101,80 @@ fn publish_receiver(
         tuned.is_finite() && obs.is_finite(),
         "invalid NAV radio setting"
     );
-    let station_latitude = station_latitude.to_radians();
+    let mut any_active = false;
+    let mut best: Option<(u32, Station, f64)> = None;
+    for station_index in 1..=count as u32 {
+        let station_key = |field: &str| {
+            if station_index == 1 {
+                format!("VOR STATION {field}")
+            } else {
+                format!("VOR STATION {field}:{station_index}")
+            }
+        };
+        if read(variables, &station_key("ACTIVE"), "bool")? == 0.0 {
+            continue;
+        }
+        any_active = true;
+        let station = Station {
+            latitude: read(variables, &station_key("LATITUDE"), "degrees")?,
+            longitude: read(variables, &station_key("LONGITUDE"), "degrees")?,
+            frequency: read(variables, &station_key("FREQUENCY"), "megahertz")?,
+            range: read(variables, &station_key("RANGE"), "nautical miles")?,
+        };
+        validate(
+            station.latitude,
+            station.longitude,
+            station.frequency,
+            station.range,
+        )?;
+        if (tuned - station.frequency).abs() >= 0.0005 {
+            continue;
+        }
+        let lat1 = latitude.to_radians();
+        let lat2 = station.latitude.to_radians();
+        let h = (((lat2 - lat1) / 2.0).sin().powi(2)
+            + lat1.cos()
+                * lat2.cos()
+                * ((station.longitude - longitude).to_radians() / 2.0)
+                    .sin()
+                    .powi(2))
+        .clamp(0.0, 1.0);
+        let distance = 2.0 * EARTH_RADIUS * h.sqrt().atan2((1.0 - h).sqrt());
+        if distance > station.range * 1852.0 {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, current)| distance < *current)
+        {
+            best = Some((station_index, station, distance));
+        }
+    }
+    variables.set_number(&key("NAV RADIO OWNED"), "bool", f64::from(any_active));
+    let Some((station_index, station, _)) = best else {
+        variables.set_number(&key("NAV HAS NAV"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS DME"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS LOCALIZER"), "bool", 0.0);
+        variables.set_number(&key("NAV HAS GLIDE SLOPE"), "bool", 0.0);
+        for (name, unit) in [
+            ("NAV RADIO CDI", "number"),
+            ("NAV GSI", "number"),
+            ("NAV DME", "meters"),
+            ("NAV VOR DISTANCE", "meters"),
+            ("NAV SIGNAL", "number"),
+            ("NAV TOFROM", "enum"),
+        ] {
+            variables.set_number(&key(name), unit, 0.0);
+        }
+        if any_active && (index != 1 || read(variables, "GPS DRIVES NAV1", "bool")? == 0.0) {
+            variables.set_number(&key("NAV CDI"), "number", 0.0);
+        }
+        return Ok(());
+    };
+    let station_latitude = station.latitude.to_radians();
+    let station_longitude = station.longitude;
+    let station_frequency = station.frequency;
+    let range = station.range;
     let latitude = latitude.to_radians();
     let delta_lon = (longitude - station_longitude).to_radians();
     let haversine = (((latitude - station_latitude) / 2.0).sin().powi(2)
@@ -100,7 +189,15 @@ fn publish_receiver(
     let mut error = 0.0;
     let mut needle = 0.0;
     let mut flag = 0.0;
-    let localizer = read(variables, "VOR STATION LOCALIZER", "bool")? != 0.0;
+    let localizer = if station_index == 1 {
+        read(variables, "VOR STATION LOCALIZER", "bool")? != 0.0
+    } else {
+        read(
+            variables,
+            &format!("VOR STATION LOCALIZER:{station_index}"),
+            "bool",
+        )? != 0.0
+    };
     let mut glideslope_signal = false;
     let mut glideslope_needle = 0.0;
     if signal {
@@ -194,6 +291,51 @@ mod tests {
     use esp_script::Value;
     use esp_sim::flight::State;
     use glam::DVec3;
+
+    #[test]
+    fn receivers_pick_different_stations_and_nearest_matching_signal() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        variables.set_number("VOR STATION COUNT", "number", 2.0);
+        for (name, unit, value) in [
+            ("ACTIVE", "bool", 1.0),
+            ("LATITUDE", "degrees", -0.08),
+            ("LONGITUDE", "degrees", 0.0),
+            ("FREQUENCY", "megahertz", 114.0),
+            ("RANGE", "nautical miles", 40.0),
+            ("LOCALIZER", "bool", 0.0),
+        ] {
+            variables.set_number(&format!("VOR STATION {name}:2"), unit, value);
+        }
+        variables.set_number("NAV ACTIVE FREQUENCY:2", "megahertz", 114.0);
+        let state = State {
+            position: DVec3::new(-10_000.0, 0.0, -1000.0),
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let distance1 = read(&mut variables, "NAV DME:1", "meters");
+        let distance2 = read(&mut variables, "NAV DME:2", "meters");
+        assert!(distance1 > 10_000.0 && distance2 < 2000.0);
+        variables.set_number("VOR STATION FREQUENCY:2", "megahertz", 113.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "NAV DME:1", "meters") - distance2).abs() < 1e-6);
+        assert_eq!(read(&mut variables, "NAV HAS NAV:2", "bool"), 0.0);
+    }
+
+    #[test]
+    fn parses_additional_stations() {
+        let station: Station = "-33.9,151.2,113.5,40".parse().unwrap();
+        assert_eq!(station.latitude, -33.9);
+        assert_eq!(station.frequency, 113.5);
+        assert!("0,0,113.01,40".parse::<Station>().is_err());
+        assert!("0,0,113".parse::<Station>().is_err());
+    }
 
     #[test]
     fn two_receivers_tune_and_select_courses_independently() {
