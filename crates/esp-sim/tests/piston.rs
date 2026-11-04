@@ -377,3 +377,85 @@ fn original_piston_reaction_torque_follows_rotation_and_tuning() {
     }
     assert!(verified > 0);
 }
+
+#[test]
+#[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
+fn original_piston_crossflow_changes_yaw_and_honors_p_factor_scalar() {
+    use glam::DVec3;
+    let air = Atmosphere::standard(0.0).unwrap();
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut data = FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(0.0)
+            || data
+                .configuration
+                .number("propeller", "propeller_type")
+                .unwrap()
+                != Some(1.0)
+        {
+            continue;
+        }
+        let config = String::from_utf8(std::fs::read(path.join("aircraft.cfg")).unwrap()).unwrap();
+        if !config.contains("[flight_tuning]")
+            || data
+                .configuration
+                .value("flight_tuning", "p_factor_on_yaw")
+                .unwrap()
+                .is_some()
+        {
+            continue;
+        }
+        let mut effects = Vec::new();
+        for scale in [0, 1, 2] {
+            let config = config.replace(
+                "[flight_tuning]",
+                &format!("[flight_tuning]\np_factor_on_yaw={scale}"),
+            );
+            data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
+            let mut engine = Pistons::from_data(&data).unwrap();
+            engine.start_running(&air, DVec3::ZERO).unwrap();
+            let commands = engine
+                .indices()
+                .map(|_| Command {
+                    throttle: 1.0,
+                    ..Command::default()
+                })
+                .collect::<Vec<_>>();
+            for _ in 0..100 {
+                engine
+                    .advance(0.1, &air, DVec3::ZERO, &commands, true)
+                    .unwrap();
+            }
+            let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
+            let baseline = engine
+                .wrench(
+                    &air,
+                    DVec3::new(15.0, 0.0, 0.0),
+                    DVec3::ZERO,
+                    DVec3::ZERO,
+                    &power,
+                )
+                .unwrap();
+            let pitched = engine
+                .wrench(
+                    &air,
+                    DVec3::new(15.0, 0.0, 6.0),
+                    DVec3::ZERO,
+                    DVec3::ZERO,
+                    &power,
+                )
+                .unwrap();
+            effects.push(pitched.moment.z - baseline.moment.z);
+            assert_eq!(pitched.force, baseline.force);
+        }
+        assert!(effects[0].abs() < 1e-9);
+        assert!(effects[1] < 0.0);
+        assert!((effects[2] - 2.0 * effects[1]).abs() < 1e-9);
+        verified += 1;
+    }
+    assert!(verified > 0);
+}

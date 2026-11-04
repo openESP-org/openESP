@@ -29,6 +29,7 @@ pub struct Pistons {
     torque_on_roll: f64,
     gyro_pitch: f64,
     gyro_yaw: f64,
+    p_factor_on_yaw: f64,
     engines: Vec<Engine>,
 }
 
@@ -94,6 +95,25 @@ fn exhaust_temperature(
     }
     let mixture_effect = (-((ratio - 0.067) / 0.035).powi(2)).exp();
     ambient_c + 760.0 * mixture_effect * (0.65 + 0.35 * manifold_fraction.clamp(0.0, 1.0))
+}
+// Approximate the shifted thrust center from crossflow relative to blade-tip
+// speed. The quarter-radius bound prevents an unphysical offset near zero RPM.
+fn asymmetric_thrust_moment(
+    axis: DVec3,
+    velocity: DVec3,
+    rotation: f64,
+    radius: f64,
+    prop_rpm: f64,
+    thrust: f64,
+) -> DVec3 {
+    if prop_rpm <= 1e-9 || thrust <= 0.0 {
+        return DVec3::ZERO;
+    }
+    let crossflow = velocity - axis * velocity.dot(axis);
+    let tip_speed = radius * prop_rpm * PI / 30.0;
+    let displacement = (-axis.cross(crossflow) * (rotation * radius * 0.5 / tip_speed))
+        .clamp_length_max(radius * 0.25);
+    displacement.cross(axis * thrust)
 }
 fn oil_pressure(rpm: f64, rated_rpm: f64, temperature_c: f64) -> f64 {
     let viscosity = (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6);
@@ -226,6 +246,13 @@ impl Pistons {
                 .all(|v| v.is_finite() && *v >= 0.0),
             "invalid gyroscopic tuning scalar"
         );
+        let p_factor_on_yaw = config
+            .number("flight_tuning", "p_factor_on_yaw")?
+            .unwrap_or(1.0);
+        ensure!(
+            p_factor_on_yaw.is_finite() && p_factor_on_yaw >= 0.0,
+            "invalid p_factor_on_yaw scalar"
+        );
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
@@ -328,6 +355,7 @@ impl Pistons {
             torque_on_roll,
             gyro_pitch,
             gyro_yaw,
+            p_factor_on_yaw,
             engines,
         })
     }
@@ -574,6 +602,16 @@ impl Pistons {
             let force = engine.direction * thrust;
             wrench.force += force;
             wrench.moment += (engine.position - cg).cross(force);
+            let asymmetry = asymmetric_thrust_moment(
+                engine.direction,
+                velocity,
+                engine.rotation,
+                self.propeller.radius(),
+                output.propeller.rpm,
+                thrust,
+            );
+            wrench.moment +=
+                DVec3::new(asymmetry.x, asymmetry.y, asymmetry.z * self.p_factor_on_yaw);
             // In body coordinates, the airframe reacts to the changing
             // direction of the spinning propeller's angular momentum.
             let rotor_momentum =
@@ -640,5 +678,37 @@ mod exhaust_tests {
         assert!(peak > exhaust_temperature(15.0, 0.085, 0.8, true));
         assert!(peak > exhaust_temperature(15.0, 0.067, 0.3, true));
         assert_eq!(exhaust_temperature(15.0, 0.067, 0.8, false), 15.0);
+    }
+}
+
+#[cfg(test)]
+mod asymmetry_tests {
+    use super::*;
+
+    #[test]
+    fn crossflow_moves_thrust_center_and_reverses_with_propeller_direction() {
+        let axis = DVec3::X;
+        let straight = DVec3::new(40.0, 0.0, 0.0);
+        assert_eq!(
+            asymmetric_thrust_moment(axis, straight, 1.0, 1.0, 2000.0, 1000.0),
+            DVec3::ZERO
+        );
+        let pitched = straight + DVec3::Z * 5.0;
+        let clockwise = asymmetric_thrust_moment(axis, pitched, 1.0, 1.0, 2000.0, 1000.0);
+        let reverse = asymmetric_thrust_moment(axis, pitched, -1.0, 1.0, 2000.0, 1000.0);
+        assert!(clockwise.z < 0.0);
+        assert!((clockwise + reverse).length() < 1e-12);
+        assert_eq!(
+            asymmetric_thrust_moment(axis, pitched, 1.0, 1.0, 0.0, 1000.0),
+            DVec3::ZERO
+        );
+        assert_eq!(
+            asymmetric_thrust_moment(axis, pitched, 1.0, 1.0, 2000.0, 0.0),
+            DVec3::ZERO
+        );
+        assert!(
+            asymmetric_thrust_moment(axis, pitched * 1e6, 1.0, 1.0, 1.0, 1000.0).length()
+                <= 250.0 + 1e-9
+        );
     }
 }

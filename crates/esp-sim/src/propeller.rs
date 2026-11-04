@@ -82,6 +82,10 @@ impl Propeller {
         })
     }
 
+    pub fn radius(&self) -> f64 {
+        self.diameter * 0.5
+    }
+
     pub fn angular_momentum(&self, engine_rpm: f64) -> f64 {
         self.inertia * (engine_rpm / self.reduction) * PI / 30.0
     }
