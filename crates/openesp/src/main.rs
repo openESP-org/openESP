@@ -81,6 +81,20 @@ struct Arguments {
     longitude: f64,
     #[arg(
         long,
+        requires = "destination_longitude",
+        allow_negative_numbers = true,
+        help = "Direct-to destination latitude in degrees"
+    )]
+    destination_latitude: Option<f64>,
+    #[arg(
+        long,
+        requires = "destination_latitude",
+        allow_negative_numbers = true,
+        help = "Direct-to destination longitude in degrees"
+    )]
+    destination_longitude: Option<f64>,
+    #[arg(
+        long,
         default_value_t = 0.0,
         allow_negative_numbers = true,
         help = "Magnetic declination in degrees, positive east and negative west"
@@ -897,6 +911,12 @@ fn main() -> Result<()> {
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
+    if let (Some(latitude), Some(longitude)) = (
+        arguments.destination_latitude,
+        arguments.destination_longitude,
+    ) {
+        navigation::Origin::new(latitude, longitude)?;
+    }
     navigation::validate_declination(arguments.magnetic_declination)?;
     let starting_wind = weather::vector(arguments.wind_direction, arguments.wind_speed)?;
     let initial_weather = weather::Conditions::new(
@@ -932,6 +952,14 @@ fn main() -> Result<()> {
     let mut variables = Variables::default();
     variables.set_number("WORLD ORIGIN LATITUDE", "degrees", arguments.latitude);
     variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", arguments.longitude);
+    if let (Some(latitude), Some(longitude)) = (
+        arguments.destination_latitude,
+        arguments.destination_longitude,
+    ) {
+        variables.set_number("GPS WP NEXT LAT", "degrees", latitude);
+        variables.set_number("GPS WP NEXT LON", "degrees", longitude);
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+    }
     variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
     variables.set_number(
         "AMBIENT WIND DIRECTION",
@@ -999,6 +1027,32 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use esp_script::{Host, Reference};
+
+    #[test]
+    fn direct_to_requires_both_coordinates() {
+        let args = Arguments::try_parse_from([
+            "openesp",
+            "--aircraft",
+            "test",
+            "--destination-latitude",
+            "-33.9",
+            "--destination-longitude",
+            "151.2",
+        ])
+        .unwrap();
+        assert_eq!(args.destination_latitude, Some(-33.9));
+        assert_eq!(args.destination_longitude, Some(151.2));
+        assert!(
+            Arguments::try_parse_from([
+                "openesp",
+                "--aircraft",
+                "test",
+                "--destination-latitude",
+                "-33.9"
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn accepts_negative_geographic_origin() {

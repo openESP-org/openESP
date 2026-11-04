@@ -139,6 +139,81 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         variables.set_number(name, "radians", gyro_heading);
     }
     variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
+    publish_direct_to(latitude, longitude, variation, ground_speed, variables)?;
+    Ok(())
+}
+
+fn publish_direct_to(
+    latitude: f64,
+    longitude: f64,
+    variation: f64,
+    ground_speed: f64,
+    variables: &mut Variables,
+) -> Result<()> {
+    let active = variables
+        .read(&Reference::new(
+            'A',
+            "GPS IS DIRECTTO FLIGHTPLAN",
+            Some("bool"),
+        ))?
+        .number()?
+        != 0.0;
+    variables.set_number("GPS IS ACTIVE WAY POINT", "bool", f64::from(active));
+    if !active {
+        for (name, unit) in [
+            ("GPS WP DISTANCE", "meters"),
+            ("GPS WP TRUE BEARING", "radians"),
+            ("GPS WP BEARING", "radians"),
+            ("GPS WP ETE", "seconds"),
+        ] {
+            variables.set_number(name, unit, 0.0);
+        }
+        return Ok(());
+    }
+    let destination_latitude = variables
+        .read(&Reference::new('A', "GPS WP NEXT LAT", Some("degrees")))?
+        .number()?;
+    let destination_longitude = variables
+        .read(&Reference::new('A', "GPS WP NEXT LON", Some("degrees")))?
+        .number()?;
+    let destination = Origin::new(destination_latitude, destination_longitude)?;
+    let latitude = latitude.to_radians();
+    let delta_latitude = destination.latitude - latitude;
+    let delta_longitude = destination.longitude - longitude.to_radians();
+    let haversine = ((delta_latitude / 2.0).sin().powi(2)
+        + latitude.cos() * destination.latitude.cos() * (delta_longitude / 2.0).sin().powi(2))
+    .clamp(0.0, 1.0);
+    let distance = 2.0 * EARTH_RADIUS_METERS * haversine.sqrt().atan2((1.0 - haversine).sqrt());
+    let bearing = if distance < 1e-6 {
+        0.0
+    } else {
+        (delta_longitude.sin() * destination.latitude.cos())
+            .atan2(
+                latitude.cos() * destination.latitude.sin()
+                    - latitude.sin() * destination.latitude.cos() * delta_longitude.cos(),
+            )
+            .rem_euclid(TAU)
+    };
+    variables.set_number("GPS WP DISTANCE", "meters", distance);
+    variables.set_number("GPS WP TRUE BEARING", "radians", bearing);
+    variables.set_number(
+        "GPS WP BEARING",
+        "radians",
+        if distance < 1e-6 {
+            0.0
+        } else {
+            (bearing + variation).rem_euclid(TAU)
+        },
+    );
+    variables.set_number(
+        "GPS WP ETE",
+        "seconds",
+        if ground_speed > 0.5 {
+            distance / ground_speed
+        } else {
+            0.0
+        },
+    );
     Ok(())
 }
 
@@ -147,6 +222,41 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn direct_to_updates_distance_bearing_and_time_as_aircraft_moves() {
+        let mut variables = Variables::default();
+        variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", 179.9);
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LAT", "degrees", 0.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", -179.9);
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name, unit| {
+            vars.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let distance = read(&mut variables, "GPS WP DISTANCE", "meters");
+        assert!((distance - EARTH_RADIUS_METERS * 0.2_f64.to_radians()).abs() < 1e-6);
+        assert!((read(&mut variables, "GPS WP TRUE BEARING", "degrees") - 90.0).abs() < 1e-9);
+        assert!((read(&mut variables, "GPS WP BEARING", "degrees") - 80.0).abs() < 1e-9);
+        assert!((read(&mut variables, "GPS WP ETE", "seconds") - distance / 100.0).abs() < 1e-8);
+        state.position.y = 1000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!(
+            (read(&mut variables, "GPS WP DISTANCE", "meters") - (distance - 1000.0)).abs() < 1e-6
+        );
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "GPS IS ACTIVE WAY POINT", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "GPS WP DISTANCE", "meters"), 0.0);
+    }
 
     #[test]
     fn gyro_adjustment_moves_indicator_without_moving_compass_and_can_be_synchronized() {
