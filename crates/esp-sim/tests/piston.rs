@@ -272,6 +272,28 @@ fn original_piston_oil_indications_follow_engine_state() {
         assert!(running.oil_pressure_psi > 0.0);
         assert!(running.exhaust_temperature_c > cold.exhaust_temperature_c);
         assert!(running.oil_temperature_c > cold.oil_temperature_c);
+        let lean_commands = engine
+            .indices()
+            .map(|_| Command {
+                mixture: 0.45,
+                ..Command::default()
+            })
+            .collect::<Vec<_>>();
+        engine
+            .advance(0.0, &air, DVec3::ZERO, &lean_commands, true)
+            .unwrap();
+        let immediate = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert_eq!(
+            immediate.exhaust_temperature_c,
+            running.exhaust_temperature_c
+        );
+        for _ in 0..50 {
+            engine
+                .advance(0.1, &air, DVec3::ZERO, &lean_commands, true)
+                .unwrap();
+        }
+        let leaned = engine.output(0, &air, DVec3::ZERO).unwrap();
+        assert!(leaned.exhaust_temperature_c > running.exhaust_temperature_c);
         let commands = engine
             .indices()
             .map(|_| Command::default())
@@ -283,7 +305,8 @@ fn original_piston_oil_indications_follow_engine_state() {
         }
         let stopped = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert!(stopped.oil_pressure_psi < running.oil_pressure_psi);
-        assert!((stopped.exhaust_temperature_c - cold.exhaust_temperature_c).abs() < 1e-9);
+        assert!(stopped.exhaust_temperature_c > cold.exhaust_temperature_c);
+        assert!(stopped.exhaust_temperature_c < leaned.exhaust_temperature_c);
         assert!(stopped.oil_temperature_c < running.oil_temperature_c);
         verified += 1;
     }

@@ -42,6 +42,7 @@ struct Engine {
     command: Command,
     fuel_available: bool,
     oil_temperature: Option<f64>,
+    exhaust_temperature: Option<f64>,
     rotation: f64,
     horizontal_wake_overlap: f64,
     vertical_wake_overlap: f64,
@@ -346,6 +347,7 @@ impl Pistons {
                     command: Command::default(),
                     fuel_available: false,
                     oil_temperature: None,
+                    exhaust_temperature: None,
                     horizontal_wake_overlap,
                     vertical_wake_overlap,
                     rotation: rotations
@@ -521,6 +523,9 @@ impl Pistons {
             engine.fuel_available,
         )?;
         output.propeller_angle = engine.angle;
+        output.exhaust_temperature_c = engine
+            .exhaust_temperature
+            .unwrap_or(air.temperature - 273.15);
         output.oil_temperature_c = engine.oil_temperature.unwrap_or(air.temperature - 273.15);
         output.oil_pressure_psi =
             oil_pressure(engine.rpm, self.cycle.maximum_rpm, output.oil_temperature_c);
@@ -549,13 +554,18 @@ impl Pistons {
                     hi = rpm;
                 }
             }
-            speeds.push((lo + hi) * 0.5);
+            let rpm = (lo + hi) * 0.5;
+            let exhaust = self
+                .sample(rpm, air, speed, Command::default(), true)?
+                .exhaust_temperature_c;
+            speeds.push((rpm, exhaust));
         }
-        for (engine, rpm) in self.engines.iter_mut().zip(speeds) {
+        for (engine, (rpm, exhaust)) in self.engines.iter_mut().zip(speeds) {
             engine.rpm = rpm;
             engine.command = Command::default();
             engine.fuel_available = true;
             engine.oil_temperature = Some(air.temperature - 273.15 + 60.0);
+            engine.exhaust_temperature = Some(exhaust);
         }
         Ok(())
     }
@@ -627,6 +637,13 @@ impl Pistons {
             let ambient = air.temperature - 273.15;
             let load = (output.cycle.shaft_power.max(0.0) / self.rated_power).clamp(0.0, 1.0);
             let engine = &mut self.engines[index];
+            // Approximate the thermocouple's finite response with a five-second
+            // time constant; the exhaust target itself is a simple estimate.
+            let previous_exhaust = engine.exhaust_temperature.unwrap_or(ambient);
+            engine.exhaust_temperature = Some(
+                previous_exhaust
+                    + (output.exhaust_temperature_c - previous_exhaust) * (1.0 - (-dt / 5.0).exp()),
+            );
             let initial = engine.oil_temperature.unwrap_or(ambient);
             engine.oil_temperature = Some(oil_temperature_step(
                 initial,
