@@ -15,6 +15,7 @@ pub struct SpeedLimits {
     maximum_mach: Option<f64>,
     stall_alpha: Option<f64>,
     stall_warning_type: u8,
+    indicators: [(f64, f64); 4],
 }
 
 impl SpeedLimits {
@@ -32,6 +33,33 @@ impl SpeedLimits {
             warning.fract() == 0.0 && (0.0..=2.0).contains(&warning),
             "invalid stall warning type"
         );
+        let mut indicators = [(1.0, 0.0); 4];
+        for (index, calibration) in indicators.iter_mut().enumerate() {
+            if let Some(value) = config.value(
+                "airspeed_indicators",
+                &format!("airspeed_indicator.{index}"),
+            )? {
+                let mut fields = value.split(',').map(str::trim);
+                let scalar: f64 = fields
+                    .next()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("1")
+                    .parse()?;
+                let offset: f64 = fields
+                    .next()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("0")
+                    .parse()?;
+                ensure!(
+                    fields.next().is_none()
+                        && scalar.is_finite()
+                        && scalar > 0.0
+                        && offset.is_finite(),
+                    "invalid airspeed indicator calibration {index}"
+                );
+                *calibration = (scalar, offset);
+            }
+        }
         Ok(Self {
             stall_clean: get("flaps_up_stall_speed")?,
             stall_landing: get("full_flaps_stall_speed")?,
@@ -40,6 +68,7 @@ impl SpeedLimits {
             maximum_mach: get("max_mach")?,
             stall_alpha: None,
             stall_warning_type: warning as u8,
+            indicators,
         })
     }
 
@@ -135,14 +164,56 @@ impl SpeedLimits {
                 f64::from(self.stall_warning_type != 0 && powered && approaching_stall),
             );
         }
-        let indicated = atmosphere.calibrated_airspeed(speed)?;
+        let calibrated = match (
+            variables.pitot_line_pressure(),
+            variables.static_line_pressure(),
+        ) {
+            (Some(total), Some(ambient)) => {
+                Atmosphere::calibrated_airspeed_from_impact_pressure((total - ambient).max(0.0))?
+            }
+            _ => atmosphere.calibrated_airspeed(speed)?,
+        };
+        let selected_true = variables
+            .read(&Reference::new('A', "TRUE AIRSPEED SELECTED", Some("bool")))?
+            .number()?
+            != 0.0;
+        let to_ias = |index: usize, cas: f64| {
+            let (scale, offset_knots) = self.indicators[index];
+            ((cas + offset_knots * 1852.0 / 3600.0) * scale).max(0.0)
+        };
+        for index in 0..self.indicators.len() {
+            let indicated = to_ias(index, calibrated);
+            variables.set_number(
+                &format!("AIRSPEED INDICATED:{}", index + 1),
+                "meters per second",
+                indicated,
+            );
+            variables.set_number(
+                &format!("AIRSPEED SELECT INDICATED OR TRUE:{}", index + 1),
+                "meters per second",
+                if selected_true { speed } else { indicated },
+            );
+            if index == 0 {
+                variables.set_number("AIRSPEED INDICATED", "meters per second", indicated);
+                variables.set_number(
+                    "AIRSPEED SELECT INDICATED OR TRUE",
+                    "meters per second",
+                    if selected_true { speed } else { indicated },
+                );
+            }
+        }
+        let indicated = to_ias(0, calibrated);
         if let Some(mach) = self.maximum_mach {
             variables.set_number("MACH MAX OPERATE", "mach", mach);
             variables.set_number("BARBER POLE MACH", "mach", mach);
         }
         let mach_limit = self
             .maximum_mach
-            .map(|mach| atmosphere.calibrated_airspeed(mach * atmosphere.sound_speed))
+            .map(|mach| {
+                atmosphere
+                    .calibrated_airspeed(mach * atmosphere.sound_speed)
+                    .map(|cas| to_ias(0, cas))
+            })
             .transpose()?;
         let limit = match (self.maximum_ias, mach_limit) {
             (Some(knots), Some(mach)) => Some((knots * 1852.0 / 3600.0).min(mach)),
@@ -289,6 +360,50 @@ mod tests {
         limits.publish(&state, &mut variables).unwrap();
         assert!(high_density_ratio < 1.0);
         assert_eq!(read(&mut variables, "SIGMA SQRT", "number"), 1.0);
+    }
+
+    #[test]
+    fn independent_airspeed_indicators_apply_aircraft_calibration() {
+        use esp_script::Value;
+        let config = Config::parse(
+            "[airspeed_indicators]\nairspeed_indicator.0=1.3,-24\nairspeed_indicator.1=0.9,5\n",
+        )
+        .unwrap();
+        let limits = SpeedLimits::from_config(&config).unwrap();
+        let mut vars = Variables::default();
+        let mut state = State {
+            velocity: DVec3::X * (100.0 * 1852.0 / 3600.0),
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("knots")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut vars).unwrap();
+        limits.publish(&state, &mut vars).unwrap();
+        assert!((read(&mut vars, "AIRSPEED INDICATED") - 98.8).abs() < 1e-9);
+        assert!((read(&mut vars, "AIRSPEED INDICATED:2") - 94.5).abs() < 1e-9);
+        limits.publish(&state, &mut vars).unwrap();
+        assert!((read(&mut vars, "AIRSPEED INDICATED") - 98.8).abs() < 1e-9);
+        vars.dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+            .unwrap();
+        state.velocity.x *= 2.0;
+        crate::flight::Flight::publish(&state, &mut vars).unwrap();
+        limits.publish(&state, &mut vars).unwrap();
+        assert!((read(&mut vars, "AIRSPEED INDICATED:2") - 94.5).abs() < 1e-9);
+        vars.set_number("TRUE AIRSPEED SELECTED", "bool", 1.0);
+        limits.publish(&state, &mut vars).unwrap();
+        assert!((read(&mut vars, "AIRSPEED SELECT INDICATED OR TRUE:2") - 200.0).abs() < 1e-9);
+        assert!((read(&mut vars, "AIRSPEED INDICATED:2") - 94.5).abs() < 1e-9);
+        for invalid in ["0,0", "NaN,0", "1,inf", "1,2,3"] {
+            let config = Config::parse(&format!(
+                "[airspeed_indicators]\nairspeed_indicator.0={invalid}\n"
+            ))
+            .unwrap();
+            assert!(SpeedLimits::from_config(&config).is_err(), "{invalid}");
+        }
     }
 
     #[test]
