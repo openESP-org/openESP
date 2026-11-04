@@ -494,14 +494,14 @@ fn original_piston_wake_improves_low_speed_tail_control() {
         let mut engine = Pistons::from_data(&data).unwrap();
         let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
         let stopped = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-        assert_eq!(stopped, (DVec3::ZERO, DVec3::ZERO));
+        assert_eq!(stopped, esp_sim::propeller::TailWash::default());
         engine.start_running(&air, DVec3::ZERO).unwrap();
         let wake = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-        assert!(wake.0.x > 0.0 && wake.1.y < 0.0);
+        assert!(wake.horizontal.x > 0.0 && wake.swirl.y < 0.0);
         let no_fuel = vec![0.0; power.len()];
         assert_eq!(
             engine.tail_wash(&air, DVec3::ZERO, &no_fuel).unwrap(),
-            (DVec3::ZERO, DVec3::ZERO)
+            esp_sim::propeller::TailWash::default()
         );
         let centered = aero
             .tail_wash_forces(
@@ -546,7 +546,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             forward.start_running(&air, DVec3::ZERO).unwrap();
             assert_eq!(
                 forward.tail_wash(&air, DVec3::ZERO, &power).unwrap(),
-                (DVec3::ZERO, DVec3::ZERO)
+                esp_sim::propeller::TailWash::default()
             );
         }
         if config.contains("[propeller]")
@@ -564,8 +564,8 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             let mut reversed = Pistons::from_data(&reversed_data).unwrap();
             reversed.start_running(&air, DVec3::ZERO).unwrap();
             let reverse_wake = reversed.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-            assert!((wake.0 - reverse_wake.0).length() < 1e-10);
-            assert!((wake.1 + reverse_wake.1).length() < 1e-10);
+            assert!((wake.horizontal - reverse_wake.horizontal).length() < 1e-10);
+            assert!((wake.swirl + reverse_wake.swirl).length() < 1e-10);
             let reversed_load = aero
                 .tail_wash_forces(
                     (DVec3::ZERO, reverse_wake),
@@ -579,6 +579,68 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             assert!(reversed_load.moment.z > 0.0);
             assert!((centered.moment.z + reversed_load.moment.z).abs() < 1e-8);
         }
+        let horizontal_only = esp_sim::propeller::TailWash {
+            horizontal: wake.horizontal,
+            ..Default::default()
+        };
+        let vertical_only = esp_sim::propeller::TailWash {
+            vertical: wake.vertical,
+            ..Default::default()
+        };
+        let rudder_only = Controls {
+            rudder: 1.0,
+            ..Default::default()
+        };
+        let elevator_only = Controls {
+            elevator: 1.0,
+            ..Default::default()
+        };
+        let no_rudder = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, horizontal_only),
+                DVec3::ZERO,
+                air.density,
+                rudder_only,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        let no_elevator = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, vertical_only),
+                DVec3::ZERO,
+                air.density,
+                elevator_only,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        assert_eq!(no_rudder.force, DVec3::ZERO);
+        assert_eq!(no_rudder.moment, DVec3::ZERO);
+        assert_eq!(no_elevator.force, DVec3::ZERO);
+        assert_eq!(no_elevator.moment, DVec3::ZERO);
+        let rudder_wash = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, vertical_only),
+                DVec3::ZERO,
+                air.density,
+                rudder_only,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        let elevator_wash = aero
+            .tail_wash_forces(
+                (DVec3::ZERO, horizontal_only),
+                DVec3::ZERO,
+                air.density,
+                elevator_only,
+                &flaps,
+                DVec3::ZERO,
+            )
+            .unwrap();
+        assert!(rudder_wash.moment.z.abs() > 0.0);
+        assert!(elevator_wash.moment.y.abs() > 0.0);
         let controls = Controls {
             rudder: 1.0,
             elevator: 0.5,

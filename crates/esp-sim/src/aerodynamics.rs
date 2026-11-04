@@ -460,23 +460,22 @@ impl Aerodynamics {
         Ok(Wrench { force, moment })
     }
 
-    /// Estimated tail loads from the axial wake and its rotating slipstream.
-    /// Without tail geometry, half the tail is assumed to lie in the wake.
+    /// Estimated control and directional loads from the propeller wake.
     pub fn tail_wash_forces(
         &self,
-        flow: (DVec3, (DVec3, DVec3)),
+        flow: (DVec3, crate::propeller::TailWash),
         angular_velocity: DVec3,
         density: f64,
         controls: Controls,
         flaps: &[f64],
         cg: DVec3,
     ) -> Result<Wrench> {
-        let (velocity, (wash, swirl)) = flow;
+        let (velocity, wash) = flow;
         ensure!(
-            wash.is_finite() && swirl.is_finite(),
+            wash.horizontal.is_finite() && wash.vertical.is_finite() && wash.swirl.is_finite(),
             "invalid propeller wash"
         );
-        if wash.length_squared() == 0.0 && swirl.length_squared() == 0.0 {
+        if wash == crate::propeller::TailWash::default() {
             return Ok(Wrench::default());
         }
         let mut neutral = controls;
@@ -484,50 +483,64 @@ impl Aerodynamics {
         neutral.elevator_trim = 0.0;
         neutral.rudder = 0.0;
         neutral.rudder_trim = 0.0;
-        let controls_at = |flow| -> Result<Wrench> {
-            let active = self.forces(flow, angular_velocity, density, controls, flaps, cg)?;
+        let increment = |flow, active| -> Result<Wrench> {
+            let active = self.forces(flow, angular_velocity, density, active, flaps, cg)?;
             let neutral = self.forces(flow, angular_velocity, density, neutral, flaps, cg)?;
             Ok(Wrench {
                 force: active.force - neutral.force,
                 moment: active.moment - neutral.moment,
             })
         };
-        let (unwound, washed) = if controls.elevator == 0.0
-            && controls.elevator_trim == 0.0
-            && controls.rudder == 0.0
-            && controls.rudder_trim == 0.0
-        {
-            (Wrench::default(), Wrench::default())
-        } else {
+        let mut added = Wrench::default();
+        for (enabled, flow, elevator) in [
             (
-                controls_at(velocity)?,
-                controls_at(velocity + wash + swirl)?,
-            )
-        };
-        // Approximate the vertical-tail response to wake rotation from the
-        // authored sideslip derivatives, excluding unrelated wing effects.
-        let axial = self.forces(
-            velocity + wash,
-            angular_velocity,
-            density,
-            neutral,
-            flaps,
-            cg,
-        )?;
-        let rotating = self.forces(
-            velocity + wash + swirl,
-            angular_velocity,
-            density,
-            neutral,
-            flaps,
-            cg,
-        )?;
-        let lateral = rotating.force.y - axial.force.y;
-        let yaw = rotating.moment.z - axial.moment.z;
-        Ok(Wrench {
-            force: ((washed.force - unwound.force) + DVec3::Y * lateral) * 0.5,
-            moment: ((washed.moment - unwound.moment) + DVec3::Z * yaw) * 0.5,
-        })
+                controls.elevator != 0.0 || controls.elevator_trim != 0.0,
+                wash.horizontal,
+                true,
+            ),
+            (
+                controls.rudder != 0.0 || controls.rudder_trim != 0.0,
+                wash.vertical + wash.swirl,
+                false,
+            ),
+        ] {
+            if !enabled || flow.length_squared() == 0.0 {
+                continue;
+            }
+            let mut active = neutral;
+            if elevator {
+                active.elevator = controls.elevator;
+                active.elevator_trim = controls.elevator_trim;
+            } else {
+                active.rudder = controls.rudder;
+                active.rudder_trim = controls.rudder_trim;
+            }
+            let base = increment(velocity, active)?;
+            let washed = increment(velocity + flow, active)?;
+            added.force += (washed.force - base.force) * 0.5;
+            added.moment += (washed.moment - base.moment) * 0.5;
+        }
+        if wash.swirl.length_squared() != 0.0 {
+            let axial = self.forces(
+                velocity + wash.vertical,
+                angular_velocity,
+                density,
+                neutral,
+                flaps,
+                cg,
+            )?;
+            let rotating = self.forces(
+                velocity + wash.vertical + wash.swirl,
+                angular_velocity,
+                density,
+                neutral,
+                flaps,
+                cg,
+            )?;
+            added.force.y += (rotating.force.y - axial.force.y) * 0.5;
+            added.moment.z += (rotating.moment.z - axial.moment.z) * 0.5;
+        }
+        Ok(added)
     }
     pub fn elevator_trim_limit(&self) -> f64 {
         self.elevator_trim_limit

@@ -651,7 +651,7 @@ impl Pistons {
         air: &Atmosphere,
         velocity: DVec3,
         power_fractions: &[f64],
-    ) -> Result<(DVec3, DVec3)> {
+    ) -> Result<propeller::TailWash> {
         ensure!(
             velocity.is_finite()
                 && air.density.is_finite()
@@ -664,8 +664,7 @@ impl Pistons {
         );
         let radius = self.propeller.radius();
         let area = PI * radius * radius;
-        let mut wash = DVec3::ZERO;
-        let mut swirl = DVec3::ZERO;
+        let mut wash = propeller::TailWash::default();
         for (index, engine) in self.engines.iter().enumerate() {
             if engine.horizontal_wake_overlap == 0.0 && engine.vertical_wake_overlap == 0.0 {
                 continue;
@@ -676,8 +675,8 @@ impl Pistons {
             let wake_speed = (axial_speed * axial_speed + 2.0 * thrust / (air.density * area))
                 .sqrt()
                 - axial_speed;
-            let overlap = (engine.horizontal_wake_overlap + engine.vertical_wake_overlap) * 0.5;
-            wash += engine.direction * (wake_speed * overlap);
+            wash.horizontal += engine.direction * (wake_speed * engine.horizontal_wake_overlap);
+            wash.vertical += engine.direction * (wake_speed * engine.vertical_wake_overlap);
             // Wake swirl follows angular-momentum flux. The representative
             // half-radius and attenuation approximate the upper vertical tail.
             let mass_flow = air.density * area * (axial_speed + wake_speed * 0.5);
@@ -688,15 +687,15 @@ impl Pistons {
                 let tangential = (torque / (mass_flow * radius * 0.5))
                     .min((axial_speed + wake_speed) * 0.5)
                     * 0.05;
-                swirl += engine.direction.cross(DVec3::Z)
+                wash.swirl += engine.direction.cross(DVec3::Z)
                     * (engine.rotation * tangential * engine.vertical_wake_overlap);
             }
         }
         ensure!(
-            wash.is_finite() && swirl.is_finite(),
+            wash.horizontal.is_finite() && wash.vertical.is_finite() && wash.swirl.is_finite(),
             "invalid propeller wake"
         );
-        Ok((wash, swirl))
+        Ok(wash)
     }
     pub fn wrench(
         &self,

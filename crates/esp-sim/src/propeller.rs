@@ -1,10 +1,18 @@
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
 use esp_formats::air;
+use glam::DVec3;
 use std::f64::consts::{PI, TAU};
 
 use crate::{atmosphere::Atmosphere, lookup::Grid};
 
+/// Approximate flow increments reaching each tail surface, in body axes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TailWash {
+    pub horizontal: DVec3,
+    pub vertical: DVec3,
+    pub swirl: DVec3,
+}
 pub struct Propeller {
     efficiency: Grid,
     power: Grid,
