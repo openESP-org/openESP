@@ -78,6 +78,32 @@ impl SpeedLimits {
         let atmosphere = Atmosphere::standard(-state.position.z)?;
         let air_velocity = state.air_velocity(DVec3::ZERO);
         let speed = air_velocity.length();
+        let sea_level = Atmosphere::standard(0.0)?;
+        variables.set_number(
+            "DYNAMIC PRESSURE",
+            "pascals",
+            0.5 * atmosphere.density * speed * speed,
+        );
+        variables.set_number(
+            "SIGMA SQRT",
+            "number",
+            (atmosphere.density / sea_level.density).sqrt(),
+        );
+        variables.set_number(
+            "TOTAL VELOCITY",
+            "meters per second",
+            state.velocity.length(),
+        );
+        variables.set_number(
+            "PRESSURE ALTITUDE",
+            "meters",
+            Atmosphere::indicated_altitude(atmosphere.pressure, 101_325.0)?,
+        );
+        variables.set_number(
+            "ANGLE OF ATTACK INDICATOR",
+            "radians",
+            air_velocity.z.atan2(air_velocity.x),
+        );
         variables.set_number(
             "STALL HORN AVAILABLE",
             "bool",
@@ -215,6 +241,49 @@ mod tests {
         state.velocity = velocity(1.0, 13.0);
         limits.publish(&state, &mut variables).unwrap();
         assert_eq!(read(&mut variables), 0.0);
+    }
+
+    #[test]
+    fn air_data_instruments_follow_velocity_and_atmosphere() {
+        let limits = SpeedLimits::from_config(&Config::parse("").unwrap()).unwrap();
+        let mut variables = Variables::default();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -3000.0),
+            velocity: DVec3::new(90.0, 0.0, 10.0),
+            ..State::default()
+        };
+        limits.publish(&state, &mut variables).unwrap();
+        let read = |vars: &mut Variables, name, unit| {
+            vars.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let atmosphere = Atmosphere::standard(3000.0).unwrap();
+        assert!(
+            (read(&mut variables, "DYNAMIC PRESSURE", "pascals")
+                - 0.5 * atmosphere.density * 8200.0)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (read(&mut variables, "TOTAL VELOCITY", "feet per second")
+                - 8200.0_f64.sqrt() / 0.3048)
+                .abs()
+                < 1e-9
+        );
+        assert!((read(&mut variables, "PRESSURE ALTITUDE", "meters") - 3000.0).abs() < 1e-8);
+        assert!(
+            (read(&mut variables, "ANGLE OF ATTACK INDICATOR", "degrees")
+                - 10.0_f64.atan2(90.0).to_degrees())
+            .abs()
+                < 1e-10
+        );
+        let high_density_ratio = read(&mut variables, "SIGMA SQRT", "number");
+        state.position.z = 0.0;
+        limits.publish(&state, &mut variables).unwrap();
+        assert!(high_density_ratio < 1.0);
+        assert_eq!(read(&mut variables, "SIGMA SQRT", "number"), 1.0);
     }
 
     #[test]
