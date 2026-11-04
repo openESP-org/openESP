@@ -182,9 +182,11 @@ fn publish_receiver(
     .clamp(0.0, 1.0);
     let ground_distance = 2.0 * EARTH_RADIUS * haversine.sqrt().atan2((1.0 - haversine).sqrt());
     let distance = ground_distance.hypot(altitude);
-    let mut signal = (tuned - station_frequency).abs() < 0.0005
-        && ground_distance <= range * 1852.0
-        && ground_distance > 1.0;
+    // Model every configured station as collocated with a DME transponder.
+    // DME range does not depend on directional localizer or VOR reception.
+    let dme_signal =
+        (tuned - station_frequency).abs() < 0.0005 && ground_distance <= range * 1852.0;
+    let mut signal = dme_signal && ground_distance > 1.0;
     let mut radial = 0.0;
     let mut error = 0.0;
     let mut needle = 0.0;
@@ -246,7 +248,7 @@ fn publish_receiver(
         }
     }
     variables.set_number(&key("NAV HAS NAV"), "bool", f64::from(signal));
-    variables.set_number(&key("NAV HAS DME"), "bool", f64::from(signal));
+    variables.set_number(&key("NAV HAS DME"), "bool", f64::from(dme_signal));
     variables.set_number(
         &key("NAV HAS LOCALIZER"),
         "bool",
@@ -274,7 +276,7 @@ fn publish_receiver(
     variables.set_number(
         &key("NAV DME"),
         "meters",
-        if signal { distance } else { 0.0 },
+        if dme_signal { distance } else { 0.0 },
     );
     variables.set_number(&key("NAV SIGNAL"), "number", if signal { 1.0 } else { 0.0 });
     variables.set_number(&key("NAV TOFROM"), "enum", flag);
@@ -451,6 +453,43 @@ mod tests {
         assert_eq!(read(&mut variables, "HSI GSI NEEDLE VALID", "bool"), 0.0);
         assert!(validate_ils(0.0, 3.0, 110.0).is_err());
         assert!(validate_ils(0.0, 0.0, 110.3).is_err());
+    }
+
+    #[test]
+    fn dme_remains_available_overhead_and_outside_localizer_sector() {
+        let mut variables = Variables::default();
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        variables.set_number("VOR STATION LOCALIZER", "bool", 1.0);
+        variables.set_number("VOR STATION FREQUENCY", "megahertz", 110.3);
+        variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 110.3);
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let mut state = State {
+            position: DVec3::new(-10_000.0, 10_000.0, -500.0),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:1", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV HAS DME:1", "bool"), 1.0);
+        let distance = read(&mut variables, "NAV DME:1", "meters");
+        assert!((distance - (10_000.0_f64.hypot(10_000.0)).hypot(500.0)).abs() < 1.0);
+        assert_eq!(read(&mut variables, "HSI DISTANCE", "meters"), distance);
+        state.position = DVec3::new(0.0, 0.0, -1000.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS NAV:1", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV HAS DME:1", "bool"), 1.0);
+        assert!((read(&mut variables, "NAV DME:1", "meters") - 1000.0).abs() < 1e-6);
+        variables
+            .dispatch_event("NAV1_RADIO_SET_HZ", Value::Number(114_000_000.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV HAS DME:1", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV DME:1", "meters"), 0.0);
+        assert_eq!(read(&mut variables, "HSI DISTANCE", "meters"), 0.0);
     }
 
     #[test]

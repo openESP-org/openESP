@@ -349,7 +349,7 @@ fn publish_hsi(variables: &mut Variables) -> Result<()> {
         } else {
             0.0
         };
-        let distance = if nav_valid {
+        let distance = if read(variables, "NAV HAS DME:1", "bool")? != 0.0 {
             read(variables, "NAV DME:1", "meters")?
         } else {
             0.0
