@@ -289,3 +289,67 @@ fn original_piston_oil_indications_follow_engine_state() {
     }
     assert!(verified > 0);
 }
+
+#[test]
+#[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
+fn original_piston_reaction_torque_follows_rotation_and_tuning() {
+    use glam::DVec3;
+    let air = Atmosphere::standard(0.0).unwrap();
+    let mut verified = 0;
+    for path in content::aircraft_paths() {
+        let mut data = FlightData::load(&path, 0).unwrap();
+        if data
+            .configuration
+            .number("GeneralEngineData", "engine_type")
+            .unwrap()
+            != Some(0.0)
+            || data
+                .configuration
+                .number("propeller", "propeller_type")
+                .unwrap()
+                != Some(1.0)
+        {
+            continue;
+        }
+        let config = String::from_utf8(std::fs::read(path.join("aircraft.cfg")).unwrap()).unwrap();
+        if !config.contains("[propeller]")
+            || !config.contains("[flight_tuning]")
+            || data
+                .configuration
+                .value("propeller", "rotation")
+                .unwrap()
+                .is_some()
+            || data
+                .configuration
+                .value("flight_tuning", "torque_on_roll")
+                .unwrap()
+                .is_some()
+        {
+            continue;
+        }
+        let mut moments = Vec::new();
+        for (rotation, scale) in [(1, 1), (-1, 1), (1, 0)] {
+            let config = config
+                .replace("[propeller]", &format!("[propeller]\nrotation={rotation}"))
+                .replace(
+                    "[flight_tuning]",
+                    &format!("[flight_tuning]\ntorque_on_roll={scale}"),
+                );
+            data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
+            let mut engine = Pistons::from_data(&data).unwrap();
+            engine.start_running(&air, DVec3::ZERO).unwrap();
+            let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
+            let wrench = engine
+                .wrench(&air, DVec3::ZERO, DVec3::ZERO, &power)
+                .unwrap();
+            moments.push(wrench.moment);
+        }
+        let clockwise = moments[0] - moments[2];
+        let counterclockwise = moments[1] - moments[2];
+        assert!(clockwise.x < 0.0);
+        assert!(counterclockwise.x > 0.0);
+        assert!((clockwise + counterclockwise).length() < 1e-8);
+        verified += 1;
+    }
+    assert!(verified > 0);
+}

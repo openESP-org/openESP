@@ -14,7 +14,7 @@ use crate::{
 
 /// Naturally aspirated four-stroke engines with fixed-pitch propellers.
 /// Oil temperature and pressure use an approximate thermal model; oil
-/// viscosity and propeller gyroscopic/reaction loads are not connected yet.
+/// viscosity and propeller gyroscopic loads are not connected yet.
 pub struct Pistons {
     cycle: PistonCycle,
     propeller: Propeller,
@@ -26,6 +26,7 @@ pub struct Pistons {
     automatic_ignition: bool,
     starter_torque: f64,
     rated_power: f64,
+    torque_on_roll: f64,
     engines: Vec<Engine>,
 }
 
@@ -38,6 +39,7 @@ struct Engine {
     command: Command,
     fuel_available: bool,
     oil_temperature: Option<f64>,
+    rotation: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,6 +189,29 @@ impl Pistons {
             manifold.0.iter().all(|p| (0.0..=1.0).contains(&p.output)),
             "naturally aspirated manifold efficiency is outside 0..1"
         );
+        let rotations = config
+            .value("propeller", "rotation")?
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|v| v.trim().parse::<f64>())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            rotations
+                .iter()
+                .all(|&direction| direction == 1.0 || direction == -1.0),
+            "invalid propeller rotation direction"
+        );
+        let torque_on_roll = config
+            .number("flight_tuning", "torque_on_roll")?
+            .unwrap_or(1.0);
+        ensure!(
+            torque_on_roll.is_finite() && torque_on_roll >= 0.0,
+            "invalid torque_on_roll scalar"
+        );
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
@@ -212,6 +237,10 @@ impl Pistons {
                     command: Command::default(),
                     fuel_available: false,
                     oil_temperature: None,
+                    rotation: rotations
+                        .get(definition.index as usize)
+                        .copied()
+                        .unwrap_or(1.0),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -282,6 +311,7 @@ impl Pistons {
                 != 0.0,
             starter_torque,
             rated_power,
+            torque_on_roll,
             engines,
         })
     }
@@ -526,6 +556,30 @@ impl Pistons {
             let force = engine.direction * thrust;
             wrench.force += force;
             wrench.moment += (engine.position - cg).cross(force);
+            // The rotor inertia is reflected through the reduction gearbox. Its
+            // casing reaction includes the starter and changes sign when the
+            // rotating engine is driven by a windmilling propeller.
+            let starter = if engine.command.starter {
+                self.starter_torque
+                    * (1.0 - output.rpm / (self.cycle.maximum_rpm * 0.15)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let engine_torque = if output.cycle.shaft_torque > 0.0 {
+                output.cycle.shaft_torque * power_fractions[index]
+            } else {
+                output.cycle.shaft_torque
+            };
+            let shaft_torque = if output.rpm == 0.0 {
+                (engine_torque + starter).max(0.0)
+            } else {
+                engine_torque + starter
+            };
+            wrench.moment -= engine.direction
+                * (engine.rotation
+                    * shaft_torque
+                    * self.propeller.gear_reduction_ratio()
+                    * self.torque_on_roll);
         }
         Ok(wrench)
     }
