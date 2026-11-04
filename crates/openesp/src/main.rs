@@ -858,7 +858,7 @@ fn main() -> Result<()> {
                     } else if let Err(error) = flight.prepare_engines(&data) {
                         eprintln!("cold engine unavailable: {error:#}");
                     }
-                    let limits = SpeedLimits::from_config(&data.configuration)?;
+                    let limits = SpeedLimits::from_data(&data)?;
                     Ok::<_,anyhow::Error>((flight, limits))
                 }).transpose()?;
                 if flight.is_some() {

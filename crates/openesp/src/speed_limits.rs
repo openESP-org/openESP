@@ -1,5 +1,9 @@
 use anyhow::{Result, ensure};
-use esp_formats::cfg::Config;
+use esp_formats::{
+    air::{self, table::Table},
+    cfg::Config,
+};
+use esp_script::{Host, Reference};
 use esp_sim::{atmosphere::Atmosphere, flight::State, variables::Variables};
 use glam::DVec3;
 
@@ -9,6 +13,8 @@ pub struct SpeedLimits {
     cruise: Option<f64>,
     maximum_ias: Option<f64>,
     maximum_mach: Option<f64>,
+    stall_alpha: Option<f64>,
+    stall_warning_type: u8,
 }
 
 impl SpeedLimits {
@@ -21,13 +27,41 @@ impl SpeedLimits {
             );
             Ok(value.filter(|v| *v > 0.0))
         };
+        let warning = config.number("stall_warning", "type")?.unwrap_or(0.0);
+        ensure!(
+            warning.fract() == 0.0 && (0.0..=2.0).contains(&warning),
+            "invalid stall warning type"
+        );
         Ok(Self {
             stall_clean: get("flaps_up_stall_speed")?,
             stall_landing: get("full_flaps_stall_speed")?,
             cruise: get("cruise_speed")?,
             maximum_ias: get("max_indicated_speed")?,
             maximum_mach: get("max_mach")?,
+            stall_alpha: None,
+            stall_warning_type: warning as u8,
         })
+    }
+
+    pub fn from_data(data: &esp_assets::flight::FlightData) -> Result<Self> {
+        let mut limits = Self::from_config(&data.configuration)?;
+        let records = air::parse(&data.air)?;
+        if let Some(record) = records.iter().find(|record| record.id == 0x404)
+            && let Some(Table::Curve(curve)) = record.table()?
+        {
+            limits.stall_alpha = curve
+                .points
+                .iter()
+                .filter(|point| {
+                    point.input.is_finite()
+                        && point.output.is_finite()
+                        && (0.0..=std::f64::consts::FRAC_PI_4).contains(&point.input)
+                })
+                .max_by(|a, b| a.output.total_cmp(&b.output))
+                .map(|point| point.input)
+                .filter(|alpha| *alpha > 3.0_f64.to_radians());
+        }
+        Ok(limits)
     }
 
     pub fn publish(&self, state: &State, variables: &mut Variables) -> Result<()> {
@@ -42,7 +76,34 @@ impl SpeedLimits {
             }
         }
         let atmosphere = Atmosphere::standard(-state.position.z)?;
-        let speed = state.air_velocity(DVec3::ZERO).length();
+        let air_velocity = state.air_velocity(DVec3::ZERO);
+        let speed = air_velocity.length();
+        variables.set_number(
+            "STALL HORN AVAILABLE",
+            "bool",
+            f64::from(self.stall_warning_type != 0),
+        );
+        if let Some(stall_alpha) = self.stall_alpha {
+            variables.set_number("STALL ALPHA", "radians", stall_alpha);
+            let powered = self.stall_warning_type != 2
+                || variables
+                    .read(&Reference::new(
+                        'A',
+                        "CIRCUIT GENERAL PANEL ON",
+                        Some("bool"),
+                    ))
+                    .ok()
+                    .and_then(|v| v.number().ok())
+                    .is_some_and(|value| value != 0.0);
+            let approaching_stall = speed > 10.0 * 1852.0 / 3600.0
+                && air_velocity.x > 0.0
+                && air_velocity.z.atan2(air_velocity.x) >= stall_alpha - 3.0_f64.to_radians();
+            variables.set_number(
+                "STALL WARNING",
+                "bool",
+                f64::from(self.stall_warning_type != 0 && powered && approaching_stall),
+            );
+        }
         let indicated = atmosphere.calibrated_airspeed(speed)?;
         if let Some(mach) = self.maximum_mach {
             variables.set_number("MACH MAX OPERATE", "mach", mach);
@@ -79,9 +140,25 @@ mod tests {
         assert!(!paths.is_empty());
         for path in paths {
             let data = esp_assets::flight::FlightData::load(&path, 0).unwrap();
-            let limits = SpeedLimits::from_config(&data.configuration).unwrap();
+            let limits = SpeedLimits::from_data(&data).unwrap();
             let mut variables = Variables::default();
             limits.publish(&State::default(), &mut variables).unwrap();
+            let critical = limits.stall_alpha.expect("missing positive lift peak");
+            assert!((0.1..0.6).contains(&critical));
+            variables.set_number("CIRCUIT GENERAL PANEL ON", "bool", 1.0);
+            let state = State {
+                velocity: DVec3::new(100.0 * critical.cos(), 0.0, 100.0 * critical.sin()),
+                ..State::default()
+            };
+            limits.publish(&state, &mut variables).unwrap();
+            assert_eq!(
+                variables
+                    .read(&Reference::new('A', "STALL WARNING", Some("bool")))
+                    .unwrap()
+                    .number()
+                    .unwrap(),
+                1.0
+            );
             for (name, key) in [
                 ("DESIGN SPEED VS0", "full_flaps_stall_speed"),
                 ("DESIGN SPEED VS1", "flaps_up_stall_speed"),
@@ -103,6 +180,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stall_warning_uses_angle_of_attack_and_electrical_power() {
+        let config = Config::parse("[stall_warning]\ntype=2").unwrap();
+        let mut limits = SpeedLimits::from_config(&config).unwrap();
+        limits.stall_alpha = Some(15.0_f64.to_radians());
+        let mut variables = Variables::default();
+        let read = |vars: &mut Variables| {
+            vars.read(&Reference::new('A', "STALL WARNING", Some("bool")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let velocity = |speed: f64, degrees: f64| {
+            let angle = degrees.to_radians();
+            DVec3::new(speed * angle.cos(), 0.0, speed * angle.sin())
+        };
+        let mut state = State {
+            velocity: velocity(100.0, 11.0),
+            ..State::default()
+        };
+        variables.set_number("CIRCUIT GENERAL PANEL ON", "bool", 1.0);
+        limits.publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables), 0.0);
+        state.velocity = velocity(100.0, 13.0);
+        limits.publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables), 1.0);
+        variables.set_number("CIRCUIT GENERAL PANEL ON", "bool", 0.0);
+        limits.publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables), 0.0);
+        variables.set_number("CIRCUIT GENERAL PANEL ON", "bool", 1.0);
+        state.velocity = velocity(1.0, 13.0);
+        limits.publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables), 0.0);
     }
 
     #[test]
