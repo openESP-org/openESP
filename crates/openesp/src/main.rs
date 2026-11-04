@@ -25,7 +25,9 @@ use winit::{
 };
 
 mod flight;
+mod speed_limits;
 use flight::Flight;
+use speed_limits::SpeedLimits;
 
 #[derive(Parser)]
 struct Arguments {
@@ -136,13 +138,16 @@ fn parse_variable(text: &str) -> Result<Variable, String> {
     })
 }
 
+type LoadedAircraft = (Aircraft, Option<(Flight, SpeedLimits)>);
+
 struct App {
     arguments: Arguments,
-    loaded: mpsc::Receiver<Result<(Aircraft, Option<Flight>)>>,
+    loaded: mpsc::Receiver<Result<LoadedAircraft>>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     aircraft: Option<Aircraft>,
     flight: Option<Flight>,
+    speed_limits: Option<SpeedLimits>,
     exterior_state: Option<ModelState>,
     interior_state: Option<ModelState>,
     variables: Variables,
@@ -370,7 +375,10 @@ impl App {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
                     let (mut aircraft, flight) = aircraft?;
-                    self.flight = flight;
+                    if let Some((flight, limits)) = flight {
+                        self.flight = Some(flight);
+                        self.speed_limits = Some(limits);
+                    }
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
                     self.renderer = Some(pollster::block_on(Renderer::new(
@@ -393,6 +401,9 @@ impl App {
                         Flight::configure_ground(&mut self.variables);
                         flight.configure_controls(&mut self.variables)?;
                         Flight::publish(&flight.current, &mut self.variables)?;
+                        if let Some(limits) = &self.speed_limits {
+                            limits.publish(&flight.current, &mut self.variables)?;
+                        }
                         flight.publish_loading(&mut self.variables);
                         flight.configure_engines(&mut self.variables)?;
                     }
@@ -484,6 +495,9 @@ impl App {
         );
         if let Some(flight) = &self.flight {
             Flight::publish(&flight.current, &mut self.variables)?;
+            if let Some(limits) = &self.speed_limits {
+                limits.publish(&flight.current, &mut self.variables)?;
+            }
         }
         self.apply_variable_overrides();
         self.variables.interpolate(1.0)?;
@@ -500,6 +514,9 @@ impl App {
                 self.variables.update_electrical()?;
                 flight.advance(STEP, &mut self.variables)?;
                 Flight::publish(&flight.current, &mut self.variables)?;
+                if let Some(limits) = &self.speed_limits {
+                    limits.publish(&flight.current, &mut self.variables)?;
+                }
             } else {
                 self.variables.advance(STEP)?;
             }
@@ -508,7 +525,11 @@ impl App {
         self.variables.update_electrical()?;
         self.variables.interpolate(frame.alpha)?;
         if let Some(flight) = &self.flight {
-            Flight::publish(&flight.sample(frame.alpha)?, &mut self.variables)?;
+            let state = flight.sample(frame.alpha)?;
+            Flight::publish(&state, &mut self.variables)?;
+            if let Some(limits) = &self.speed_limits {
+                limits.publish(&state, &mut self.variables)?;
+            }
         }
         self.apply_variable_overrides();
         self.update_flight_pose(frame.alpha)?;
@@ -837,7 +858,8 @@ fn main() -> Result<()> {
                     } else if let Err(error) = flight.prepare_engines(&data) {
                         eprintln!("cold engine unavailable: {error:#}");
                     }
-                    Ok::<_,anyhow::Error>(flight)
+                    let limits = SpeedLimits::from_config(&data.configuration)?;
+                    Ok::<_,anyhow::Error>((flight, limits))
                 }).transpose()?;
                 if flight.is_some() {
                     eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder and steering, B brakes, F1-F4 throttle");
@@ -860,6 +882,7 @@ fn main() -> Result<()> {
         renderer: None,
         aircraft: None,
         flight: None,
+        speed_limits: None,
         exterior_state: None,
         interior_state: None,
         variables,
@@ -953,6 +976,7 @@ mod tests {
                 texture_directories: vec![],
             }),
             flight: None,
+            speed_limits: None,
             exterior_state: None,
             interior_state: None,
             variables,
