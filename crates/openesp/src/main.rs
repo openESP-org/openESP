@@ -25,6 +25,7 @@ use winit::{
 };
 
 mod flight;
+mod navigation;
 mod speed_limits;
 mod weather;
 use flight::Flight;
