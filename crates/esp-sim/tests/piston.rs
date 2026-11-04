@@ -515,6 +515,40 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             .unwrap();
         assert!(centered.moment.z < 0.0);
         let config = String::from_utf8(std::fs::read(path.join("aircraft.cfg")).unwrap()).unwrap();
+        if data
+            .configuration
+            .value("airplane_geometry", "htail_pos_lon")
+            .unwrap()
+            .is_some()
+            && data
+                .configuration
+                .value("airplane_geometry", "vtail_pos_lon")
+                .unwrap()
+                .is_some()
+        {
+            let modified = config
+                .lines()
+                .map(|line| {
+                    let key = line.split('=').next().unwrap_or("").trim();
+                    if key.eq_ignore_ascii_case("htail_pos_lon")
+                        || key.eq_ignore_ascii_case("vtail_pos_lon")
+                    {
+                        format!("{key}=100")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut forward_data = FlightData::load(&path, 0).unwrap();
+            forward_data.configuration = esp_formats::cfg::Config::parse(&modified).unwrap();
+            let mut forward = Pistons::from_data(&forward_data).unwrap();
+            forward.start_running(&air, DVec3::ZERO).unwrap();
+            assert_eq!(
+                forward.tail_wash(&air, DVec3::ZERO, &power).unwrap(),
+                (DVec3::ZERO, DVec3::ZERO)
+            );
+        }
         if config.contains("[propeller]")
             && data
                 .configuration

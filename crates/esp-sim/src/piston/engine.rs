@@ -43,6 +43,8 @@ struct Engine {
     fuel_available: bool,
     oil_temperature: Option<f64>,
     rotation: f64,
+    horizontal_wake_overlap: f64,
+    vertical_wake_overlap: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,6 +116,60 @@ fn asymmetric_thrust_moment(
     let displacement = (-axis.cross(crossflow) * (rotation * radius * 0.5 / tip_speed))
         .clamp_length_max(radius * 0.25);
     displacement.cross(axis * thrust)
+}
+#[derive(Clone, Copy)]
+struct TailSurface {
+    root: DVec3,
+    span: f64,
+    vertical: bool,
+}
+
+// Integrate uniformly along a simple spanwise tail line. The wake is a
+// cylindrical approximation aligned behind the thrust axis.
+fn tail_overlap(surface: TailSurface, origin: DVec3, axis: DVec3, radius: f64) -> f64 {
+    if surface.span == 0.0 {
+        return 0.0;
+    }
+    let samples = 32;
+    let mut hits = 0;
+    for i in 0..samples {
+        let fraction = (f64::from(i) + 0.5) / f64::from(samples);
+        let point = if surface.vertical {
+            surface.root - DVec3::Z * (surface.span * fraction)
+        } else {
+            surface.root + DVec3::Y * (surface.span * (fraction - 0.5))
+        };
+        let delta = point - origin;
+        let longitudinal = delta.dot(axis);
+        let radial = delta - axis * longitudinal;
+        if longitudinal < 0.0 && radial.length_squared() < radius * radius {
+            hits += 1;
+        }
+    }
+    f64::from(hits) / f64::from(samples)
+}
+
+fn tail_surface(
+    config: &cfg::Config,
+    datum: [f64; 3],
+    vertical: bool,
+) -> Result<Option<TailSurface>> {
+    let prefix = if vertical { "vtail" } else { "htail" };
+    let span = config.number("airplane_geometry", &format!("{prefix}_span"))?;
+    let longitudinal = config.number("airplane_geometry", &format!("{prefix}_pos_lon"))?;
+    let height = config.number("airplane_geometry", &format!("{prefix}_pos_vert"))?;
+    let (Some(span), Some(longitudinal), Some(height)) = (span, longitudinal, height) else {
+        return Ok(None);
+    };
+    ensure!(
+        span.is_finite() && span >= 0.0 && longitudinal.is_finite() && height.is_finite(),
+        "invalid tail geometry"
+    );
+    Ok(Some(TailSurface {
+        root: DVec3::new(datum[0] + longitudinal, datum[1], -datum[2] - height) * 0.3048,
+        span: span * 0.3048,
+        vertical,
+    }))
 }
 fn oil_pressure(rpm: f64, rated_rpm: f64, temperature_c: f64) -> f64 {
     let viscosity = (-(temperature_c - 80.0) * 0.006).exp().clamp(0.65, 1.6);
@@ -256,28 +312,42 @@ impl Pistons {
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
+        let propeller = Propeller::from_data(data)?;
+        let horizontal_tail = tail_surface(config, datum, false)?;
+        let vertical_tail = tail_surface(config, datum, true)?;
         let engines = cfg::engine::engines(config)?
             .into_iter()
             .map(|definition| -> Result<Engine> {
                 let [x, y, z] = definition.position_feet;
                 let pitch = definition.pitch_degrees.to_radians();
                 let heading = definition.heading_degrees.to_radians();
+                let position = DVec3::new(x + datum[0], y + datum[1], -z - datum[2]) * 0.3048;
+                let direction = DVec3::new(
+                    pitch.cos() * heading.cos(),
+                    pitch.cos() * heading.sin(),
+                    pitch.sin(),
+                );
+                let fallback = (1.0 - (position.y.abs() / propeller.radius()).powi(2)).max(0.0);
+                let horizontal_wake_overlap = horizontal_tail.map_or(fallback, |tail| {
+                    tail_overlap(tail, position, direction, propeller.radius())
+                });
+                let vertical_wake_overlap = vertical_tail.map_or(fallback, |tail| {
+                    tail_overlap(tail, position, direction, propeller.radius())
+                });
                 Ok(Engine {
                     index: definition
                         .index
                         .checked_add(1)
                         .context("engine index is too large")?,
-                    position: DVec3::new(x + datum[0], y + datum[1], -z - datum[2]) * 0.3048,
-                    direction: DVec3::new(
-                        pitch.cos() * heading.cos(),
-                        pitch.cos() * heading.sin(),
-                        pitch.sin(),
-                    ),
+                    position,
+                    direction,
                     rpm: 0.0,
                     angle: 0.0,
                     command: Command::default(),
                     fuel_available: false,
                     oil_temperature: None,
+                    horizontal_wake_overlap,
+                    vertical_wake_overlap,
                     rotation: rotations
                         .get(definition.index as usize)
                         .copied()
@@ -301,7 +371,7 @@ impl Pistons {
         let starter_torque = starter_scalar * rated_power / (cycle.maximum_rpm * PI / 30.0);
         Ok(Self {
             cycle,
-            propeller: Propeller::from_data(data)?,
+            propeller,
             manifold,
             mixture: curve(
                 config,
@@ -575,7 +645,7 @@ impl Pistons {
     }
 
     /// Approximate axial wake and upper-tail swirl using actuator-disk
-    /// momentum theory. Only disks overlapping the centerline contribute.
+    /// momentum theory and approximate tail geometry.
     pub fn tail_wash(
         &self,
         air: &Atmosphere,
@@ -597,7 +667,7 @@ impl Pistons {
         let mut wash = DVec3::ZERO;
         let mut swirl = DVec3::ZERO;
         for (index, engine) in self.engines.iter().enumerate() {
-            if engine.position.y.abs() >= radius {
+            if engine.horizontal_wake_overlap == 0.0 && engine.vertical_wake_overlap == 0.0 {
                 continue;
             }
             let output = self.output(index, air, velocity)?;
@@ -606,7 +676,7 @@ impl Pistons {
             let wake_speed = (axial_speed * axial_speed + 2.0 * thrust / (air.density * area))
                 .sqrt()
                 - axial_speed;
-            let overlap = 1.0 - (engine.position.y.abs() / radius).powi(2);
+            let overlap = (engine.horizontal_wake_overlap + engine.vertical_wake_overlap) * 0.5;
             wash += engine.direction * (wake_speed * overlap);
             // Wake swirl follows angular-momentum flux. The representative
             // half-radius and attenuation approximate the upper vertical tail.
@@ -618,8 +688,8 @@ impl Pistons {
                 let tangential = (torque / (mass_flow * radius * 0.5))
                     .min((axial_speed + wake_speed) * 0.5)
                     * 0.05;
-                swirl +=
-                    engine.direction.cross(DVec3::Z) * (engine.rotation * tangential * overlap);
+                swirl += engine.direction.cross(DVec3::Z)
+                    * (engine.rotation * tangential * engine.vertical_wake_overlap);
             }
         }
         ensure!(
@@ -764,5 +834,36 @@ mod asymmetry_tests {
             asymmetric_thrust_moment(axis, pitched * 1e6, 1.0, 1.0, 1.0, 1000.0).length()
                 <= 250.0 + 1e-9
         );
+    }
+}
+
+#[cfg(test)]
+mod wake_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn tail_coverage_accounts_for_span_offset_height_and_engine_direction() {
+        let tail = TailSurface {
+            root: DVec3::new(-5.0, 0.0, 0.0),
+            span: 4.0,
+            vertical: false,
+        };
+        let centered = tail_overlap(tail, DVec3::ZERO, DVec3::X, 1.0);
+        assert_eq!(centered, 0.5);
+        assert_eq!(
+            tail_overlap(tail, DVec3::new(-10.0, 0.0, 0.0), DVec3::X, 1.0),
+            0.0
+        );
+        assert_eq!(
+            tail_overlap(tail, DVec3::new(0.0, 0.0, 2.0), DVec3::X, 1.0),
+            0.0
+        );
+        assert!(tail_overlap(tail, DVec3::new(0.0, 1.5, 0.0), DVec3::X, 1.0) > 0.0);
+        let vertical = TailSurface {
+            root: DVec3::new(-5.0, 0.0, 0.0),
+            span: 2.0,
+            vertical: true,
+        };
+        assert_eq!(tail_overlap(vertical, DVec3::ZERO, DVec3::X, 1.0), 0.5);
     }
 }
