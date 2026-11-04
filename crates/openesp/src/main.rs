@@ -27,6 +27,7 @@ use winit::{
 mod flight;
 mod navigation;
 mod speed_limits;
+mod vor;
 mod weather;
 use flight::Flight;
 use speed_limits::SpeedLimits;
@@ -93,6 +94,28 @@ struct Arguments {
         help = "Direct-to destination longitude in degrees"
     )]
     destination_longitude: Option<f64>,
+    #[arg(
+        long,
+        requires = "vor_longitude",
+        allow_negative_numbers = true,
+        help = "Local VOR station latitude in degrees"
+    )]
+    vor_latitude: Option<f64>,
+    #[arg(
+        long,
+        requires = "vor_latitude",
+        allow_negative_numbers = true,
+        help = "Local VOR station longitude in degrees"
+    )]
+    vor_longitude: Option<f64>,
+    #[arg(long, default_value_t = 113.0, help = "Local VOR frequency in MHz")]
+    vor_frequency: f64,
+    #[arg(
+        long,
+        default_value_t = 40.0,
+        help = "Local VOR reception range in nautical miles"
+    )]
+    vor_range: f64,
     #[arg(
         long,
         default_value_t = 0.0,
@@ -919,6 +942,14 @@ fn main() -> Result<()> {
     let fuel_fraction = arguments.fuel_percent / 100.0;
     let payload = arguments.payload;
     navigation::Origin::new(arguments.latitude, arguments.longitude)?;
+    if let (Some(latitude), Some(longitude)) = (arguments.vor_latitude, arguments.vor_longitude) {
+        vor::validate(
+            latitude,
+            longitude,
+            arguments.vor_frequency,
+            arguments.vor_range,
+        )?;
+    }
     if let (Some(latitude), Some(longitude)) = (
         arguments.destination_latitude,
         arguments.destination_longitude,
@@ -970,6 +1001,22 @@ fn main() -> Result<()> {
         variables.set_number("GPS DRIVES NAV1", "bool", 1.0);
     }
     variables.set_number("MAGVAR", "degrees", -arguments.magnetic_declination);
+    if let (Some(latitude), Some(longitude)) = (arguments.vor_latitude, arguments.vor_longitude) {
+        variables.set_number("VOR STATION ACTIVE", "bool", 1.0);
+        variables.set_number("VOR STATION LATITUDE", "degrees", latitude);
+        variables.set_number("VOR STATION LONGITUDE", "degrees", longitude);
+        variables.set_number(
+            "VOR STATION FREQUENCY",
+            "megahertz",
+            arguments.vor_frequency,
+        );
+        variables.set_number("VOR STATION RANGE", "nautical miles", arguments.vor_range);
+        variables.set_number(
+            "NAV ACTIVE FREQUENCY:1",
+            "megahertz",
+            arguments.vor_frequency,
+        );
+    }
     variables.set_number(
         "AMBIENT WIND DIRECTION",
         "degrees",

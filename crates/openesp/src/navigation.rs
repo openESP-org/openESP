@@ -139,6 +139,7 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         variables.set_number(name, "radians", gyro_heading);
     }
     variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
+    crate::vor::publish(latitude, longitude, -state.position.z, variation, variables)?;
     publish_direct_to(
         latitude,
         longitude,
@@ -161,7 +162,9 @@ fn publish_hsi(variables: &mut Variables) -> Result<()> {
     let previously_selected = read(variables, "HSI GPS SOURCE ACTIVE", "bool")? != 0.0;
     variables.set_number("HSI GPS SOURCE ACTIVE", "bool", f64::from(gps_selected));
     if !gps_selected {
-        if previously_selected {
+        let vor_configured = read(variables, "VOR STATION ACTIVE", "bool")? != 0.0;
+        let nav_valid = read(variables, "NAV HAS NAV:1", "bool")? != 0.0;
+        if previously_selected && !vor_configured {
             variables.set_number("NAV CDI:1", "number", 0.0);
         }
         for name in [
@@ -172,10 +175,26 @@ fn publish_hsi(variables: &mut Variables) -> Result<()> {
         ] {
             variables.set_number(name, "bool", 0.0);
         }
-        variables.set_number("HSI CDI NEEDLE", "number", 0.0);
+        variables.set_number("HSI CDI NEEDLE VALID", "bool", f64::from(nav_valid));
+        let needle = if nav_valid {
+            read(variables, "NAV RADIO CDI:1", "number")?
+        } else {
+            0.0
+        };
+        let distance = if nav_valid {
+            read(variables, "NAV DME:1", "meters")?
+        } else {
+            0.0
+        };
+        let flag = if nav_valid {
+            read(variables, "NAV TOFROM:1", "enum")?
+        } else {
+            0.0
+        };
+        variables.set_number("HSI CDI NEEDLE", "number", needle);
         variables.set_number("HSI BEARING", "radians", 0.0);
-        variables.set_number("HSI DISTANCE", "meters", 0.0);
-        variables.set_number("HSI TF FLAGS", "enum", 0.0);
+        variables.set_number("HSI DISTANCE", "meters", distance);
+        variables.set_number("HSI TF FLAGS", "enum", flag);
         return Ok(());
     }
     let active = read(variables, "GPS IS ACTIVE WAY POINT", "bool")? != 0.0;

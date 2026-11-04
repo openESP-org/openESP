@@ -15,6 +15,7 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "feet per minute" => Some((2, 0.3048 / 60.0)),
         "meters" | "meter" => Some((3, 1.0)),
         "feet" | "foot" => Some((3, 0.3048)),
+        "nautical miles" | "nautical mile" | "nautical miles long" => Some((3, 1852.0)),
         "pascals" | "pascal" => Some((4, 1.0)),
         "millibars" | "millibar" | "hectopascals" | "hectopascal" | "hpa" => Some((4, 100.0)),
         "inhg" => Some((4, 3386.389)),
@@ -31,6 +32,9 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "rpm" | "revolutions per minute" => Some((9, 1.0)),
         "watts" => Some((10, 1.0)),
         "horsepower" => Some((10, 745.69987158227)),
+        "hertz" | "hz" => Some((11, 1.0)),
+        "kilohertz" | "khz" => Some((11, 1000.0)),
+        "megahertz" | "mhz" => Some((11, 1_000_000.0)),
         _ => None,
     };
     let (from_dimension, from_scale) = unit(from)?;

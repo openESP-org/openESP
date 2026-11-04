@@ -67,6 +67,13 @@ impl Default for Variables {
         variables.set_number("GPS CDI SCALING", "meters", 9260.0);
         variables.set_number("GPS DRIVES NAV1", "bool", 0.0);
         variables.set_number("HSI GPS SOURCE ACTIVE", "bool", 0.0);
+        variables.set_number("VOR STATION ACTIVE", "bool", 0.0);
+        variables.set_number("VOR STATION LATITUDE", "degrees", 0.0);
+        variables.set_number("VOR STATION LONGITUDE", "degrees", 0.0);
+        variables.set_number("VOR STATION FREQUENCY", "megahertz", 113.0);
+        variables.set_number("VOR STATION RANGE", "nautical miles", 40.0);
+        variables.set_number("NAV ACTIVE FREQUENCY:1", "megahertz", 113.0);
+        variables.set_number("NAV OBS:1", "degrees", 0.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
@@ -954,6 +961,28 @@ impl Variables {
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),
+            "VOR1_SET" | "VOR1_OBI_INC" | "VOR1_OBI_DEC" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let current = self
+                    .read(&Reference::new('A', "NAV OBS:1", Some("degrees")))?
+                    .number()?;
+                let selected = match name {
+                    "VOR1_SET" => value,
+                    "VOR1_OBI_INC" => current + 1.0,
+                    _ => current - 1.0,
+                };
+                self.set_number("NAV OBS:1", "degrees", selected.rem_euclid(360.0));
+                Ok(())
+            }
+            "NAV1_RADIO_SET_HZ" => {
+                if !value.is_finite() || !(108_000_000.0..=117_950_000.0).contains(&value) {
+                    return Err(Error::Number);
+                }
+                self.set_number("NAV ACTIVE FREQUENCY:1", "hertz", value);
+                Ok(())
+            }
             "PARKING_BRAKES" => self.toggle("BRAKE PARKING POSITION"),
             "SPOILERS_ARM_TOGGLE" => self.toggle("SPOILERS ARMED"),
             "SPOILERS_ARM_ON" | "SPOILERS_ARM_OFF" | "SPOILERS_ARM_SET" => {
