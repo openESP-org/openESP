@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use esp_script::{Host, Reference};
 use esp_sim::{flight::State, variables::Variables};
-use glam::EulerRot;
+use glam::{DVec3, EulerRot};
 use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
@@ -139,7 +139,14 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         variables.set_number(name, "radians", gyro_heading);
     }
     variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
-    publish_direct_to(latitude, longitude, variation, ground_speed, variables)?;
+    publish_direct_to(
+        latitude,
+        longitude,
+        variation,
+        ground_speed,
+        track,
+        variables,
+    )?;
     Ok(())
 }
 
@@ -148,6 +155,7 @@ fn publish_direct_to(
     longitude: f64,
     variation: f64,
     ground_speed: f64,
+    track: f64,
     variables: &mut Variables,
 ) -> Result<()> {
     let active = variables
@@ -160,11 +168,17 @@ fn publish_direct_to(
         != 0.0;
     variables.set_number("GPS IS ACTIVE WAY POINT", "bool", f64::from(active));
     if !active {
+        variables.set_number("GPS DIRECT LEG VALID", "bool", 0.0);
+        variables.set_number("GPS WP PREV VALID", "bool", 0.0);
         for (name, unit) in [
             ("GPS WP DISTANCE", "meters"),
             ("GPS WP TRUE BEARING", "radians"),
             ("GPS WP BEARING", "radians"),
             ("GPS WP ETE", "seconds"),
+            ("GPS WP CROSS TRK", "meters"),
+            ("GPS WP DESIRED TRACK", "radians"),
+            ("GPS WP TRACK ANGLE ERROR", "radians"),
+            ("GPS CDI NEEDLE", "number"),
         ] {
             variables.set_number(name, unit, 0.0);
         }
@@ -177,6 +191,48 @@ fn publish_direct_to(
         .read(&Reference::new('A', "GPS WP NEXT LON", Some("degrees")))?
         .number()?;
     let destination = Origin::new(destination_latitude, destination_longitude)?;
+    let leg_valid = variables
+        .read(&Reference::new('A', "GPS DIRECT LEG VALID", Some("bool")))?
+        .number()?
+        != 0.0;
+    let changed = if leg_valid {
+        let old_latitude = variables
+            .read(&Reference::new(
+                'A',
+                "GPS DIRECT LEG TARGET LAT",
+                Some("degrees"),
+            ))?
+            .number()?;
+        let old_longitude = variables
+            .read(&Reference::new(
+                'A',
+                "GPS DIRECT LEG TARGET LON",
+                Some("degrees"),
+            ))?
+            .number()?;
+        old_latitude != destination_latitude || old_longitude != destination_longitude
+    } else {
+        true
+    };
+    if changed {
+        variables.set_number("GPS WP PREV LAT", "degrees", latitude);
+        variables.set_number("GPS WP PREV LON", "degrees", longitude);
+        variables.set_number("GPS DIRECT LEG TARGET LAT", "degrees", destination_latitude);
+        variables.set_number(
+            "GPS DIRECT LEG TARGET LON",
+            "degrees",
+            destination_longitude,
+        );
+        variables.set_number("GPS DIRECT LEG VALID", "bool", 1.0);
+    }
+    let start_latitude = variables
+        .read(&Reference::new('A', "GPS WP PREV LAT", Some("degrees")))?
+        .number()?;
+    let start_longitude = variables
+        .read(&Reference::new('A', "GPS WP PREV LON", Some("degrees")))?
+        .number()?;
+    let start = Origin::new(start_latitude, start_longitude)?;
+    let current = Origin::new(latitude, longitude)?;
     let latitude = latitude.to_radians();
     let delta_latitude = destination.latitude - latitude;
     let delta_longitude = destination.longitude - longitude.to_radians();
@@ -194,6 +250,58 @@ fn publish_direct_to(
             )
             .rem_euclid(TAU)
     };
+    let vector = |point: &Origin| {
+        DVec3::new(
+            point.latitude.cos() * point.longitude.cos(),
+            point.latitude.cos() * point.longitude.sin(),
+            point.latitude.sin(),
+        )
+    };
+    let normal = vector(&start).cross(vector(&destination));
+    let valid_leg = normal.length() > 1e-10;
+    variables.set_number("GPS WP PREV VALID", "bool", f64::from(valid_leg));
+    let (cross_track, desired_track) = if valid_leg {
+        let normal = normal.normalize();
+        let position = vector(&current);
+        // Positive cross-track distance places the aircraft to the right of the course.
+        let cross = -normal.dot(position).clamp(-1.0, 1.0).asin() * EARTH_RADIUS_METERS;
+        let tangent = normal.cross(position);
+        let north = DVec3::new(
+            -current.latitude.sin() * current.longitude.cos(),
+            -current.latitude.sin() * current.longitude.sin(),
+            current.latitude.cos(),
+        );
+        let east = DVec3::new(-current.longitude.sin(), current.longitude.cos(), 0.0);
+        (
+            cross,
+            tangent.dot(east).atan2(tangent.dot(north)).rem_euclid(TAU),
+        )
+    } else {
+        (0.0, bearing)
+    };
+    let scale = variables
+        .read(&Reference::new('A', "GPS CDI SCALING", Some("meters")))?
+        .number()?;
+    ensure!(
+        scale.is_finite() && scale > 0.0,
+        "GPS CDI scaling must be positive and finite"
+    );
+    variables.set_number("GPS WP CROSS TRK", "meters", cross_track);
+    variables.set_number(
+        "GPS WP DESIRED TRACK",
+        "radians",
+        (desired_track + variation).rem_euclid(TAU),
+    );
+    variables.set_number(
+        "GPS WP TRACK ANGLE ERROR",
+        "radians",
+        (desired_track - track + PI).rem_euclid(TAU) - PI,
+    );
+    variables.set_number(
+        "GPS CDI NEEDLE",
+        "number",
+        (-127.0 * cross_track / scale).clamp(-127.0, 127.0),
+    );
     variables.set_number("GPS WP DISTANCE", "meters", distance);
     variables.set_number("GPS WP TRUE BEARING", "radians", bearing);
     variables.set_number(
@@ -222,6 +330,41 @@ mod tests {
     use super::*;
     use esp_script::Value;
     use glam::{DQuat, DVec3};
+
+    #[test]
+    fn direct_to_course_tracks_cross_track_and_recaptures_changed_destination() {
+        let mut variables = Variables::default();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", 1.0);
+        variables.set_number("GPS CDI SCALING", "meters", 1000.0);
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP DESIRED TRACK", "degrees") - 90.0).abs() < 1e-8);
+        state.position = DVec3::new(500.0, 1000.0, 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP CROSS TRK", "meters") + 500.0).abs() < 0.01);
+        assert!((read(&mut variables, "GPS CDI NEEDLE", "number") - 63.5).abs() < 0.01);
+        state.position.x = -2000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP CROSS TRK", "meters") - 2000.0).abs() < 0.01);
+        assert_eq!(read(&mut variables, "GPS CDI NEEDLE", "number"), -127.0);
+        variables.set_number("GPS WP NEXT LAT", "degrees", 1.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!(read(&mut variables, "GPS WP CROSS TRK", "meters").abs() < 1e-6);
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "GPS WP PREV VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "GPS CDI NEEDLE", "number"), 0.0);
+    }
 
     #[test]
     fn direct_to_updates_distance_bearing_and_time_as_aircraft_moves() {

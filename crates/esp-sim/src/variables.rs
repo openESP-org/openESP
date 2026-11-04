@@ -63,6 +63,8 @@ impl Default for Variables {
         variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
         variables.set_number("GPS WP NEXT LAT", "degrees", 0.0);
         variables.set_number("GPS WP NEXT LON", "degrees", 0.0);
+        variables.set_number("GPS DIRECT LEG VALID", "bool", 0.0);
+        variables.set_number("GPS CDI SCALING", "meters", 9260.0);
         for index in 1..=4 {
             variables.set_number(&format!("KOHLSMAN SETTING MB:{index}"), "pascals", 101325.0);
         }
