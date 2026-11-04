@@ -106,6 +106,10 @@ impl Instrument {
         matches!(self.kind, Kind::NavGpsSwitch)
     }
 
+    pub fn is_altimeter(&self) -> bool {
+        matches!(self.kind, Kind::Altimeter)
+    }
+
     pub fn is_flaps(&self) -> bool {
         matches!(self.kind, Kind::Flaps)
     }
@@ -126,7 +130,13 @@ impl Instrument {
                 0.0,
                 0.0,
             ],
-            Kind::Altimeter => [read(host, "INDICATED ALTITUDE", "feet"), 0.0, 0.0, 0.0, 0.0],
+            Kind::Altimeter => [
+                read(host, "INDICATED ALTITUDE", "feet"),
+                read(host, "KOHLSMAN SETTING HG:1", "inhg"),
+                0.0,
+                0.0,
+                0.0,
+            ],
             Kind::Heading => [
                 read(host, "HEADING INDICATOR", "degrees"),
                 0.0,
@@ -275,12 +285,18 @@ impl Instrument {
                 };
                 [course, needle, flag, glide, f64::from(glide_valid)]
             }
-        }
-        .map(|v| {
+        };
+        let values = std::array::from_fn(|index| {
+            let v = values[index];
             if v == f64::MAX {
                 v
             } else {
-                (v.clamp(-1e12, 1e12) * 10.0).round() / 10.0
+                let scale = if matches!(self.kind, Kind::Altimeter) && index == 1 {
+                    100.0
+                } else {
+                    10.0
+                };
+                (v.clamp(-1e12, 1e12) * scale).round() / scale
             }
         });
         if self.last == Some(values) {
@@ -629,7 +645,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
         return image;
     }
-    if values.contains(&f64::MAX) {
+    if values[0] == f64::MAX || (!matches!(kind, Kind::Altimeter) && values.contains(&f64::MAX)) {
         let red = Rgba([235, 60, 45, 255]);
         line(&mut image, (36.0, 36.0), (92.0, 92.0), red);
         line(&mut image, (92.0, 36.0), (36.0, 92.0), red);
@@ -861,6 +877,18 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
             64 - altitude.len() as i32 * 2,
             74,
             &altitude,
+            white,
+        );
+        let pressure = if values[1] == f64::MAX {
+            "OFF".to_owned()
+        } else {
+            format!("{:.2}", values[1])
+        };
+        label(
+            &mut image,
+            64 - pressure.len() as i32 * 2,
+            98,
+            &pressure,
             white,
         );
     }

@@ -484,6 +484,16 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new(),
                     });
                 }
+                if instrument.is_altimeter() {
+                    for (bounds, event) in [((0.0, 80.0, 64.0, 48.0), "KOHLSMAN_DEC"), ((64.0, 80.0, 64.0, 48.0), "KOHLSMAN_INC")] {
+                        raw_areas.push(MouseAreaSource { bounds, source: format!("1 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: true, visibility: Vec::new() });
+                    }
+                    raw_areas.push(MouseAreaSource {
+                        bounds: (0.0, 0.0, 128.0, 128.0),
+                        source: "(M:Event) 'WheelUp' scmp 0 == if{ 1 (>K:KOHLSMAN_INC) } (M:Event) 'WheelDown' scmp 0 == if{ 1 (>K:KOHLSMAN_DEC) }".to_owned(),
+                        events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
+                    });
+                }
                 if instrument.is_flaps() {
                     for (bounds, event) in [((0.0, 0.0, 128.0, 64.0), "FLAPS_DECR"), ((0.0, 64.0, 128.0, 64.0), "FLAPS_INCR")] {
                         raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new() });
@@ -1304,6 +1314,65 @@ mod tests {
         assert_eq!(host.events, ["FLAPS_INCR", "FLAPS_DECR", "FLAPS_INCR"]);
     }
 
+    #[test]
+    fn fallback_altimeter_displays_and_adjusts_barometric_setting() {
+        struct AltimeterHost {
+            setting: f64,
+            events: Vec<(String, f64)>,
+        }
+        impl Host for AltimeterHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "INDICATED ALTITUDE" => Ok(Value::Number(1200.0)),
+                    "KOHLSMAN SETTING HG:1" => Ok(Value::Number(self.setting)),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+                if reference.category != 'K' {
+                    return Err(Error::Type);
+                }
+                let index = value.number()?;
+                self.events.push((reference.name.clone(), index));
+                match reference.name.as_str() {
+                    "KOHLSMAN_INC" => self.setting += 0.01,
+                    "KOHLSMAN_DEC" => self.setting -= 0.01,
+                    _ => return Err(Error::Variable(reference.name.clone())),
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna!Altimeter,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        let mut host = AltimeterHost {
+            setting: 29.92,
+            events: Vec::new(),
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        assert!(image.left_click(100.0, 100.0, &mut host).unwrap());
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        assert!(image.left_click(20.0, 100.0, &mut host).unwrap());
+        let areas = image.mouse_areas_at(64.0, 64.0);
+        assert!(
+            image
+                .mouse_event(MouseEvent::WheelUp, &areas, [64.0, 64.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(
+            host.events,
+            [
+                ("KOHLSMAN_INC".to_owned(), 1.0),
+                ("KOHLSMAN_DEC".to_owned(), 1.0),
+                ("KOHLSMAN_INC".to_owned(), 1.0)
+            ]
+        );
+    }
     #[test]
     fn fallback_dme_displays_each_receiver_and_blanks_lost_signals() {
         struct DmeHost {
