@@ -18,6 +18,7 @@ enum Kind {
     Tachometer,
     Fuel,
     FuelFlow,
+    Flaps,
     TurnCoordinator,
     Vor1,
     Vor2,
@@ -45,6 +46,7 @@ impl Instrument {
             ("CESSNA172", "TACHOMETER") => Kind::Tachometer,
             ("CESSNA172", "FUEL") => Kind::Fuel,
             ("CESSNA172", "EGT_FUEL_FLOW") => Kind::FuelFlow,
+            ("CESSNA", "FLAPS") => Kind::Flaps,
             ("CESSNA", "TURN_INDICATOR") => Kind::TurnCoordinator,
             ("CESSNA", "VOR1") | ("CESSNAWALPHA", "VOR1_ALPHA") => Kind::Vor1,
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
@@ -81,6 +83,10 @@ impl Instrument {
 
     pub fn size(&self) -> (u32, u32) {
         (self.image.width(), self.image.height())
+    }
+
+    pub fn is_flaps(&self) -> bool {
+        matches!(self.kind, Kind::Flaps)
     }
 
     pub fn update(&mut self, host: &mut impl Host) -> bool {
@@ -132,6 +138,13 @@ impl Instrument {
             Kind::FuelFlow => [
                 read(host, "ENG FUEL FLOW PPH:1", "pounds per hour"),
                 read(host, "FUEL WEIGHT PER GALLON", "pounds"),
+                0.0,
+                0.0,
+                0.0,
+            ],
+            Kind::Flaps => [
+                read(host, "TRAILING EDGE FLAPS LEFT ANGLE", "degrees"),
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -300,6 +313,30 @@ fn label_scaled(image: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u
 }
 
 fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
+    if matches!(kind, Kind::Flaps) {
+        let mut image = RgbaImage::from_pixel(128, 128, Rgba([31, 31, 30, 255]));
+        draw_filled_rect_mut(
+            &mut image,
+            Rect::at(14, 8).of_size(100, 112),
+            Rgba([8, 9, 10, 255]),
+        );
+        let white = Rgba([235, 235, 230, 255]);
+        let yellow = Rgba([255, 200, 50, 255]);
+        label_scaled(&mut image, 44, 12, "FLAPS", white, 2);
+        for angle in (0..=40).step_by(10) {
+            let y = 35.0 + angle as f32 * 1.8;
+            line(&mut image, (37.0, y), (47.0, y), white);
+            label(&mut image, 22, y as i32 - 2, &angle.to_string(), white);
+        }
+        if values[0] == f64::MAX {
+            label_scaled(&mut image, 60, 60, "OFF", Rgba([235, 60, 45, 255]), 2);
+        } else {
+            let y = 35.0 + values[0].clamp(0.0, 40.0) as f32 * 1.8;
+            line(&mut image, (48.0, y), (85.0, y), yellow);
+            line(&mut image, (48.0, y + 1.0), (85.0, y + 1.0), yellow);
+        }
+        return image;
+    }
     if matches!(kind, Kind::Radio1 | Kind::Radio2) {
         let mut image = RgbaImage::from_pixel(256, 96, Rgba([48, 48, 47, 255]));
         draw_filled_rect_mut(
@@ -517,6 +554,7 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
         | Kind::TurnCoordinator
         | Kind::Fuel
         | Kind::FuelFlow
+        | Kind::Flaps
         | Kind::Vor1
         | Kind::Vor2
         | Kind::Radio1

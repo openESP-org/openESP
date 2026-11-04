@@ -477,6 +477,16 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
                     });
                 }
+                if instrument.is_flaps() {
+                    for (bounds, event) in [((0.0, 0.0, 128.0, 64.0), "FLAPS_DECR"), ((0.0, 64.0, 128.0, 64.0), "FLAPS_INCR")] {
+                        raw_areas.push(MouseAreaSource { bounds, source: format!("0 (>K:{event})"), events: vec![MouseEvent::LeftSingle], repeat: false, visibility: Vec::new() });
+                    }
+                    raw_areas.push(MouseAreaSource {
+                        bounds: (0.0, 0.0, 128.0, 128.0),
+                        source: "(M:Event) 'WheelUp' scmp 0 == if{ 0 (>K:FLAPS_DECR) } (M:Event) 'WheelDown' scmp 0 == if{ 0 (>K:FLAPS_INCR) }".to_owned(),
+                        events: vec![MouseEvent::WheelUp, MouseEvent::WheelDown], repeat: false, visibility: Vec::new(),
+                    });
+                }
                 if let Some(index) = instrument.radio_index() {
                     for (bounds, event) in [
                         ((188.0, 20.0, 20.0, 56.0), "SWAP"),
@@ -1237,6 +1247,54 @@ mod tests {
         host.0 = 1.0;
         assert!(gauge.update(&mut host));
         assert_ne!(left, gauge.image);
+    }
+
+    #[test]
+    fn fallback_flaps_indicate_actual_angle_and_accept_controls() {
+        struct FlapHost {
+            angle: f64,
+            events: Vec<String>,
+        }
+        impl Host for FlapHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                if reference.name == "TRAILING EDGE FLAPS LEFT ANGLE" {
+                    Ok(Value::Number(self.angle))
+                } else {
+                    Err(Error::Variable(reference.name.clone()))
+                }
+            }
+            fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+                if reference.category == 'K' {
+                    self.events.push(reference.name.clone());
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("panel");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("panel.cfg"), "[VCockpit01]\nsize_mm=128,128\npixel_size=128,128\ntexture=$screen\ngauge00=Cessna!Flaps,0,0,128,128").unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let mut image = load_panel(&panel, "$screen").unwrap().unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = FlapHost {
+            angle: 0.0,
+            events: Vec::new(),
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        host.angle = 12.7;
+        assert!(image.update(&mut host));
+        assert_ne!(before, image.image);
+        assert!(image.left_click(40.0, 100.0, &mut host).unwrap());
+        assert!(image.left_click(40.0, 20.0, &mut host).unwrap());
+        let areas = image.mouse_areas_at(50.0, 50.0);
+        assert!(
+            image
+                .mouse_event(MouseEvent::WheelDown, &areas, [50.0, 50.0], &mut host)
+                .unwrap()
+        );
+        assert_eq!(host.events, ["FLAPS_INCR", "FLAPS_DECR", "FLAPS_INCR"]);
     }
 
     #[test]
