@@ -1,6 +1,7 @@
 use binrw::BinRead;
 use std::io::Cursor;
 
+pub mod helicopter;
 pub mod parameters;
 pub mod table;
 
