@@ -1,4 +1,4 @@
-//! Resolves legacy aircraft sound sets and decodes their WAVE resources.
+//! Resolves aircraft sound sets and decodes WAVE and Ogg Vorbis resources.
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -84,20 +84,22 @@ impl SoundSet {
         let name = name.trim();
         let normalized = name.replace('\\', "/");
         let path = Path::new(&normalized);
-        let filename = if path.extension().is_some() {
-            normalized.clone()
+        let filenames = if path.extension().is_some() {
+            vec![normalized.clone()]
         } else {
-            format!("{normalized}.wav")
+            vec![format!("{normalized}.wav"), format!("{normalized}.ogg")]
         };
         for directory in std::iter::once(&self.directory).chain(self.shared_directory.iter()) {
-            if let Ok(path) = super::resolve_path(directory, &filename)
-                && path.is_file()
-            {
-                return Ok(path);
+            for filename in &filenames {
+                if let Ok(path) = super::resolve_path(directory, filename)
+                    && path.is_file()
+                {
+                    return Ok(path);
+                }
             }
         }
         anyhow::bail!(
-            "sound {filename:?} not found in {} or the shared Sound folder",
+            "sound {name:?} not found in {} or the shared Sound folder",
             self.directory.display()
         )
     }
@@ -110,6 +112,9 @@ impl SoundSet {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Sample> {
+    if bytes.starts_with(b"OggS") {
+        return decode_ogg(bytes);
+    }
     let wave = wave::Wave::parse(bytes)?;
     let format = wave.format()?;
     let mut reader = wave.reader()?;
@@ -133,6 +138,58 @@ pub fn decode(bytes: &[u8]) -> Result<Sample> {
     Ok(Sample {
         channels: format.channels,
         sample_rate: format.sample_rate,
+        samples,
+    })
+}
+
+fn decode_ogg(bytes: &[u8]) -> Result<Sample> {
+    use symphonia::core::{
+        formats::{TrackType, probe::Hint},
+        io::MediaSourceStream,
+    };
+    let stream = MediaSourceStream::new(
+        Box::new(std::io::Cursor::new(bytes.to_vec())),
+        Default::default(),
+    );
+    let mut reader = symphonia::default::get_probe().probe(
+        &Hint::new(),
+        stream,
+        Default::default(),
+        Default::default(),
+    )?;
+    let track = reader
+        .default_track(TrackType::Audio)
+        .context("Ogg has no audio track")?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .context("Ogg has no audio parameters")?;
+    let channels = u16::try_from(
+        params
+            .channels
+            .as_ref()
+            .context("Ogg has no channel count")?
+            .count(),
+    )?;
+    let sample_rate = params.sample_rate.context("Ogg has no sample rate")?;
+    let track_id = track.id;
+    let mut decoder =
+        symphonia::default::get_codecs().make_audio_decoder(params, &Default::default())?;
+    let mut samples = Vec::new();
+    let mut interleaved = Vec::new();
+    while let Some(packet) = reader.next_packet()? {
+        if packet.track_id != track_id {
+            continue;
+        }
+        decoder
+            .decode(&packet)?
+            .copy_to_vec_interleaved(&mut interleaved);
+        samples.extend_from_slice(&interleaved);
+    }
+    Ok(Sample {
+        channels,
+        sample_rate,
         samples,
     })
 }
@@ -214,5 +271,23 @@ mod tests {
         for end in 0..bytes.len() {
             assert!(decode(&bytes[..end]).is_err());
         }
+    }
+
+    #[test]
+    fn searches_local_ogg_before_shared_wave() {
+        let root = tempfile::tempdir().unwrap();
+        let aircraft = root.path().join("aircraft");
+        let local = aircraft.join("sound");
+        let shared = root.path().join("Sound");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::write(aircraft.join("aircraft.cfg"), "[fltsim.0]\ntitle=test\n").unwrap();
+        std::fs::write(local.join("sound.cfg"), "[sound_engine]\n").unwrap();
+        std::fs::write(local.join("ENGINE.OGG"), b"OggSbad").unwrap();
+        std::fs::write(shared.join("engine.wav"), pcm(4)).unwrap();
+        let set = SoundSet::load(&aircraft, 0, Some(root.path())).unwrap();
+        assert_eq!(set.sample_path("engine").unwrap(), local.join("ENGINE.OGG"));
+        assert!(set.sample("engine").is_err());
+        assert_eq!(set.sample("engine.wav").unwrap().samples.len(), 4);
     }
 }

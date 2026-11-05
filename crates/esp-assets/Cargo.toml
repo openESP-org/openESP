@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["bmp"] }
 imageproc = { version = "0.27", default-features = false, features = ["text"] }
 rayon = "1"
 roxmltree = "0.21"
+symphonia = { version = "0.6.1", default-features = false, features = ["ogg", "vorbis"] }
 
 [dev-dependencies]
 cabinet = { version = "0.1.5", package = "ms-cabinet", default-features = false, features = ["mszip", "lzx", "quantum"] }
