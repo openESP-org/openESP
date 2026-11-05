@@ -154,13 +154,24 @@ impl Panel {
             !module.is_empty()
                 && !name.is_empty()
                 && !module.contains(['/', '\\'])
-                && !name.contains(['/', '\\']),
+                && !module.contains(':')
+                && module != "."
+                && module != "..",
             "invalid gauge resource name"
         );
+        let components: Vec<_> = name.split(['/', '\\']).collect();
+        anyhow::ensure!(
+            components.iter().all(|part| !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && !part.contains(':')),
+            "invalid gauge resource name"
+        );
+        let archive_name = components.join("\\");
         for root in std::iter::once(&self.directory).chain(self.gauges.iter()) {
             if let Some(directory) = child(root, module)?
                 && directory.is_dir()
-                && let Some(path) = child(&directory, name)?
+                && let Some(path) = nested_child(&directory, &components)?
             {
                 let size = std::fs::metadata(&path)?.len();
                 anyhow::ensure!(size <= limit as u64, "gauge resource exceeds size limit");
@@ -174,13 +185,27 @@ impl Panel {
             if let Some(path) = child(root, &format!("{module}.cab"))? {
                 let mut cabinet = Cabinet::new(std::fs::File::open(&path)?)
                     .with_context(|| format!("opening {}", path.display()))?;
-                if cabinet.entry(name).is_some() {
-                    return Ok(Some(cabinet.read_file_bytes(name, limit)?));
+                if cabinet.entry(&archive_name).is_some() {
+                    return Ok(Some(cabinet.read_file_bytes(&archive_name, limit)?));
                 }
             }
         }
         Ok(None)
     }
+}
+
+fn nested_child(directory: &Path, components: &[&str]) -> Result<Option<PathBuf>> {
+    let mut current = directory.to_path_buf();
+    for name in components {
+        if !current.is_dir() {
+            return Ok(None);
+        }
+        let Some(next) = child(&current, name)? else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    Ok(Some(current))
 }
 
 fn child(directory: &Path, name: &str) -> Result<Option<PathBuf>> {
@@ -208,6 +233,80 @@ fn child(directory: &Path, name: &str) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loads_nested_gauge_art_from_directories_and_cabinets() {
+        use cabinet::{CabinetBuilder, WriteCompression};
+        use std::io::Cursor;
+        let root = tempfile::tempdir().unwrap();
+        let panel_dir = root.path().join("panel");
+        let image_dir = panel_dir.join("Pack/Art/Day");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\ntexture=$panel").unwrap();
+        std::fs::write(image_dir.join("Needle.BMP"), b"directory").unwrap();
+        let mut builder = CabinetBuilder::new(WriteCompression::MsZip);
+        builder
+            .add_file("Art\\Night\\Needle.BMP", b"cabinet")
+            .unwrap();
+        let mut archive = Cursor::new(Vec::new());
+        builder.write(&mut archive).unwrap();
+        std::fs::write(panel_dir.join("Pack.cab"), archive.into_inner()).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        assert_eq!(
+            panel
+                .read_resource("pack", "art\\day/needle.bmp", 20)
+                .unwrap()
+                .unwrap(),
+            b"directory"
+        );
+        assert_eq!(
+            panel
+                .read_resource("pack", "ART/night/NEEDLE.bmp", 20)
+                .unwrap()
+                .unwrap(),
+            b"cabinet"
+        );
+        assert!(
+            panel
+                .read_resource("pack", "art/night/needle.bmp", 1)
+                .is_err()
+        );
+        for path in [
+            "../panel.cfg",
+            "art/../panel.cfg",
+            "/absolute",
+            "C:\\absolute",
+            "art//x",
+        ] {
+            assert!(panel.read_resource("pack", path, 100).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn renders_gauge_with_nested_bitmap() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_dir = root.path().join("panel");
+        let module = panel_dir.join("pack");
+        std::fs::create_dir_all(module.join("Art")).unwrap();
+        std::fs::write(
+            panel_dir.join("panel.cfg"),
+            "[VCockpit01]\nsize_mm=2,2\npixel_size=2,2\ntexture=$panel\ngauge00=pack!dial,0,0,2,2",
+        )
+        .unwrap();
+        std::fs::write(
+            module.join("dial.xml"),
+            r#"<Gauge><Size X="2" Y="2"/><Image Name="art\lamp.bmp"/></Gauge>"#,
+        )
+        .unwrap();
+        let mut bitmap = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut bitmap)
+            .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(module.join("Art/LAMP.BMP"), bitmap).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        let image = crate::gauge::load_panel(&panel, "$panel").unwrap().unwrap();
+        assert_eq!(image.omitted_elements, 0);
+        assert_eq!(image.image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
     #[test]
     fn loads_selected_panel_and_unpacked_gauge() {
         let root = tempfile::tempdir().unwrap();
