@@ -47,6 +47,12 @@ struct Arguments {
         help = "Select an airport by ICAO code from the BGL"
     )]
     airport: Option<String>,
+    #[arg(long, help = "Load placed library objects from a scenery BGL")]
+    scenery_objects: Option<PathBuf>,
+    #[arg(long, help = "Additional BGL model library; may be repeated")]
+    scenery_library: Vec<PathBuf>,
+    #[arg(long, help = "Texture directory for scenery model libraries")]
+    scenery_textures: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     variant: u32,
     #[arg(long)]
@@ -585,12 +591,24 @@ impl App {
                             aprons: Vec::new(),
                         }
                     };
+                    let objects = if let Some(path) = &self.arguments.scenery_objects {
+                        scenery::objects(
+                            path,
+                            &self.arguments.scenery_library,
+                            self.arguments.scenery_textures.as_deref(),
+                            self.arguments.latitude,
+                            self.arguments.longitude,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
                         &scene.runways,
                         &scene.taxiways,
                         &scene.aprons,
+                        &objects,
                         self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);

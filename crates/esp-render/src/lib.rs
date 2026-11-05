@@ -69,6 +69,7 @@ pub struct Renderer {
     panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
     runway: Vec<Draw>,
+    objects: Vec<Draw>,
     pub centre: Vec3,
     pub radius: f32,
     pub aircraft_origin: DVec3,
@@ -97,6 +98,12 @@ pub struct Taxiway {
 pub struct Apron {
     pub vertices: Vec<DVec3>,
     pub indices: Vec<u16>,
+}
+
+pub struct SceneryObject {
+    pub model: Arc<Model>,
+    pub transform: Mat4,
+    pub textures: std::path::PathBuf,
 }
 
 fn apron_mesh(aprons: &[Apron]) -> (Vec<Vertex>, Vec<u32>) {
@@ -201,6 +208,7 @@ impl Renderer {
         runways: &[Runway],
         taxiways: &[Taxiway],
         aprons: &[Apron],
+        objects: &[SceneryObject],
         requested_samples: u32,
     ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
@@ -372,7 +380,9 @@ impl Renderer {
         });
         let mut textures: HashMap<String, (wgpu::TextureView, bool)> = HashMap::new();
         let mut panels = HashMap::new();
-        let mut upload = |model: &Model| -> Result<Vec<Draw>> {
+        let mut upload = |model: &Model,
+                          texture_root: Option<&std::path::Path>|
+         -> Result<Vec<Draw>> {
             let transforms = model.transforms()?;
             let lod = model.lods.first().context("model has no LODs")?;
             let mut draws = Vec::new();
@@ -401,12 +411,21 @@ impl Renderer {
                 };
                 let mut flip_v = false;
                 let view = if let Some(name) = &material.diffuse_texture {
-                    if let Some((view, flip)) = textures.get(name) {
+                    let cache_key = format!(
+                        "{}|{name}",
+                        texture_root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+                    );
+                    if let Some((view, flip)) = textures.get(&cache_key) {
                         flip_v = *flip;
                         view.clone()
                     } else {
                         let mut is_panel = false;
-                        let texture = match aircraft.texture_path(name) {
+                        let resolved = if let Some(root) = texture_root {
+                            esp_assets::resolve_path(root, name).map(Some)
+                        } else {
+                            aircraft.texture_path(name)
+                        };
+                        let texture = match resolved {
                             Ok(Some(path)) => texture::Texture::load(&path, compressed)?,
                             Ok(None) => {
                                 if let Some(panel) =
@@ -439,7 +458,7 @@ impl Renderer {
                         if is_panel {
                             panels.insert(name.to_ascii_uppercase(), uploaded);
                         }
-                        textures.insert(name.clone(), (view.clone(), flip_v));
+                        textures.insert(cache_key, (view.clone(), flip_v));
                         view
                     }
                 } else {
@@ -501,13 +520,22 @@ impl Renderer {
             }
             Ok(draws)
         };
-        let exterior = upload(&aircraft.exterior)?;
-        let interior = aircraft
-            .interior
-            .as_ref()
-            .map(upload)
-            .transpose()?
-            .unwrap_or_default();
+        let exterior = upload(&aircraft.exterior, None)?;
+        let interior = if let Some(interior) = &aircraft.interior {
+            upload(interior, None)?
+        } else {
+            Vec::new()
+        };
+        let mut scenery_draws = Vec::new();
+        for object in objects {
+            anyhow::ensure!(object.transform.is_finite(), "invalid scenery transform");
+            for mut draw in upload(&object.model, Some(&object.textures))? {
+                draw.transform = object.transform * draw.transform;
+                draw.uniform.settings[1] = 2.0;
+                draw.node = None;
+                scenery_draws.push(draw);
+            }
+        }
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         let transforms = aircraft.exterior.transforms()?;
@@ -735,6 +763,7 @@ impl Renderer {
             panels,
             ground,
             runway: runway_draws,
+            objects: scenery_draws,
             centre,
             radius,
             aircraft_origin,
@@ -844,6 +873,7 @@ impl Renderer {
             .iter_mut()
             .chain(std::iter::once(&mut self.ground))
             .chain(self.runway.iter_mut())
+            .chain(self.objects.iter_mut())
         {
             let (origin, rotation) = if draw.uniform.settings[1] > 0.0 {
                 (DVec3::ZERO, Mat4::IDENTITY)
@@ -910,6 +940,9 @@ impl Renderer {
             };
             draw_one(&mut pass, &self.ground);
             for draw in &self.runway {
+                draw_one(&mut pass, draw);
+            }
+            for draw in &self.objects {
                 draw_one(&mut pass, draw);
             }
             for draw in draws.iter().filter(|d| d.visible && !d.blended) {

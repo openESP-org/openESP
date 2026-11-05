@@ -119,6 +119,98 @@ pub fn airport(
     })
 }
 
+/// Load explicitly supplied model libraries and their placed objects.
+pub fn objects(
+    placement_path: &Path,
+    libraries: &[std::path::PathBuf],
+    texture_directory: Option<&Path>,
+    latitude: f64,
+    longitude: f64,
+) -> Result<Vec<esp_render::SceneryObject>> {
+    use std::{collections::HashMap, sync::Arc};
+    let mut models = HashMap::new();
+    for path in std::iter::once(placement_path).chain(libraries.iter().map(|p| p.as_path())) {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let textures = texture_directory.map(Path::to_path_buf).unwrap_or_else(|| {
+            parent
+                .parent()
+                .and_then(|root| esp_assets::resolve_path(root, "texture").ok())
+                .unwrap_or_else(|| parent.to_path_buf())
+        });
+        for section in bgl
+            .sections
+            .iter()
+            .filter(|section| section.kind == 0x2b && section.class == 5)
+        {
+            for record in section.guid_records()? {
+                match esp_assets::Model::from_bytes(record.data) {
+                    Ok(model) => {
+                        models.insert(*record.guid.as_bytes(), (Arc::new(model), textures.clone()));
+                    }
+                    Err(error) => eprintln!("scenery model {}: {error:#}", record.guid),
+                }
+            }
+        }
+    }
+    let bytes = std::fs::read(placement_path)?;
+    let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
+    let origin = Origin::new(latitude, longitude)?;
+    let mut result = Vec::new();
+    for section in bgl.sections.iter().filter(|section| section.kind == 0x25) {
+        let esp_formats::bgl::Directory::Direct(subsections) = &section.directory else {
+            continue;
+        };
+        for subsection in subsections {
+            for record in esp_formats::bgl::scenery::parse(subsection.records.data)? {
+                let Some(object) = record.decode()? else {
+                    continue;
+                };
+                let esp_formats::bgl::scenery::Definition::Library { guid, scale } =
+                    object.definition
+                else {
+                    continue;
+                };
+                let Some((model, textures)) = models.get(guid.as_bytes()) else {
+                    continue;
+                };
+                ensure!(
+                    scale.is_finite() && scale > 0.0,
+                    "invalid scenery object scale"
+                );
+                let (north, east) = origin.local_position(
+                    object.placement.latitude_degrees(),
+                    object.placement.longitude_degrees(),
+                )?;
+                let [pitch, bank, heading] =
+                    object.placement.orientation_degrees().map(f64::to_radians);
+                // Ground elevation is currently zero. Absolute MSL objects will require terrain elevation.
+                let height = if object.placement.flags & 1 != 0 {
+                    object.placement.altitude_meters()
+                } else {
+                    0.0
+                };
+                let transform = glam::Mat4::from_translation(glam::Vec3::new(
+                    east as f32,
+                    height as f32,
+                    north as f32,
+                )) * glam::Mat4::from_rotation_y(heading as f32)
+                    * glam::Mat4::from_rotation_x(pitch as f32)
+                    * glam::Mat4::from_rotation_z(bank as f32)
+                    * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+                result.push(esp_render::SceneryObject {
+                    model: model.clone(),
+                    transform,
+                    textures: textures.clone(),
+                });
+            }
+        }
+    }
+    eprintln!("scenery: loaded {} placed model(s)", result.len());
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +235,27 @@ mod tests {
                 * 0.5;
         assert!(center.length() < 2.0);
         assert!(super::airport(Path::new(&path), Some("ZZZZ"), 33.9, -118.4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires scenery BGL with a placed model in OPENESP_SCENERY_OBJECT_BGL"]
+    fn loads_real_placed_model_from_embedded_library() {
+        let path =
+            std::env::var_os("OPENESP_SCENERY_OBJECT_BGL").expect("set OPENESP_SCENERY_OBJECT_BGL");
+        let objects = objects(Path::new(&path), &[], None, 48.63158628, 9.43264246).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert!(
+            objects[0]
+                .transform
+                .transform_point3(glam::Vec3::ZERO)
+                .length()
+                < 1.0
+        );
+        assert!(!objects[0].model.lods[0].meshes.is_empty());
     }
 }
