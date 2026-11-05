@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
 use esp_formats::{
-    air::{self, parameters::LegacyParameters},
+    air::{
+        self,
+        parameters::{LegacyParameters, Parameters},
+    },
     cfg::Config,
 };
 use glam::DVec3;
@@ -73,13 +76,61 @@ fn tuning(config: &Config, key: &str) -> Result<f64> {
     Ok(config.number("flight_tuning", key)?.unwrap_or(1.0))
 }
 
+fn aerodynamic_coefficients(records: &[air::Record<'_>]) -> Result<LegacyParameters> {
+    let unique = |id| -> Result<Option<&air::Record<'_>>> {
+        let mut matching = records.iter().filter(|record| record.id == id);
+        let first = matching.next();
+        ensure!(matching.next().is_none(), "duplicate AIR record {id:#x}");
+        Ok(first)
+    };
+    if unique(0x1539)?.is_some() {
+        let read = |id| -> Result<Parameters> {
+            unique(id)?
+                .with_context(|| format!("missing AIR record {id:#x}"))?
+                .aerodynamic_parameters()?
+                .with_context(|| format!("invalid AIR record {id:#x}"))
+        };
+        let Parameters::Lift(lift) = read(0x1539)? else {
+            unreachable!()
+        };
+        let Parameters::Drag(drag) = read(0x1540)? else {
+            unreachable!()
+        };
+        let Parameters::Pitch(pitch) = read(0x1541)? else {
+            unreachable!()
+        };
+        let Parameters::SideForce(side) = read(0x1542)? else {
+            unreachable!()
+        };
+        let Parameters::Roll(roll) = read(0x1543)? else {
+            unreachable!()
+        };
+        let Parameters::Yaw(yaw) = read(0x1544)? else {
+            unreachable!()
+        };
+        Ok(LegacyParameters {
+            lift,
+            drag,
+            pitch,
+            side,
+            roll,
+            yaw,
+        })
+    } else {
+        unique(0x1101)?
+            .context("missing AIR record 0x1101")?
+            .legacy_aerodynamics()?
+            .context("invalid AIR record 0x1101")
+    }
+}
+
 impl Aerodynamics {
     pub fn from_data(data: &FlightData) -> Result<Self> {
         let config = &data.configuration;
         let records = air::parse(&data.air)?;
         ensure!(
-            !records.iter().any(|r| matches!(r.id, 0x1539..=0x1546)),
-            "extended AIR aerodynamics are not simulated yet"
+            !records.iter().any(|r| matches!(r.id, 0x1545 | 0x1546)),
+            "extended AIR lift and pitch tables are not simulated yet"
         );
         let record = |id| -> Result<&air::Record<'_>> {
             let mut matches = records.iter().filter(|r| r.id == id);
@@ -101,7 +152,7 @@ impl Aerodynamics {
         };
         let lift = curve(0x404)?;
         let pitch = curve(0x473)?;
-        let coefficients = record(0x1101)?.legacy_aerodynamics()?.unwrap();
+        let coefficients = aerodynamic_coefficients(&records)?;
         let lateral_trim = if records.iter().any(|r| r.id == 0x516) {
             let definition = record(0x516)?;
             ensure!(
@@ -586,6 +637,52 @@ impl Aerodynamics {
 mod tests {
     use super::*;
     use esp_formats::air::table::Point;
+
+    #[test]
+    fn uses_complete_modern_aerodynamic_blocks_in_preference_to_legacy() {
+        let data: Vec<Vec<u8>> = [6, 4, 13, 4, 6, 9]
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| vec![(i as u8) + 1; n * 8])
+            .collect();
+        let ids = [0x1539, 0x1540, 0x1541, 0x1542, 0x1543, 0x1544];
+        let records: Vec<_> = ids
+            .into_iter()
+            .zip(&data)
+            .map(|(id, data)| air::Record {
+                id,
+                offset: 0,
+                data,
+            })
+            .collect();
+        let coefficients = aerodynamic_coefficients(&records).unwrap();
+        assert_eq!(coefficients.lift.cl_de, f64::from_le_bytes([1; 8]));
+        assert_eq!(coefficients.drag.cd0, f64::from_le_bytes([2; 8]));
+        assert_eq!(coefficients.yaw.cn_r, f64::from_le_bytes([6; 8]));
+        assert!(aerodynamic_coefficients(&records[..5]).is_err());
+        let mut duplicates = records;
+        let legacy = [0u8; 250];
+        duplicates.push(air::Record {
+            id: 0x1101,
+            offset: 0,
+            data: &legacy,
+        });
+        assert_eq!(
+            aerodynamic_coefficients(&duplicates).unwrap().drag.cd0,
+            f64::from_le_bytes([2; 8])
+        );
+        duplicates.push(air::Record {
+            id: 0x1540,
+            offset: 0,
+            data: &data[1],
+        });
+        assert!(
+            aerodynamic_coefficients(&duplicates)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+    }
 
     #[test]
     fn interpolates_curves_and_clamps_to_defined_domain() {

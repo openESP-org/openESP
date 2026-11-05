@@ -12,6 +12,160 @@ mod content;
 
 #[test]
 #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+fn sdk_aerodynamic_blocks_drive_the_same_forces_as_legacy_coefficients() {
+    let path = content::aircraft_paths()
+        .into_iter()
+        .next()
+        .expect("aircraft path");
+    let mut data = FlightData::load(&path, 0).unwrap();
+    let legacy = Aerodynamics::from_data(&data).unwrap();
+    let records = esp_formats::air::parse(&data.air).unwrap();
+    let coefficients = records
+        .iter()
+        .find(|r| r.id == 0x1101)
+        .unwrap()
+        .legacy_aerodynamics()
+        .unwrap()
+        .unwrap();
+    let mut modern = Vec::new();
+    for record in &records {
+        if record.id != 0x1101 {
+            modern.extend(record.id.to_le_bytes());
+            modern.extend((record.data.len() as u32).to_le_bytes());
+            modern.extend(record.data);
+        }
+    }
+    let c = coefficients;
+    let blocks: &[(u32, &[f64])] = &[
+        (
+            0x1539,
+            &[
+                c.lift.cl_spoiler,
+                c.lift.cl_flaps,
+                c.lift.unused0,
+                c.lift.cl_ih,
+                c.lift.cl_de,
+                c.lift.unused1,
+            ],
+        ),
+        (
+            0x1540,
+            &[
+                c.drag.cd0,
+                c.drag.cd_flaps,
+                c.drag.cd_gear,
+                c.drag.cd_spoiler,
+            ],
+        ),
+        (
+            0x1541,
+            &[
+                c.pitch.cm_ih,
+                c.pitch.cm_de,
+                c.pitch.cm_de_propwash,
+                c.pitch.cl_q,
+                c.pitch.cl_adot,
+                c.pitch.cm_adot,
+                c.pitch.cm_q,
+                c.pitch.cm_q_propwash,
+                c.pitch.cm0,
+                c.pitch.cm_flap,
+                c.pitch.cm_delta_trim,
+                c.pitch.cm_gear,
+                c.pitch.cm_spoiler,
+            ],
+        ),
+        (
+            0x1542,
+            &[
+                c.side.cy_beta,
+                c.side.cy_p,
+                c.side.cy_r,
+                c.side.cy_delta_rudder,
+            ],
+        ),
+        (
+            0x1543,
+            &[
+                c.roll.cl_beta,
+                c.roll.cl_p,
+                c.roll.cl_r,
+                c.roll.cl_delta_spoiler,
+                c.roll.cl_delta_aileron,
+                c.roll.cl_delta_rudder,
+            ],
+        ),
+        (
+            0x1544,
+            &[
+                c.yaw.cn_beta,
+                c.yaw.cn_p,
+                c.yaw.cn_r,
+                c.yaw.cn_r_propwash,
+                c.yaw.unused[0],
+                c.yaw.unused[1],
+                c.yaw.cn_delta_aileron,
+                c.yaw.cn_delta_rudder,
+                c.yaw.cn_delta_rudder_propwash,
+            ],
+        ),
+    ];
+    for (id, values) in blocks {
+        modern.extend(id.to_le_bytes());
+        modern.extend(((values.len() * 8) as u32).to_le_bytes());
+        for value in *values {
+            modern.extend(value.to_le_bytes());
+        }
+    }
+    data.air = modern;
+    let model = Aerodynamics::from_data(&data).unwrap();
+    let loading = WeightBalance::from_config(&data.configuration)
+        .unwrap()
+        .load(0.0, false)
+        .unwrap();
+    let flaps = vec![
+        0.0;
+        esp_formats::cfg::aircraft::flaps(&data.configuration)
+            .unwrap()
+            .iter()
+            .filter(|flap| flap.kind != 0)
+            .count()
+    ];
+    let sample = |model: &Aerodynamics| {
+        model
+            .forces(
+                DVec3::new(50.0, 3.0, 4.0),
+                DVec3::new(0.03, 0.05, -0.02),
+                1.225,
+                Controls {
+                    elevator: 0.2,
+                    aileron: -0.3,
+                    rudder: 0.1,
+                    ..Controls::default()
+                },
+                &flaps,
+                loading.cg,
+            )
+            .unwrap()
+    };
+    let expected = sample(&legacy);
+    let actual = sample(&model);
+    assert!(actual.force.abs_diff_eq(expected.force, 1e-9));
+    assert!(actual.moment.abs_diff_eq(expected.moment, 1e-9));
+    let drag_offset = esp_formats::air::parse(&data.air)
+        .unwrap()
+        .iter()
+        .find(|record| record.id == 0x1540)
+        .unwrap()
+        .offset
+        + 8;
+    data.air[drag_offset..drag_offset + 8].copy_from_slice(&(c.drag.cd0 + 0.1).to_le_bytes());
+    let increased_drag = sample(&Aerodynamics::from_data(&data).unwrap());
+    assert!(increased_drag.force.x < actual.force.x);
+}
+
+#[test]
+#[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
 fn authored_control_scaling_and_elasticity_change_control_response() {
     let mut verified = 0;
     for path in content::aircraft_paths() {

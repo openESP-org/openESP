@@ -74,7 +74,7 @@ impl Record<'_> {
             _ => return Ok(None),
         };
         let expected = count * 8;
-        if self.data.len() < expected || self.data.len() % 8 != 0 {
+        if self.data.len() < expected || !self.data.len().is_multiple_of(8) {
             return Err(Error::RecordSize {
                 id: self.id,
                 expected,
@@ -83,8 +83,10 @@ impl Record<'_> {
         }
         let values: Vec<f64> = self
             .data
-            .chunks_exact(8)
-            .map(|v| f64::from_le_bytes(v.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|v| f64::from_le_bytes(*v))
             .collect();
         let rotor = || Rotor {
             lateral_position_in: values[0],

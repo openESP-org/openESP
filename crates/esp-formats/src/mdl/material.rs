@@ -80,7 +80,7 @@ pub fn materials3(data: &[u8]) -> Result<(Vec<Material>, Vec<u32>), Error> {
     }
     let mut materials = Vec::new();
     let mut extensions = Vec::new();
-    for entry in data.chunks_exact(124) {
+    for entry in data.as_chunks::<124>().0 {
         materials.extend(records::<Material>(&entry[..120], 120)?);
         extensions.push(u32::from_le_bytes(entry[120..124].try_into().unwrap()));
     }
