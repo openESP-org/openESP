@@ -31,7 +31,7 @@ pub fn gauge_bitmap(bytes: &[u8], alpha: bool, transparent: bool) -> Result<imag
         bitmap.decode(image::Limits::default())?
     }
     .into_rgba8();
-    if transparent {
+    if transparent && !alpha {
         for pixel in image.pixels_mut() {
             if pixel.0[..3] == [0, 0, 0] {
                 pixel.0[3] = 0;
@@ -183,6 +183,28 @@ mod tests {
         assert_eq!(transparent.get_pixel(1, 0).0, [1, 1, 1, 255]);
         assert!(gauge_bitmap(&bytes, true, false).is_err());
         assert!(gauge_bitmap(b"invalid", false, true).is_err());
+
+        // Alpha gauge shadows are black; the black color key must not erase them.
+        let mut indexed = vec![0u8; 66];
+        indexed[0..2].copy_from_slice(b"BM");
+        indexed[2..6].copy_from_slice(&66u32.to_le_bytes());
+        indexed[10..14].copy_from_slice(&62u32.to_le_bytes());
+        indexed[14..18].copy_from_slice(&40u32.to_le_bytes());
+        indexed[18..22].copy_from_slice(&1i32.to_le_bytes());
+        indexed[22..26].copy_from_slice(&1i32.to_le_bytes());
+        indexed[26..28].copy_from_slice(&1u16.to_le_bytes());
+        indexed[28..30].copy_from_slice(&8u16.to_le_bytes());
+        indexed[34..38].copy_from_slice(&4u32.to_le_bytes());
+        indexed[46..50].copy_from_slice(&2u32.to_le_bytes());
+        indexed[61] = 128;
+        indexed[62] = 1;
+        assert_eq!(
+            gauge_bitmap(&indexed, true, true)
+                .unwrap()
+                .get_pixel(0, 0)
+                .0,
+            [0, 0, 0, 127]
+        );
     }
     #[test]
     fn retains_bc_blocks_or_decodes_them_on_request() {

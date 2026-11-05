@@ -5,6 +5,36 @@ use esp_formats::cabinet::Cabinet;
 mod content;
 
 #[test]
+#[ignore = "requires OPENESP_AIRCRAFT_PATHS with the B737_800 gauge CAB"]
+fn decodes_real_737_translucent_gauge_art() {
+    let mut checked = 0;
+    for aircraft in content::aircraft_paths() {
+        let Ok(path) = esp_assets::resolve_path(&aircraft, "panel/B737_800.cab") else {
+            continue;
+        };
+        let mut cab = Cabinet::new(std::fs::File::open(path).unwrap()).unwrap();
+        for name in [
+            "compass_shadow.bmp",
+            "compass_highlight.bmp",
+            "attitude_backup_shadow.bmp",
+        ] {
+            let bytes = cab.read_file_bytes(name, 16 * 1024 * 1024).unwrap();
+            let image = gauge_bitmap(&bytes, true, true).unwrap();
+            assert!(
+                image.pixels().any(|p| p[3] == 0),
+                "{name} has no transparent background"
+            );
+            assert!(
+                image.pixels().any(|p| p[3] > 0 && p[3] < 255),
+                "{name} has no translucent pixels"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no 737 alpha artwork found");
+}
+
+#[test]
 #[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS with a gauge CAB"]
 fn decodes_external_gauge_artwork() {
     let mut decoded = 0;

@@ -15,7 +15,7 @@ pub enum Error {
     UnsupportedExtension(u32),
     #[error("invalid BMP dimensions or plane count")]
     Dimensions,
-    #[error("explicit gauge alpha requires a 32-bit uncompressed BMP")]
+    #[error("explicit gauge alpha requires an 8-bit indexed or 32-bit uncompressed BMP")]
     AlphaFormat,
     #[error("compressed BMP surface needs {required} bytes, found {available}")]
     TruncatedSurface { required: u64, available: usize },
@@ -118,25 +118,36 @@ impl<'a> Bitmap<'a> {
             return Err(Error::UnsupportedHeader(self.dib_header.len()));
         }
         let info = InfoPrefix::read(&mut Cursor::new(self.dib_header))?;
-        if info.bits != 32 || info.compression != [0; 4] {
+        if !matches!(info.bits, 8 | 32) || info.compression != [0; 4] {
             return Err(Error::AlphaFormat);
         }
         if info.width <= 0 || info.height == 0 || info.planes != 1 {
             return Err(Error::Dimensions);
         }
-        let required = u64::from(info.width as u32) * u64::from(info.height.unsigned_abs()) * 4;
-        if required > self.pixels.len() as u64 {
-            return Err(Error::Layout);
-        }
-        limits.reserve(required)?;
-        let mut rgba = self.decode(limits)?.into_rgba8();
         let width = info.width as usize;
         let rows = info.height.unsigned_abs() as usize;
-        // BI_RGB reserves its fourth byte; gauges can explicitly opt into using it as alpha.
+        let stride = if info.bits == 8 {
+            (u64::from(info.width as u32) + 3) & !3
+        } else {
+            u64::from(info.width as u32) * 4
+        };
+        if stride * rows as u64 > self.pixels.len() as u64 {
+            return Err(Error::Layout);
+        }
+        limits.reserve(u64::from(info.width as u32) * rows as u64 * 4)?;
+        let mut rgba = self.decode(limits)?.into_rgba8();
+        // Indexed gauge palettes store transparency (255 is invisible), while
+        // 32-bit BGRA pixels store opacity (255 is opaque).
         for (index, pixel) in rgba.pixels_mut().enumerate() {
             let y = index / width;
             let source_y = if info.height > 0 { rows - 1 - y } else { y };
-            pixel.0[3] = self.pixels[(source_y * width + index % width) * 4 + 3];
+            let row = source_y * stride as usize;
+            pixel.0[3] = if info.bits == 8 {
+                let entry = self.pixels[row + index % width] as usize;
+                255 - *self.metadata.get(entry * 4 + 3).ok_or(Error::Layout)?
+            } else {
+                self.pixels[row + (index % width) * 4 + 3]
+            };
         }
         Ok(DynamicImage::ImageRgba8(rgba))
     }
@@ -352,6 +363,40 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn decodes_indexed_gauge_alpha_with_padded_rows() {
+        let palette = [0, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255, 255];
+        let pixels = [0, 1, 2, 0, 2, 1, 0, 0];
+        for height in [-2, 2] {
+            let bytes = bitmap(3, height, 8, 0, &palette, &pixels);
+            let bmp = Bitmap::parse(&bytes).unwrap();
+            let rgba = bmp.decode_alpha(Limits::default()).unwrap().into_rgba8();
+            let alpha = rgba.pixels().map(|p| p.0[3]).collect::<Vec<_>>();
+            assert_eq!(
+                alpha,
+                if height < 0 {
+                    vec![255, 127, 0, 0, 127, 255]
+                } else {
+                    vec![0, 127, 255, 255, 127, 0]
+                }
+            );
+            assert!(
+                bmp.decode(Limits::default())
+                    .unwrap()
+                    .into_rgba8()
+                    .pixels()
+                    .all(|p| p.0[3] == 255)
+            );
+        }
+        let truncated = bitmap(3, 2, 8, 0, &palette, &pixels[..7]);
+        assert!(
+            Bitmap::parse(&truncated)
+                .unwrap()
+                .decode_alpha(Limits::default())
+                .is_err()
+        );
     }
 
     #[test]
