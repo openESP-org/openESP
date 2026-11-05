@@ -40,6 +40,35 @@ struct Fonts {
 }
 static FONTS: OnceLock<Mutex<Fonts>> = OnceLock::new();
 
+fn find_face(
+    database: &fontdb::Database,
+    face: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<fontdb::ID> {
+    // Windows font family names in gauge XML are case-insensitive, whereas
+    // fontdb's named-family lookup compares strings exactly.
+    let family = database
+        .faces()
+        .flat_map(|info| &info.families)
+        .find(|(name, _)| name.eq_ignore_ascii_case(face))
+        .map(|(name, _)| name.as_str())?;
+    database.query(&fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: if bold {
+            fontdb::Weight::BOLD
+        } else {
+            fontdb::Weight::NORMAL
+        },
+        style: if italic {
+            fontdb::Style::Italic
+        } else {
+            fontdb::Style::Normal
+        },
+        ..fontdb::Query::default()
+    })
+}
+
 fn font(face: &str, bold: bool, italic: bool) -> Result<FontArc> {
     let fonts = FONTS.get_or_init(|| {
         let mut database = fontdb::Database::new();
@@ -56,22 +85,7 @@ fn font(face: &str, bold: bool, italic: bool) -> Result<FontArc> {
     if let Some(font) = fonts.faces.get(&key) {
         return Ok(font.clone());
     }
-    let id = fonts
-        .database
-        .query(&fontdb::Query {
-            families: &[fontdb::Family::Name(face)],
-            weight: if bold {
-                fontdb::Weight::BOLD
-            } else {
-                fontdb::Weight::NORMAL
-            },
-            style: if italic {
-                fontdb::Style::Italic
-            } else {
-                fontdb::Style::Normal
-            },
-            ..fontdb::Query::default()
-        })
+    let id = find_face(&fonts.database, face, bold, italic)
         .with_context(|| format!("gauge font {face} is unavailable"))?;
     let font = fonts
         .database
@@ -122,21 +136,7 @@ impl FontResolver {
         if let Some(cached) = fonts.faces.get(&font_key) {
             return Ok(cached.clone());
         }
-        let query = fontdb::Query {
-            families: &[fontdb::Family::Name(face)],
-            weight: if bold {
-                fontdb::Weight::BOLD
-            } else {
-                fontdb::Weight::NORMAL
-            },
-            style: if italic {
-                fontdb::Style::Italic
-            } else {
-                fontdb::Style::Normal
-            },
-            ..fontdb::Query::default()
-        };
-        if let Some(id) = fonts.database.query(&query) {
+        if let Some(id) = find_face(&fonts.database, face, bold, italic) {
             let result = fonts
                 .database
                 .with_face_data(id, |data, index| {
@@ -435,7 +435,7 @@ mod tests {
         std::fs::create_dir_all(&panel_dir).unwrap();
         std::fs::create_dir_all(simulator.join("Fonts")).unwrap();
         std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\nsize_mm=100,30\npixel_size=100,30\ntexture=$screen\ngauge00=Pack!Dial,0,0,100,30").unwrap();
-        let xml = br#"<Gauge><Size X="100" Y="30"/><Element><GaugeText><Size>100,30</Size><FontFace>MissingPrivateFont</FontFace><AlternateFont>Arial</AlternateFont><FontHeight>22</FontHeight><Transparent>True</Transparent><GaugeString>HELLO</GaugeString></GaugeText></Element></Gauge>"#;
+        let xml = br#"<Gauge><Size X="100" Y="30"/><Element><GaugeText><Size>100,30</Size><FontFace>aRiAl</FontFace><FontHeight>22</FontHeight><Transparent>True</Transparent><GaugeString>HELLO</GaugeString></GaugeText></Element></Gauge>"#;
         let mut builder = CabinetBuilder::new(WriteCompression::None);
         builder.add_file("Dial.xml", xml).unwrap();
         builder.add_file("fonts\\custom.ttf", &font_bytes).unwrap();
@@ -447,7 +447,7 @@ mod tests {
             .unwrap();
         let fonts = FontResolver::default();
         fonts
-            .resolve(&panel, "Pack", "Arial", false, false)
+            .resolve(&panel, "Pack", "aRiAl", false, false)
             .unwrap();
         assert!(
             fonts.modules.lock().unwrap()["pack"]
@@ -456,6 +456,12 @@ mod tests {
                 .count()
                 > 0
         );
+        let private = fonts.modules.lock().unwrap();
+        let database = &private["pack"].database;
+        assert!(find_face(database, "arial", false, false).is_some());
+        assert!(find_face(database, "ARIAL", false, false).is_some());
+        assert!(find_face(database, "no-such-family", false, false).is_none());
+        drop(private);
         let image = crate::gauge::load_panel(&panel, "$screen")
             .unwrap()
             .unwrap();
