@@ -75,6 +75,7 @@ pub fn convert(value: &Value, from: Option<&str>, to: Option<&str>) -> Option<Va
         "pounds force" => Some((7, 4.4482216152605)),
         "kilograms per second" => Some((8, 1.0)),
         "pounds per hour" => Some((8, 0.45359237 / 3600.0)),
+        "amps" | "ampere" | "amperes" | "amp" => Some((13, 1.0)),
         "rpm" | "revolutions per minute" => Some((9, 1.0)),
         "watts" => Some((10, 1.0)),
         "horsepower" => Some((10, 745.69987158227)),

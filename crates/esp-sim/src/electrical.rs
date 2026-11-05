@@ -54,13 +54,13 @@ impl Electrical {
         let battery = read(variables, "ELECTRICAL MASTER BATTERY")?;
         let avionics = read(variables, "AVIONICS MASTER SWITCH")?;
         let mut sources = [0.0_f64; 8];
-        // This routing stage models ideal regulated sources. Generator loading,
-        // battery discharge and shaft-speed cut-in are separate model work.
+        // Sources remain ideal and battery state of charge is not yet modeled.
         sources[3] = self.definition.battery_voltage;
         if battery {
             sources[2] = self.definition.battery_voltage;
         }
         let mut links = Vec::new();
+        let mut generator_capacity = [0.0_f64; 8];
         if read(variables, "ELECTRICAL BATTERY BUS CONTACT SWITCH")? {
             links.push((0, 2));
         }
@@ -87,6 +87,8 @@ impl Electrical {
             ensure!(bus < sources.len(), "generator bus index is out of range");
             if active {
                 sources[bus] = self.definition.generator_voltage;
+                generator_capacity[bus] =
+                    self.definition.generator_amperes * f64::from(generator.count);
             }
             if read(
                 variables,
@@ -132,6 +134,7 @@ impl Electrical {
             && sources[feeder.bus] >= feeder.minimum_voltage
         {
             sources[1] = sources[feeder.bus];
+            links.push((1, feeder.bus));
         }
         if self.definition.always_available {
             sources.fill(
@@ -165,6 +168,70 @@ impl Electrical {
                 || (voltage > 0.0 && voltage >= circuit.minimum_voltage);
             variables.set_number(circuit_variable(circuit.name), "bool", f64::from(powered));
         }
+        // Legacy circuit amperages are rated loads, so this is an estimate
+        // for the switched consumers currently represented by the simulator.
+        let mut battery_network = [false; 8];
+        battery_network[2] = battery;
+        for _ in 0..8 {
+            for &(a, b) in &links {
+                let connected = battery_network[a] || battery_network[b];
+                battery_network[a] = connected;
+                battery_network[b] = connected;
+            }
+        }
+        let switch_on = |variables: &mut Variables, name: &str| -> bool {
+            variables
+                .read(&Reference::new('A', name, Some("bool")))
+                .ok()
+                .and_then(|value| value.number().ok())
+                .is_some_and(|value| value != 0.0)
+        };
+        let mut total_load = 0.0;
+        let mut battery_network_load = 0.0;
+        for circuit in &self.definition.circuits {
+            let enabled = match circuit.name {
+                "additional_system" => true,
+                "avionics_bus" | "avionics" => avionics,
+                "autopilot" => switch_on(variables, "AUTOPILOT MASTER"),
+                "pitot_heat" => switch_on(variables, "PITOT HEAT"),
+                "starter1" | "starter2" | "starter3" | "starter4" => {
+                    let index = circuit.name.as_bytes()[7] - b'0';
+                    switch_on(variables, &format!("GENERAL ENG STARTER ACTIVE:{index}"))
+                }
+                "light_nav" => switch_on(variables, "LIGHT NAV"),
+                "light_beacon" => switch_on(variables, "LIGHT BEACON"),
+                "light_landing" => switch_on(variables, "LIGHT LANDING"),
+                "light_taxi" => switch_on(variables, "LIGHT TAXI"),
+                "light_strobe" => switch_on(variables, "LIGHT STROBE"),
+                "light_panel" => switch_on(variables, "LIGHT PANEL"),
+                "light_cabin" => switch_on(variables, "LIGHT CABIN"),
+                "light_recognition" => switch_on(variables, "LIGHT RECOGNITION"),
+                "light_wing" => switch_on(variables, "LIGHT WING"),
+                "light_logo" => switch_on(variables, "LIGHT LOGO"),
+                _ => false,
+            };
+            if enabled
+                && sources[circuit.bus] > 0.0
+                && sources[circuit.bus] >= circuit.minimum_voltage
+            {
+                total_load += circuit.amperes;
+                if battery_network[circuit.bus] {
+                    battery_network_load += circuit.amperes;
+                }
+            }
+        }
+        let available_generation: f64 = generator_capacity
+            .iter()
+            .zip(battery_network)
+            .filter_map(|(capacity, connected)| connected.then_some(*capacity))
+            .sum();
+        let battery_load = if battery && !self.definition.always_available {
+            -(battery_network_load - available_generation).max(0.0)
+        } else {
+            0.0
+        };
+        variables.set_number("ELECTRICAL TOTAL LOAD AMPS", "amperes", total_load);
+        variables.set_number("ELECTRICAL BATTERY LOAD", "amperes", battery_load);
         Ok(())
     }
 }
@@ -222,6 +289,66 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn estimates_battery_load_from_switched_consumers_and_connected_generation() {
+        let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=5\nadditional_system=0,2,17\nlight_nav=0,5,17\npitot_heat=0,2,17\navionics_bus=0,3,17\navionics=1,4,17").unwrap();
+        let mut variables = Variables::default();
+        variables
+            .configure_electrical(&Definition::from_config(&config).unwrap(), false)
+            .unwrap();
+        variables.set_number("LIGHT NAV", "bool", 1.0);
+        variables.set_number("PITOT HEAT", "bool", 0.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            0.0
+        );
+        variables
+            .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL TOTAL LOAD AMPS", "amperes"),
+            7.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            -7.0
+        );
+        variables.set_number("PITOT HEAT", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amperes"),
+            -9.0
+        );
+        variables
+            .dispatch_event("TOGGLE_ALTERNATOR1", Value::Number(0.0))
+            .unwrap();
+        variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amperes"),
+            -4.0
+        );
+        variables.set_number("ELECTRICAL GENALT BUS CONTACT SWITCH:1", "bool", 0.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amperes"),
+            -9.0
+        );
+        variables.set_number("AVIONICS MASTER SWITCH", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amperes"),
+            -16.0
+        );
+        variables.set_number("ELECTRICAL BATTERY BUS CONTACT SWITCH", "bool", 0.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amperes"),
+            0.0
+        );
+    }
     #[test]
     fn routes_sources_contactors_and_circuit_voltage_thresholds() {
         let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\nengine.1=0,0,0\n[electrical]\nmax_battery_voltage=24\ngenerator_alternator_voltage=30\nengine_generator_map=1,0\navionics=1,5,17\nadditional_system=0,2,25\nlight_nav=3,5,17\nlight_taxi=4,5,17").unwrap();
