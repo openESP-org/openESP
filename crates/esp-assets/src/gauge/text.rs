@@ -83,6 +83,73 @@ fn font(face: &str, bold: bool, italic: bool) -> Result<FontArc> {
     Ok(font)
 }
 
+/// Per-panel font databases prevent unrelated aircraft from replacing each
+/// other's gauge fonts; system fonts remain the fallback.
+#[derive(Default)]
+pub(super) struct FontResolver {
+    modules: Mutex<HashMap<String, Fonts>>,
+}
+
+impl FontResolver {
+    fn resolve(
+        &self,
+        panel: &crate::panel::Panel,
+        module: &str,
+        face: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<FontArc> {
+        let mut modules = self
+            .modules
+            .lock()
+            .map_err(|_| anyhow::anyhow!("gauge font cache lock was poisoned"))?;
+        let key = module.to_ascii_lowercase();
+        if !modules.contains_key(&key) {
+            let mut database = fontdb::Database::new();
+            for bytes in panel.font_resources(module)? {
+                database.load_font_data(bytes);
+            }
+            modules.insert(
+                key.clone(),
+                Fonts {
+                    database,
+                    faces: HashMap::new(),
+                },
+            );
+        }
+        let fonts = modules.get_mut(&key).expect("font module was inserted");
+        let font_key = (face.to_ascii_lowercase(), bold, italic);
+        if let Some(cached) = fonts.faces.get(&font_key) {
+            return Ok(cached.clone());
+        }
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name(face)],
+            weight: if bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            style: if italic {
+                fontdb::Style::Italic
+            } else {
+                fontdb::Style::Normal
+            },
+            ..fontdb::Query::default()
+        };
+        if let Some(id) = fonts.database.query(&query) {
+            let result = fonts
+                .database
+                .with_face_data(id, |data, index| {
+                    FontVec::try_from_vec_and_index(data.to_vec(), index).map(FontArc::from)
+                })
+                .context("reading aircraft gauge font")??;
+            fonts.faces.insert(font_key, result.clone());
+            return Ok(result);
+        }
+        drop(modules);
+        font(face, bold, italic)
+    }
+}
 fn text(node: Node<'_, '_>, name: &str) -> Option<String> {
     node.children()
         .find(|n| n.has_tag_name(name))
@@ -170,12 +237,17 @@ impl Color {
 }
 
 impl Text {
-    pub fn parse(node: Node<'_, '_>, gauge_size: (u32, u32)) -> Result<(Self, RgbaImage)> {
+    pub fn parse(
+        node: Node<'_, '_>,
+        gauge_size: (u32, u32),
+        fonts: &FontResolver,
+        panel: &crate::panel::Panel,
+        module: &str,
+    ) -> Result<(Self, RgbaImage)> {
         ensure!(
-            !node.children().any(|n| matches!(
-                n.tag_name().name(),
-                "FontHeightScript" | "FontWidth" | "AlternateFont"
-            )),
+            !node
+                .children()
+                .any(|n| matches!(n.tag_name().name(), "FontHeightScript" | "FontWidth")),
             "unsupported dynamic gauge font or character width"
         );
         let size = text(node, "Size")
@@ -201,7 +273,17 @@ impl Text {
             "gauge text canvas exceeds size limit"
         );
         let face = text(node, "FontFace").unwrap_or_else(|| "Arial".into());
-        let font = font(face.trim(), flag(node, "Bold")?, flag(node, "Italic")?)?;
+        let bold = flag(node, "Bold")?;
+        let italic = flag(node, "Italic")?;
+        let font = match fonts.resolve(panel, module, face.trim(), bold, italic) {
+            Ok(font) => font,
+            Err(primary) => match text(node, "AlternateFont") {
+                Some(alternate) => fonts
+                    .resolve(panel, module, alternate.trim(), bold, italic)
+                    .with_context(|| format!("primary font {face} unavailable: {primary:#}"))?,
+                None => return Err(primary),
+            },
+        };
         let height = text(node, "FontHeight")
             .map(|h| h.trim().parse::<f32>())
             .transpose()?
@@ -332,6 +414,66 @@ fn color_background(node: Node<'_, '_>) -> Result<Rgba<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resolves_private_fonts_from_simulator_folder_and_gauge_cab() {
+        use cabinet::{CabinetBuilder, WriteCompression};
+        use std::io::Cursor;
+        let Some(windows) = std::env::var_os("WINDIR") else {
+            return;
+        };
+        let font_path = std::path::PathBuf::from(windows)
+            .join("Fonts")
+            .join("arial.ttf");
+        if !font_path.exists() {
+            return;
+        }
+        let font_bytes = std::fs::read(font_path).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let aircraft = root.path().join("aircraft");
+        let panel_dir = aircraft.join("panel");
+        let simulator = root.path().join("simulator");
+        std::fs::create_dir_all(&panel_dir).unwrap();
+        std::fs::create_dir_all(simulator.join("Fonts")).unwrap();
+        std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\nsize_mm=100,30\npixel_size=100,30\ntexture=$screen\ngauge00=Pack!Dial,0,0,100,30").unwrap();
+        let xml = br#"<Gauge><Size X="100" Y="30"/><Element><GaugeText><Size>100,30</Size><FontFace>MissingPrivateFont</FontFace><AlternateFont>Arial</AlternateFont><FontHeight>22</FontHeight><Transparent>True</Transparent><GaugeString>HELLO</GaugeString></GaugeText></Element></Gauge>"#;
+        let mut builder = CabinetBuilder::new(WriteCompression::None);
+        builder.add_file("Dial.xml", xml).unwrap();
+        builder.add_file("fonts\\custom.ttf", &font_bytes).unwrap();
+        let mut archive = Cursor::new(Vec::new());
+        builder.write(&mut archive).unwrap();
+        std::fs::write(panel_dir.join("Pack.cab"), archive.into_inner()).unwrap();
+        let panel = crate::panel::Panel::load_with_root(&aircraft, None, Some(&simulator))
+            .unwrap()
+            .unwrap();
+        let fonts = FontResolver::default();
+        fonts
+            .resolve(&panel, "Pack", "Arial", false, false)
+            .unwrap();
+        assert!(
+            fonts.modules.lock().unwrap()["pack"]
+                .database
+                .faces()
+                .count()
+                > 0
+        );
+        let image = crate::gauge::load_panel(&panel, "$screen")
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        assert_eq!(image.omitted_elements, 0);
+        std::fs::write(simulator.join("Fonts").join("private.ttf"), &font_bytes).unwrap();
+        let other = FontResolver::default();
+        other
+            .resolve(&panel, "NoCab", "Arial", false, false)
+            .unwrap();
+        assert!(
+            other.modules.lock().unwrap()["nocab"]
+                .database
+                .faces()
+                .count()
+                > 0
+        );
+    }
     #[test]
     fn decodes_sdk_bgr_colors() {
         assert_eq!(color("0x01E00D").unwrap(), Rgba([13, 224, 1, 255]));

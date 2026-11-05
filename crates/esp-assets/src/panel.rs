@@ -8,6 +8,7 @@ use std::{
 pub struct Panel {
     pub directory: PathBuf,
     gauges: Option<PathBuf>,
+    fonts: Option<PathBuf>,
     config: cfg::Config,
 }
 
@@ -34,9 +35,14 @@ impl Panel {
             .map(|root| child(root, "Gauges"))
             .transpose()?
             .flatten();
+        let fonts = fsx_root
+            .map(|root| child(root, "Fonts"))
+            .transpose()?
+            .flatten();
         Ok(Some(Self {
             directory,
             gauges,
+            fonts,
             config,
         }))
     }
@@ -57,6 +63,76 @@ impl Panel {
         Ok([components[0], components[1], components[2], 255])
     }
 
+    /// Load outline fonts shipped with the selected simulator or gauge module.
+    /// Keep these scoped to this panel rather than installing them globally.
+    pub(crate) fn font_resources(&self, module: &str) -> Result<Vec<Vec<u8>>> {
+        anyhow::ensure!(
+            !module.is_empty() && !module.contains(['/', '\\']),
+            "invalid gauge module"
+        );
+        const FONT_LIMIT: usize = 16 * 1024 * 1024;
+        const TOTAL_LIMIT: usize = 96 * 1024 * 1024;
+        fn is_font(name: &str) -> bool {
+            let name = name.to_ascii_lowercase();
+            name.ends_with(".ttf") || name.ends_with(".otf") || name.ends_with(".ttc")
+        }
+        fn directory_fonts(
+            path: &Path,
+            output: &mut Vec<Vec<u8>>,
+            total: &mut usize,
+        ) -> Result<()> {
+            if !path.is_dir() {
+                return Ok(());
+            }
+            let mut paths = std::fs::read_dir(path)?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| is_font(&name.to_string_lossy()))
+                })
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let size = std::fs::metadata(&path)?.len();
+                if size == 0 || size > FONT_LIMIT as u64 || *total + size as usize > TOTAL_LIMIT {
+                    continue;
+                }
+                let bytes = std::fs::read(path)?;
+                *total += bytes.len();
+                output.push(bytes);
+            }
+            Ok(())
+        }
+        let mut output = Vec::new();
+        let mut total = 0;
+        directory_fonts(&self.directory, &mut output, &mut total)?;
+        if let Some(fonts) = &self.fonts {
+            directory_fonts(fonts, &mut output, &mut total)?;
+        }
+        for root in std::iter::once(&self.directory).chain(self.gauges.iter()) {
+            if let Some(directory) = child(root, module)? {
+                directory_fonts(&directory, &mut output, &mut total)?;
+            }
+            if let Some(path) = child(root, &format!("{module}.cab"))? {
+                let mut cabinet = Cabinet::new(std::fs::File::open(path)?)?;
+                let names: Vec<_> = cabinet
+                    .entries()
+                    .iter()
+                    .filter(|entry| is_font(&entry.name))
+                    .map(|entry| entry.name.clone())
+                    .collect();
+                for name in names {
+                    if let Ok(bytes) = cabinet.read_file_bytes(&name, FONT_LIMIT)
+                        && total + bytes.len() <= TOTAL_LIMIT
+                    {
+                        total += bytes.len();
+                        output.push(bytes);
+                    }
+                }
+            }
+        }
+        Ok(output)
+    }
     pub fn read_xml_gauge(&self, reference: &str, limit: usize) -> Result<Option<Vec<u8>>> {
         let (module, gauge) = reference
             .split_once('!')

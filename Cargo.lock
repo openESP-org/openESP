@@ -706,6 +706,7 @@ dependencies = [
  "glam 0.30.10",
  "image",
  "imageproc",
+ "ms-cabinet",
  "rayon",
  "roxmltree 0.21.2",
  "tempfile",

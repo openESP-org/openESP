@@ -453,6 +453,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
     );
     let background = Rgba(panel.background(window.section)?);
     let output = RgbaImage::from_pixel(width, height, background);
+    let fonts = text::FontResolver::default();
     let loaded: Vec<Result<_>> = window
         .gauges
         .par_iter()
@@ -809,7 +810,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                     });
                 }
                 if node.has_tag_name("GaugeText") {
-                    match text::Text::parse(node, (w, h)) {
+                    match text::Text::parse(node, (w, h), &fonts, panel, module) {
                         Ok((text, image)) => {
                             let transform = rotation::transform(&motion, &conditions);
                             layers.push(Layer {
