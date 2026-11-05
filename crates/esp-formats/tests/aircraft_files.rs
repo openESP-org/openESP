@@ -6,13 +6,19 @@ mod content;
 #[test]
 #[ignore = "requires OPENESP_AIRCRAFT_PATHS with rotorcraft aircraft.cfg files"]
 fn decodes_external_helicopter_rotors() {
-    use esp_formats::cfg::helicopter::{MainRotor, SecondaryRotor};
+    use esp_formats::cfg::helicopter::{
+        FuselageAerodynamics, Helicopter, MainRotor, SecondaryRotor,
+    };
     let mut configured = 0;
     for path in content::aircraft_paths() {
         let path = path.join("aircraft.cfg");
         let config =
             Config::from_bytes(&std::fs::read(&path).unwrap(), encoding_rs::WINDOWS_1252).unwrap();
         let main = MainRotor::from_config(&config)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        Helicopter::from_config(&config)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        FuselageAerodynamics::from_config(&config)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         SecondaryRotor::from_config(&config)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
