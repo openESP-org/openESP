@@ -595,15 +595,38 @@ impl Variables {
         self.dispatch_event(name, value)
     }
 
-    fn toggle(&mut self, name: &str) -> Result<(), Error> {
+    fn boolean(&mut self, name: &str) -> Result<bool, Error> {
         let reference = Reference::new('A', name, Some("bool"));
-        let active = if self.values.contains_key(&('A', reference.name.clone())) {
-            self.read(&reference)?.number()?
+        if self.values.contains_key(&('A', name.to_owned())) {
+            Ok(self.read(&reference)?.number()? != 0.0)
         } else {
-            0.0
-        };
-        self.set_number(name, "bool", f64::from(active == 0.0));
-        Ok(())
+            Ok(false)
+        }
+    }
+
+    fn set_boolean(&mut self, name: &str, active: bool) {
+        self.set_number(name, "bool", f64::from(active));
+    }
+
+    fn toggle_boolean(&mut self, name: &str) -> Result<bool, Error> {
+        let active = !self.boolean(name)?;
+        self.set_boolean(name, active);
+        Ok(active)
+    }
+
+    fn toggle(&mut self, name: &str) -> Result<(), Error> {
+        self.toggle_boolean(name).map(|_| ())
+    }
+
+    fn disable_autopilot_modes(&mut self) {
+        for name in [
+            "AUTOPILOT HEADING LOCK",
+            "AUTOPILOT ALTITUDE LOCK",
+            "AUTOPILOT VERTICAL HOLD",
+            "AUTOPILOT WING LEVELER",
+        ] {
+            self.set_boolean(name, false);
+        }
     }
 
     fn nav_radio_event(&mut self, name: &str, value: f64) -> Result<(), Error> {
@@ -1039,6 +1062,135 @@ impl Variables {
                 .ok_or_else(|| Error::Unsupported("flap system is unavailable".into()))?
                 .event(name, value),
             "TOGGLE_FLIGHT_DIRECTOR" => self.toggle("AUTOPILOT FLIGHT DIRECTOR ACTIVE"),
+            "AP_MASTER" | "TOGGLE_AUTOPILOT" => {
+                if !self.toggle_boolean("AUTOPILOT MASTER")? {
+                    self.disable_autopilot_modes();
+                }
+                Ok(())
+            }
+            "AUTOPILOT_ON" => {
+                self.set_boolean("AUTOPILOT MASTER", true);
+                Ok(())
+            }
+            "AUTOPILOT_OFF" | "AUTOPILOT_DISENGAGE" => {
+                self.set_boolean("AUTOPILOT MASTER", false);
+                self.disable_autopilot_modes();
+                Ok(())
+            }
+            "AP_PANEL_HEADING_HOLD" | "AP_HDG_HOLD" | "AP_HEADING_HOLD" => {
+                if self.toggle_boolean("AUTOPILOT HEADING LOCK")? {
+                    self.set_boolean("AUTOPILOT WING LEVELER", false);
+                }
+                Ok(())
+            }
+            "AP_WING_LEVELER" | "WING_LEVELER" => {
+                if self.toggle_boolean("AUTOPILOT WING LEVELER")? {
+                    self.set_boolean("AUTOPILOT HEADING LOCK", false);
+                }
+                Ok(())
+            }
+            "AP_PANEL_ALTITUDE_HOLD" | "AP_ALT_HOLD" => {
+                if self.toggle_boolean("AUTOPILOT ALTITUDE LOCK")? {
+                    self.set_boolean("AUTOPILOT VERTICAL HOLD", false);
+                }
+                Ok(())
+            }
+            "AP_PANEL_VS_HOLD" | "AP_VS_HOLD" => {
+                if self.toggle_boolean("AUTOPILOT VERTICAL HOLD")? {
+                    self.set_boolean("AUTOPILOT ALTITUDE LOCK", false);
+                }
+                Ok(())
+            }
+            "AP_MAX_BANK_INC" | "AP_MAX_BANK_DEC" | "AP_MAX_BANK_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let reference = Reference::new('A', "AUTOPILOT MAX BANK", Some("degrees"));
+                let current = if self.values.contains_key(&('A', reference.name.clone())) {
+                    self.read(&reference)?.number()?
+                } else {
+                    25.0
+                };
+                let bank = match name {
+                    "AP_MAX_BANK_INC" => current + 5.0,
+                    "AP_MAX_BANK_DEC" => current - 5.0,
+                    _ => value,
+                };
+                self.set_number("AUTOPILOT MAX BANK", "degrees", bank.clamp(10.0, 30.0));
+                Ok(())
+            }
+            "AP_ALT_VAR_INC"
+            | "AP_ALT_VAR_DEC"
+            | "AP_ALT_VAR_SET"
+            | "AP_ALT_VAR_SET_ENGLISH"
+            | "AP_ALT_VAR_SET_METRIC" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let reference = Reference::new('A', "AUTOPILOT ALTITUDE LOCK VAR", Some("feet"));
+                let current = if self.values.contains_key(&('A', reference.name.clone())) {
+                    self.read(&reference)?.number()?
+                } else {
+                    0.0
+                };
+                let altitude = match name {
+                    "AP_ALT_VAR_INC" => {
+                        crate::autopilot::selected_altitude_increment(current, 100.0)
+                            .map_err(|_| Error::Number)?
+                    }
+                    "AP_ALT_VAR_DEC" => {
+                        crate::autopilot::selected_altitude_increment(current, -100.0)
+                            .map_err(|_| Error::Number)?
+                    }
+                    "AP_ALT_VAR_SET_METRIC" => crate::autopilot::selected_altitude_meters(value)
+                        .map_err(|_| Error::Number)?,
+                    _ => crate::autopilot::selected_altitude_increment(current, value - current)
+                        .map_err(|_| Error::Number)?,
+                };
+                self.set_number("AUTOPILOT ALTITUDE LOCK VAR", "feet", altitude);
+                Ok(())
+            }
+            "AP_VS_VAR_INC"
+            | "AP_VS_VAR_DEC"
+            | "AP_VS_VAR_SET"
+            | "AP_VS_VAR_SET_ENGLISH"
+            | "AP_VS_VAR_SET_METRIC" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                let reference =
+                    Reference::new('A', "AUTOPILOT VERTICAL HOLD VAR", Some("feet per minute"));
+                let current = if self.values.contains_key(&('A', reference.name.clone())) {
+                    self.read(&reference)?.number()?
+                } else {
+                    0.0
+                };
+                let vertical_speed = match name {
+                    "AP_VS_VAR_INC" => {
+                        crate::autopilot::selected_vertical_speed_increment(current, 100.0)
+                            .map_err(|_| Error::Number)?
+                    }
+                    "AP_VS_VAR_DEC" => {
+                        crate::autopilot::selected_vertical_speed_increment(current, -100.0)
+                            .map_err(|_| Error::Number)?
+                    }
+                    "AP_VS_VAR_SET_METRIC" => {
+                        crate::autopilot::selected_vertical_speed_meters_per_second(value)
+                            .map_err(|_| Error::Number)?
+                    }
+                    _ => crate::autopilot::selected_vertical_speed_increment(
+                        current,
+                        value - current,
+                    )
+                    .map_err(|_| Error::Number)?,
+                };
+                self.set_number(
+                    "AUTOPILOT VERTICAL HOLD VAR",
+                    "feet per minute",
+                    vertical_speed,
+                );
+                Ok(())
+            }
             "HYDRAULIC_SWITCH_TOGGLE" => self.toggle("HYDRAULIC SWITCH"),
             "TOGGLE_HYDRAULIC_FAILURE" => self.toggle("HYDRAULIC FAILURE"),
             "TOGGLE_MASTER_BATTERY" => self.toggle("ELECTRICAL MASTER BATTERY"),
@@ -1605,6 +1757,224 @@ mod tests {
                 .is_err()
         );
         assert_eq!(variables.read(&reference).unwrap(), Value::Number(45.0));
+    }
+
+    #[test]
+    fn autopilot_master_and_mode_events_are_exclusive() {
+        let mut variables = Variables::default();
+        let read = |variables: &mut Variables, name| {
+            variables
+                .read(&Reference::new('A', name, Some("bool")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+
+        variables
+            .dispatch_event("AP_PANEL_HEADING_HOLD", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT HEADING LOCK"), 1.0);
+        variables
+            .dispatch_event("AP_WING_LEVELER", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT HEADING LOCK"), 0.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT WING LEVELER"), 1.0);
+        variables
+            .dispatch_event("AP_PANEL_HEADING_HOLD", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT HEADING LOCK"), 1.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT WING LEVELER"), 0.0);
+
+        variables
+            .dispatch_event("AP_PANEL_ALTITUDE_HOLD", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT ALTITUDE LOCK"), 1.0);
+        variables
+            .dispatch_event("AP_PANEL_VS_HOLD", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT ALTITUDE LOCK"), 0.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT VERTICAL HOLD"), 1.0);
+        variables
+            .dispatch_event("AP_PANEL_VS_HOLD", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT VERTICAL HOLD"), 0.0);
+        variables
+            .dispatch_event("AP_PANEL_ALTITUDE_HOLD", Value::Number(0.0))
+            .unwrap();
+
+        variables
+            .dispatch_event("AUTOPILOT_ON", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MASTER"), 1.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT HEADING LOCK"), 1.0);
+        variables
+            .dispatch_event("AP_MASTER", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MASTER"), 0.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT HEADING LOCK"), 0.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT ALTITUDE LOCK"), 0.0);
+
+        variables
+            .dispatch_event("AP_MASTER", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MASTER"), 1.0);
+        assert_eq!(read(&mut variables, "AUTOPILOT ALTITUDE LOCK"), 0.0);
+        variables
+            .dispatch_event("AUTOPILOT_DISENGAGE", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MASTER"), 0.0);
+    }
+
+    #[test]
+    fn autopilot_selectors_increment_convert_and_bound_selected_values() {
+        let mut variables = Variables::default();
+        let read = |variables: &mut Variables, name, unit| {
+            variables
+                .read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables.set_number("AUTOPILOT MAX BANK", "degrees", 25.0);
+        variables
+            .dispatch_event("AP_MAX_BANK_INC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MAX BANK", "degrees"), 30.0);
+        for _ in 0..10 {
+            variables
+                .dispatch_event("AP_MAX_BANK_DEC", Value::Number(0.0))
+                .unwrap();
+        }
+        assert_eq!(read(&mut variables, "AUTOPILOT MAX BANK", "degrees"), 10.0);
+        variables
+            .dispatch_event("AP_MAX_BANK_SET", Value::Number(22.0))
+            .unwrap();
+        assert_eq!(read(&mut variables, "AUTOPILOT MAX BANK", "degrees"), 22.0);
+
+        variables
+            .dispatch_event("AP_ALT_VAR_SET_ENGLISH", Value::Number(5000.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet"),
+            5000.0
+        );
+        variables
+            .dispatch_event("AP_ALT_VAR_INC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet"),
+            5100.0
+        );
+        variables
+            .dispatch_event("AP_ALT_VAR_DEC", Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_event("AP_ALT_VAR_DEC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet"),
+            4900.0
+        );
+        variables
+            .dispatch_event("AP_ALT_VAR_SET_METRIC", Value::Number(1524.0))
+            .unwrap();
+        let altitude = read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet");
+        assert!((altitude - 5000.0).abs() < 0.01);
+        for _ in 0..2000 {
+            variables
+                .dispatch_event("AP_ALT_VAR_INC", Value::Number(0.0))
+                .unwrap();
+        }
+        assert_eq!(
+            read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet"),
+            100_000.0
+        );
+
+        variables
+            .dispatch_event("AP_VS_VAR_SET_ENGLISH", Value::Number(1500.0))
+            .unwrap();
+        assert_eq!(
+            read(
+                &mut variables,
+                "AUTOPILOT VERTICAL HOLD VAR",
+                "feet per minute"
+            ),
+            1500.0
+        );
+        variables
+            .dispatch_event("AP_VS_VAR_DEC", Value::Number(0.0))
+            .unwrap();
+        assert_eq!(
+            read(
+                &mut variables,
+                "AUTOPILOT VERTICAL HOLD VAR",
+                "feet per minute"
+            ),
+            1400.0
+        );
+        variables
+            .dispatch_event("AP_VS_VAR_SET_METRIC", Value::Number(-3.0))
+            .unwrap();
+        let vertical_speed = read(
+            &mut variables,
+            "AUTOPILOT VERTICAL HOLD VAR",
+            "feet per minute",
+        );
+        assert!((vertical_speed + 590.551).abs() < 0.01);
+        variables
+            .dispatch_event("AP_VS_VAR_INC", Value::Number(0.0))
+            .unwrap();
+        assert!(
+            (read(
+                &mut variables,
+                "AUTOPILOT VERTICAL HOLD VAR",
+                "feet per minute"
+            ) + 490.551)
+                .abs()
+                < 0.01
+        );
+        for _ in 0..100 {
+            variables
+                .dispatch_event("AP_VS_VAR_INC", Value::Number(0.0))
+                .unwrap();
+        }
+        assert_eq!(
+            read(
+                &mut variables,
+                "AUTOPILOT VERTICAL HOLD VAR",
+                "feet per minute"
+            ),
+            6000.0
+        );
+
+        let altitude = read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet");
+        let vertical_speed = read(
+            &mut variables,
+            "AUTOPILOT VERTICAL HOLD VAR",
+            "feet per minute",
+        );
+        assert!(
+            variables
+                .dispatch_event("AP_ALT_VAR_SET_ENGLISH", Value::Number(f64::NAN))
+                .is_err()
+        );
+        assert!(
+            variables
+                .dispatch_event("AP_VS_VAR_SET_ENGLISH", Value::Number(f64::INFINITY))
+                .is_err()
+        );
+        assert_eq!(
+            read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR", "feet"),
+            altitude
+        );
+        assert_eq!(
+            read(
+                &mut variables,
+                "AUTOPILOT VERTICAL HOLD VAR",
+                "feet per minute"
+            ),
+            vertical_speed
+        );
     }
 
     #[test]

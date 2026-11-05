@@ -4,6 +4,7 @@ use esp_script::{Host, Reference};
 use esp_sim::{
     aerodynamics::{Aerodynamics, Controls},
     atmosphere::Atmosphere,
+    autopilot::{Autopilot, Inputs as AutopilotInputs},
     flight::State,
     ground::{Controls as GroundControls, LandingGear, Surface},
     hydraulics::Hydraulics,
@@ -42,6 +43,7 @@ pub struct Flight {
     hydraulics: Option<Hydraulics>,
     hydraulic_boost: [f64; 3],
     aileron_up_limit: f64,
+    autopilot: Autopilot,
     on_ground: bool,
 }
 
@@ -191,6 +193,7 @@ impl Flight {
             hydraulics,
             hydraulic_boost,
             aileron_up_limit,
+            autopilot: Autopilot::default(),
             on_ground,
         })
     }
@@ -221,6 +224,7 @@ impl Flight {
     }
 
     pub fn configure_controls(&self, variables: &mut Variables) -> Result<()> {
+        Autopilot::configure(variables, -self.current.position.z)?;
         variables.configure_aileron_travel(self.aileron_up_limit)
     }
 
@@ -376,21 +380,9 @@ impl Flight {
                             "celsius",
                             output.oil_temperature_c,
                         ),
-                        (
-                            "GENERAL ENG OIL PRESSURE",
-                            "psi",
-                            output.oil_pressure_psi,
-                        ),
-                        (
-                            "ENG OIL TEMPERATURE",
-                            "celsius",
-                            output.oil_temperature_c,
-                        ),
-                        (
-                            "ENG OIL PRESSURE",
-                            "psi",
-                            output.oil_pressure_psi,
-                        ),
+                        ("GENERAL ENG OIL PRESSURE", "psi", output.oil_pressure_psi),
+                        ("ENG OIL TEMPERATURE", "celsius", output.oil_temperature_c),
+                        ("ENG OIL PRESSURE", "psi", output.oil_pressure_psi),
                     ] {
                         variables.set_number(&format!("{name}:{id}"), unit, value);
                     }
@@ -520,6 +512,12 @@ impl Flight {
                 .all(|value| value.is_finite() && (-1.0..=1.0).contains(value)),
             "invalid flight control input"
         );
+        let autopilot =
+            self.autopilot
+                .update(dt, AutopilotInputs::from_state(&self.current)?, variables)?;
+        let elevator_input = autopilot.elevator.unwrap_or(elevator_input);
+        let aileron_input = autopilot.aileron.unwrap_or(aileron_input);
+        let right_input = autopilot.aileron.map_or(right_input, |aileron| -aileron);
         let mut control = |name| -> Result<f64> {
             Ok(variables
                 .read(&Reference::new('A', name, Some("percent over 100")))?
@@ -528,9 +526,8 @@ impl Flight {
         let spoiler_handle = control("SPOILERS HANDLE POSITION")?;
         let gear_handle = control("GEAR HANDLE POSITION")? != 0.0;
         let air = weather.at(-self.current.position.z)?;
-        let ias = air.calibrated_airspeed(self.current.air_velocity(wind).length())?
-            * 3600.0
-            / 1852.0;
+        let ias =
+            air.calibrated_airspeed(self.current.air_velocity(wind).length())? * 3600.0 / 1852.0;
         let gear_power = match self.gear.system_type() {
             Some(0) => f64::from(
                 control("CIRCUIT GEAR MOTOR ON")
@@ -2969,6 +2966,117 @@ mod tests {
             variables.set_number(name, "percent", 0.0);
         }
         variables
+    }
+
+    #[test]
+    #[ignore = "requires original aircraft and AIR data"]
+    fn autopilot_holds_heading_altitude_and_vertical_speed() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            let kind = data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                .unwrap();
+            if kind > 1.0 {
+                continue;
+            }
+            let speed = if kind == 0.0 { 100.0 } else { 220.0 };
+            let mut flight = Flight::new(&data, speed, 2000.0, 0.5, true).unwrap();
+            flight.start_running(&data).unwrap();
+            let mut variables = controls(&data);
+            flight.configure_engines(&mut variables).unwrap();
+            variables
+                .dispatch_event(
+                    "THROTTLE_SET",
+                    Value::Number(if kind == 0.0 { 16383.0 } else { 8191.5 }),
+                )
+                .unwrap();
+
+            variables
+                .dispatch_event("AP_MASTER", Value::Number(0.0))
+                .unwrap();
+            variables
+                .dispatch_event("AP_WING_LEVELER", Value::Number(0.0))
+                .unwrap();
+            variables
+                .dispatch_event("AP_PANEL_ALTITUDE_HOLD", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..1800 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let (_, _, bank) = flight.current.orientation.to_euler(EulerRot::ZYX);
+            assert!(
+                bank.to_degrees().abs() < 3.0,
+                "{}: wing leveler bank {}",
+                path.display(),
+                bank.to_degrees()
+            );
+            assert!(
+                (-flight.current.position.z - 2000.0).abs() < 25.0,
+                "{}: altitude hold altitude {}",
+                path.display(),
+                -flight.current.position.z
+            );
+
+            let (heading, _, _) = flight.current.orientation.to_euler(EulerRot::ZYX);
+            let selected = (heading.to_degrees() + 40.0).rem_euclid(360.0);
+            variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", selected);
+            variables
+                .dispatch_event("AP_PANEL_HEADING_HOLD", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..3600 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let (heading, _, bank) = flight.current.orientation.to_euler(EulerRot::ZYX);
+            let error = (selected - heading.to_degrees() + 540.0).rem_euclid(360.0) - 180.0;
+            assert!(
+                error.abs() < 5.0,
+                "{}: heading error {error}, bank {}",
+                path.display(),
+                bank.to_degrees()
+            );
+            assert!(bank.to_degrees().abs() <= 26.0);
+
+            let altitude = -flight.current.position.z;
+            variables
+                .dispatch_event("AP_ALT_VAR_SET_METRIC", Value::Number(altitude + 100.0))
+                .unwrap();
+            for _ in 0..7200 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let altitude_now = -flight.current.position.z;
+            assert!(
+                (altitude_now - (altitude + 100.0)).abs() < 15.0,
+                "{}: altitude {} vs {}",
+                path.display(),
+                altitude_now,
+                altitude + 100.0
+            );
+
+            variables
+                .dispatch_event("AP_VS_VAR_SET_METRIC", Value::Number(3.0))
+                .unwrap();
+            variables
+                .dispatch_event("AP_PANEL_VS_HOLD", Value::Number(0.0))
+                .unwrap();
+            for _ in 0..1800 {
+                flight.advance(1.0 / 60.0, &mut variables).unwrap();
+            }
+            let vertical_speed = -flight.current.velocity.z;
+            assert!(
+                (vertical_speed - 3.0).abs() < 1.0,
+                "{}: vertical speed {vertical_speed}",
+                path.display()
+            );
+            eprintln!(
+                "{}: autopilot heading, altitude and vertical speed verified",
+                path.display()
+            );
+            verified += 1;
+        }
+        assert!(verified > 0);
     }
 
     #[test]
