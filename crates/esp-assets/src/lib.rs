@@ -114,6 +114,50 @@ fn variant_directory(root: &Path, kind: &str, suffix: Option<&str>) -> Result<Pa
     resolve_path(root, &name)
 }
 
+/// Follow FSX/P3D container aliases, searching the current object category
+/// before the simulator root, as described in the Prepar3D SDK.
+fn resolve_container_alias(
+    directory: &Path,
+    filename: &str,
+    simulator_root: Option<&Path>,
+) -> Result<(PathBuf, cfg::Config)> {
+    let mut directory = directory.to_path_buf();
+    let mut visited = HashSet::new();
+    loop {
+        let canonical = directory
+            .canonicalize()
+            .with_context(|| format!("resolving {}", directory.display()))?;
+        anyhow::ensure!(
+            visited.insert(canonical),
+            "cyclic {filename} alias at {}",
+            directory.display()
+        );
+        anyhow::ensure!(visited.len() <= 64, "too many {filename} aliases");
+        let path = resolve_path(&directory, filename)?;
+        let data = config(&path)?;
+        let Some(alias) = data.value("fltsim", "alias")? else {
+            return Ok((directory, data));
+        };
+        let alias = alias.trim();
+        anyhow::ensure!(!alias.is_empty(), "empty alias in {}", path.display());
+        let category = directory
+            .parent()
+            .and_then(Path::parent)
+            .context("aliasing directory has no object type directory")?;
+        let target = std::iter::once(category)
+            .chain(simulator_root)
+            .filter_map(|base| resolve_path(base, alias).ok())
+            .find(|target| target.is_dir() && resolve_path(target, filename).is_ok())
+            .with_context(|| {
+                format!(
+                    "cannot resolve {filename} alias {alias:?} from {}",
+                    path.display()
+                )
+            })?;
+        directory = target;
+    }
+}
+
 impl Aircraft {
     pub fn load(root: &Path, variant: u32) -> Result<Self> {
         Self::load_with_root(root, variant, None)
@@ -127,11 +171,8 @@ impl Aircraft {
             .find(|v| v.index == variant)
             .with_context(|| format!("aircraft variant {variant} is absent"))?;
         let directory = variant_directory(root, "model", variant.model)?;
-        let models = config(&resolve_path(&directory, "model.cfg")?)?;
+        let (directory, models) = resolve_container_alias(&directory, "model.cfg", fsx_root)?;
         let models = cfg::model::Models::from_config(&models)?;
-        if models.alias.is_some() {
-            bail!("model aliases are not supported yet");
-        }
         let load = |name: &str| Model::load(&resolve_path(&directory, &format!("{name}.mdl"))?);
         let exterior = load(models.normal.context("model.cfg has no exterior model")?)?;
         let interior = models.interior.map(load).transpose()?;
@@ -387,6 +428,41 @@ mod tests {
                 .is_file()
         );
         assert!(resolve_path(temp.path(), "texture\\missing.dds").is_err());
+    }
+
+    #[test]
+    fn resolves_model_aliases_across_objects_and_simulator_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let category = temp.path().join("SimObjects/Airplanes");
+        let source = category.join("Source/model");
+        let local = category.join("Shared/model");
+        let remote = temp.path().join("Other/Shared/model");
+        for path in [&source, &local, &remote] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(source.join("model.cfg"), "[fltsim]\nalias=shared\\MODEL").unwrap();
+        std::fs::write(local.join("model.cfg"), "[models]\nnormal=local").unwrap();
+        std::fs::write(remote.join("model.cfg"), "[models]\nnormal=remote").unwrap();
+        let (path, cfg) = resolve_container_alias(&source, "model.cfg", Some(temp.path())).unwrap();
+        assert_eq!(path, local);
+        assert_eq!(cfg.value("models", "normal").unwrap(), Some("local"));
+        std::fs::write(
+            source.join("model.cfg"),
+            "[fltsim]\nalias=Other\\Shared\\model",
+        )
+        .unwrap();
+        let (path, _) = resolve_container_alias(&source, "model.cfg", Some(temp.path())).unwrap();
+        assert_eq!(path, remote);
+        std::fs::write(local.join("model.cfg"), "[fltsim]\nalias=Source\\model").unwrap();
+        std::fs::write(source.join("model.cfg"), "[fltsim]\nalias=Shared\\model").unwrap();
+        assert!(
+            resolve_container_alias(&source, "model.cfg", Some(temp.path()))
+                .unwrap_err()
+                .to_string()
+                .contains("cyclic")
+        );
+        std::fs::write(source.join("model.cfg"), "[fltsim]\nalias=missing\\model").unwrap();
+        assert!(resolve_container_alias(&source, "model.cfg", Some(temp.path())).is_err());
     }
 
     #[test]

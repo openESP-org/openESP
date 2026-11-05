@@ -28,8 +28,8 @@ impl Panel {
         let Some(directory) = child(aircraft, &name)? else {
             return Ok(None);
         };
-        let path = child(&directory, "panel.cfg")?.context("panel folder has no panel.cfg")?;
-        let config = super::config(&path)?;
+        let (directory, config) =
+            super::resolve_container_alias(&directory, "panel.cfg", fsx_root)?;
         cfg::panel::Panel::from_config(&config)?;
         let gauges = fsx_root
             .map(|root| child(root, "Gauges"))
@@ -269,5 +269,31 @@ mod tests {
             b"local"
         );
         assert!(panel.read_resource("example", "image.bmp", 1).is_err());
+    }
+
+    #[test]
+    fn follows_panel_alias_and_uses_target_gauge_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("SimObjects/Airplanes/Source/panel");
+        let target = root.path().join("SimObjects/Airplanes/Shared/panel.IFR");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(target.join("Example")).unwrap();
+        std::fs::write(
+            source.join("panel.cfg"),
+            "[fltsim]\nalias=shared\\panel.ifr",
+        )
+        .unwrap();
+        std::fs::write(target.join("panel.cfg"), "[VCockpit01]\ntexture=$shared").unwrap();
+        std::fs::write(target.join("Example/Dial.xml"), b"<Gauge />").unwrap();
+        let aircraft = source.parent().unwrap();
+        let panel = Panel::load_with_root(aircraft, None, Some(root.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(panel.directory, target);
+        assert_eq!(panel.layout().unwrap().windows[0].texture, Some("$shared"));
+        assert_eq!(
+            panel.read_xml_gauge("Example!Dial", 100).unwrap().unwrap(),
+            b"<Gauge />"
+        );
     }
 }
