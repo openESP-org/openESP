@@ -692,6 +692,7 @@ impl App {
             } else {
                 self.variables.advance(STEP)?;
             }
+            esp_sim::electrical::advance_battery(&mut self.variables, STEP)?;
             self.apply_variable_overrides();
         }
         self.variables.update_electrical()?;

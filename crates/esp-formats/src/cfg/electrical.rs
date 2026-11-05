@@ -18,6 +18,8 @@ pub struct Generator {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Electrical {
     pub battery_voltage: f64,
+    pub battery_capacity_ah: f64,
+    pub battery_charging_current: f64,
     pub generator_voltage: f64,
     pub generator_amperes: f64,
     pub always_available: bool,
@@ -78,6 +80,18 @@ impl Electrical {
         // Fallback hardware for legacy containers without source specifications.
         // These are simulator defaults, not inferred measurements of the aircraft.
         let battery_voltage = nonnegative("max_battery_voltage", 24.0)?;
+        let battery_capacity_ah = nonnegative(
+            "battery_max_capacity_amph",
+            if battery_voltage < 20.0 { 42.0 } else { 24.0 },
+        )?;
+        if battery_capacity_ah <= 0.0 {
+            return Err(invalid(
+                "battery_max_capacity_amph",
+                &battery_capacity_ah.to_string(),
+            ));
+        }
+        let battery_charging_current =
+            nonnegative("battery_charging_current", battery_capacity_ah * 0.1)?;
         let generator_voltage = nonnegative("generator_alternator_voltage", 28.0)?;
         let generator_amperes = nonnegative("max_generator_alternator_amps", 60.0)?;
         let always_available = match config
@@ -153,6 +167,8 @@ impl Electrical {
         }
         Ok(Self {
             battery_voltage,
+            battery_capacity_ah,
+            battery_charging_current,
             generator_voltage,
             generator_amperes,
             always_available,
@@ -214,6 +230,8 @@ mod tests {
     fn rejects_invalid_limits_and_duplicate_parameters() {
         for parameters in [
             "max_battery_voltage=-1",
+            "battery_max_capacity_amph=0",
+            "battery_charging_current=-1",
             "generator_alternator_voltage=NaN",
             "max_generator_alternator_amps=-2",
             "avionics=8,2,9",

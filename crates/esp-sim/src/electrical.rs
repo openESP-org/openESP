@@ -22,6 +22,16 @@ impl Electrical {
     }
 
     pub fn initialize(&self, variables: &mut Variables, running: bool) {
+        variables.set_number(
+            "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+            "percent",
+            100.0,
+        );
+        variables.set_number(
+            "OPENESP BATTERY CAPACITY",
+            "number",
+            self.definition.battery_capacity_ah,
+        );
         for (name, active) in [
             ("ELECTRICAL MASTER BATTERY", running),
             ("AVIONICS MASTER SWITCH", running),
@@ -53,11 +63,24 @@ impl Electrical {
         };
         let battery = read(variables, "ELECTRICAL MASTER BATTERY")?;
         let avionics = read(variables, "AVIONICS MASTER SWITCH")?;
+        let capacity = variables
+            .read(&Reference::new(
+                'A',
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                Some("percent over 100"),
+            ))?
+            .number()?
+            .clamp(0.0, 1.0);
+        let battery_voltage = if capacity <= 0.0 {
+            0.0
+        } else {
+            self.definition.battery_voltage * (0.7 + 0.3 * capacity)
+        };
         let mut sources = [0.0_f64; 8];
-        // Sources remain ideal and battery state of charge is not yet modeled.
-        sources[3] = self.definition.battery_voltage;
+        // Generator voltage is regulated; battery voltage approximates charge level.
+        sources[3] = battery_voltage;
         if battery {
-            sources[2] = self.definition.battery_voltage;
+            sources[2] = battery_voltage;
         }
         let mut links = Vec::new();
         let mut generator_capacity = [0.0_f64; 8];
@@ -148,10 +171,7 @@ impl Electrical {
             ("ELECTRICAL AVIONICS BUS VOLTAGE", sources[1]),
             ("ELECTRICAL BATTERY BUS VOLTAGE", sources[2]),
             ("ELECTRICAL HOT BATTERY BUS VOLTAGE", sources[3]),
-            (
-                "ELECTRICAL BATTERY VOLTAGE",
-                self.definition.battery_voltage,
-            ),
+            ("ELECTRICAL BATTERY VOLTAGE", battery_voltage),
         ] {
             variables.set_number(name, "volts", voltage);
         }
@@ -226,7 +246,15 @@ impl Electrical {
             .filter_map(|(capacity, connected)| connected.then_some(*capacity))
             .sum();
         let battery_load = if battery && !self.definition.always_available {
-            -(battery_network_load - available_generation).max(0.0)
+            let balance = available_generation - battery_network_load;
+            if balance < 0.0 {
+                if capacity > 0.0 { balance } else { 0.0 }
+            } else if self.definition.generator_voltage > battery_voltage {
+                balance.min(self.definition.battery_charging_current)
+                    * ((1.0 - capacity) * 5.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -236,6 +264,44 @@ impl Electrical {
     }
 }
 
+/// Integrate battery charge once per simulation step; electrical updates remain
+/// instantaneous so repeated gauge or rendering updates cannot drain it.
+pub fn advance_battery(variables: &mut Variables, dt: f64) -> Result<()> {
+    ensure!(dt.is_finite() && dt >= 0.0, "invalid battery timestep");
+    let capacity = match variables.read(&Reference::new(
+        'A',
+        "OPENESP BATTERY CAPACITY",
+        Some("number"),
+    )) {
+        Ok(value) => value.number()?,
+        Err(_) => return Ok(()),
+    };
+    let charge = variables
+        .read(&Reference::new(
+            'A',
+            "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+            Some("percent over 100"),
+        ))?
+        .number()?;
+    let current = variables
+        .read(&Reference::new(
+            'A',
+            "ELECTRICAL BATTERY LOAD",
+            Some("amperes"),
+        ))?
+        .number()?;
+    ensure!(
+        capacity.is_finite() && capacity > 0.0 && charge.is_finite() && current.is_finite(),
+        "invalid battery state"
+    );
+    let next = (charge + current * dt / (capacity * 3600.0)).clamp(0.0, 1.0);
+    variables.set_number(
+        "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+        "percent over 100",
+        next,
+    );
+    Ok(())
+}
 fn circuit_variable(name: &str) -> &str {
     match name {
         "additional_system" => "CIRCUIT GENERAL PANEL ON",
@@ -289,6 +355,95 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn battery_discharge_and_recharge_follow_simulation_time() {
+        let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\nbattery_max_capacity_amph=1\nbattery_charging_current=1\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=10\nadditional_system=0,2,17").unwrap();
+        let mut variables = Variables::default();
+        variables
+            .configure_electrical(&Definition::from_config(&config).unwrap(), false)
+            .unwrap();
+        variables
+            .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        for _ in 0..10 {
+            variables.update_electrical().unwrap();
+        }
+        assert_eq!(
+            number(
+                &mut variables,
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                "percent"
+            ),
+            100.0
+        );
+        advance_battery(&mut variables, 900.0).unwrap();
+        variables.update_electrical().unwrap();
+        assert!(
+            (number(
+                &mut variables,
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                "percent"
+            ) - 50.0)
+                .abs()
+                < 1e-10
+        );
+        assert!(
+            (number(&mut variables, "ELECTRICAL BATTERY VOLTAGE", "volts") - 20.4).abs() < 1e-10
+        );
+        variables
+            .dispatch_event("TOGGLE_ALTERNATOR1", Value::Number(0.0))
+            .unwrap();
+        variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            1.0
+        );
+        advance_battery(&mut variables, 900.0).unwrap();
+        variables.update_electrical().unwrap();
+        assert!(
+            (number(
+                &mut variables,
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                "percent"
+            ) - 75.0)
+                .abs()
+                < 1e-10
+        );
+        variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 0.0);
+        variables.update_electrical().unwrap();
+        advance_battery(&mut variables, 3600.0).unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(
+                &mut variables,
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                "percent"
+            ),
+            0.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL MAIN BUS VOLTAGE", "volts"),
+            0.0
+        );
+        variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            1.0
+        );
+        advance_battery(&mut variables, 360.0).unwrap();
+        variables.update_electrical().unwrap();
+        assert!(
+            number(
+                &mut variables,
+                "ELECTRICAL BATTERY ESTIMATED CAPACITY PCT",
+                "percent"
+            ) > 0.0
+        );
+        assert!(advance_battery(&mut variables, f64::NAN).is_err());
+    }
     #[test]
     fn estimates_battery_load_from_switched_consumers_and_connected_generation() {
         let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=5\nadditional_system=0,2,17\nlight_nav=0,5,17\npitot_heat=0,2,17\navionics_bus=0,3,17\navionics=1,4,17").unwrap();
