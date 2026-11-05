@@ -41,6 +41,7 @@ pub struct Helicopter {
     pub cyclic_pitch_control_scalar: Option<f64>,
     pub pedal_control_scalar: Option<f64>,
     pub collective_on_rotor_torque_scalar: Option<f64>,
+    pub tail_rotor_translating_scalar: Option<f64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,6 +52,8 @@ pub struct FuselageAerodynamics {
     pub roll_damping: Option<f64>,
     pub yaw_damping: Option<f64>,
     pub yaw_stability: Option<f64>,
+    pub pitch_stability: Option<f64>,
+    pub roll_stability: Option<f64>,
 }
 
 fn flag(config: &Config, section: &str, key: &str) -> Result<Option<bool>, ValueError> {
@@ -108,6 +111,7 @@ impl Helicopter {
             cyclic_pitch_control_scalar: n("cyclic_pitch_control_scalar")?,
             pedal_control_scalar: n("pedal_control_scalar")?,
             collective_on_rotor_torque_scalar: n("collective_on_rotor_torque_scalar")?,
+            tail_rotor_translating_scalar: n("tail_rotor_translating_scalar")?,
         })
     }
 }
@@ -122,6 +126,8 @@ impl FuselageAerodynamics {
             roll_damping: n("roll_damp_cf")?,
             yaw_damping: n("yaw_damp_cf")?,
             yaw_stability: n("yaw_stability_cf")?,
+            pitch_stability: n("pitch_stability_cf")?,
+            roll_stability: n("roll_stability_cf")?,
         })
     }
 }
@@ -160,7 +166,7 @@ mod tests {
 
     #[test]
     fn reads_helicopter_controls_governor_and_fuselage() {
-        let config = Config::parse("[helicopter]\nreference_length=21.58\nreference_frontal_area=17.7\nside_aero_center=-12.5\nlow_realism_stability_scale=1,1.1,0.9\ncorrelator_available=1\ngoverned_pct_rpm_ref=1.04\ngovernor_pid=0.4,0,0.1,0,0.2\ncyclic_roll_control_scalar=1\n[fuselage_aerodynamics]\ndrag_force_cf=0.55\nside_drag_force_cf=10\npitch_damp_cf=-2\nyaw_stability_cf=0.27").unwrap();
+        let config = Config::parse("[helicopter]\nreference_length=21.58\nreference_frontal_area=17.7\nside_aero_center=-12.5\nlow_realism_stability_scale=1,1.1,0.9\ncorrelator_available=1\ngoverned_pct_rpm_ref=1.04\ngovernor_pid=0.4,0,0.1,0,0.2\ncyclic_roll_control_scalar=1\ntail_rotor_translating_scalar=1\n[fuselage_aerodynamics]\ndrag_force_cf=0.55\nside_drag_force_cf=10\npitch_damp_cf=-2\nyaw_stability_cf=0.27\npitch_stability_cf=0.3\nroll_stability_cf=0.4").unwrap();
         let helicopter = Helicopter::from_config(&config).unwrap();
         assert_eq!(helicopter.reference_length_feet, Some(21.58));
         assert_eq!(helicopter.reference_frontal_area_sq_feet, Some(17.7));
@@ -172,10 +178,13 @@ mod tests {
         assert_eq!(helicopter.correlator_available, Some(true));
         assert_eq!(helicopter.governor_pid, Some([0.4, 0.0, 0.1, 0.0, 0.2]));
         assert_eq!(helicopter.pedal_control_scalar, None);
+        assert_eq!(helicopter.tail_rotor_translating_scalar, Some(1.0));
         let fuselage = FuselageAerodynamics::from_config(&config).unwrap();
         assert_eq!(fuselage.drag_force, Some(0.55));
         assert_eq!(fuselage.pitch_damping, Some(-2.0));
         assert_eq!(fuselage.yaw_stability, Some(0.27));
+        assert_eq!(fuselage.pitch_stability, Some(0.3));
+        assert_eq!(fuselage.roll_stability, Some(0.4));
         assert_eq!(fuselage.yaw_damping, None);
         for text in [
             "[helicopter]\ngovernor_pid=1,2,3,4",
