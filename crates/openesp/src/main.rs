@@ -42,6 +42,8 @@ struct Arguments {
     variant: u32,
     #[arg(long)]
     cockpit: bool,
+    #[arg(long, default_value_t = 4, value_parser = parse_msaa, help = "MSAA samples: 1 (off), 2, 4, or 8")]
+    msaa: u32,
     #[arg(long, value_parser = parse_utc_time, help = "Set starting UTC time as HH:MM or HH:MM:SS")]
     utc_time: Option<f64>,
     #[arg(
@@ -218,6 +220,12 @@ struct StartupEvent {
     value: f64,
 }
 
+fn parse_msaa(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(value @ (1 | 2 | 4 | 8)) => Ok(value),
+        _ => Err("MSAA must be 1, 2, 4, or 8".into()),
+    }
+}
 fn parse_utc_time(text: &str) -> Result<f64, String> {
     let parts = text.split(':').collect::<Vec<_>>();
     if !(2..=3).contains(&parts.len())
@@ -554,6 +562,7 @@ impl App {
                         window.clone(),
                         &aircraft,
                         runway,
+                        self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
                     self.interior_state = aircraft
@@ -1319,6 +1328,22 @@ mod tests {
         assert!(
             Arguments::try_parse_from(["openesp", "--aircraft", "test", "--heading", "90"])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_msaa_setting() {
+        let args =
+            Arguments::try_parse_from(["openesp", "--aircraft", "test", "--msaa", "8"]).unwrap();
+        assert_eq!(args.msaa, 8);
+        assert!(
+            Arguments::try_parse_from(["openesp", "--aircraft", "test", "--msaa", "3"]).is_err()
+        );
+        assert_eq!(
+            Arguments::try_parse_from(["openesp", "--aircraft", "test"])
+                .unwrap()
+                .msaa,
+            4
         );
     }
 

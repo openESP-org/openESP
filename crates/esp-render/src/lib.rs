@@ -59,6 +59,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     depth: wgpu::TextureView,
+    multisampled_color: Option<wgpu::TextureView>,
+    sample_count: u32,
     pipelines: Vec<wgpu::RenderPipeline>,
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
@@ -119,6 +121,7 @@ impl Renderer {
         window: Arc<Window>,
         aircraft: &Aircraft,
         runway: Option<Runway>,
+        requested_samples: u32,
     ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
         // Some Windows GL drivers can fail even when DX12 was selected for
@@ -164,6 +167,22 @@ impl Renderer {
         {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
+        let color_flags = adapter.get_texture_format_features(config.format).flags;
+        let depth_flags = adapter
+            .get_texture_format_features(wgpu::TextureFormat::Depth32Float)
+            .flags;
+        let sample_count = [8, 4, 2, 1]
+            .into_iter()
+            .find(|&count| {
+                count <= requested_samples
+                    && color_flags.sample_count_supported(count)
+                    && depth_flags.sample_count_supported(count)
+                    && (count == 1
+                        || color_flags
+                            .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE))
+            })
+            .unwrap_or(1);
+        eprintln!("anti-aliasing: {sample_count}x MSAA");
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -233,7 +252,7 @@ impl Renderer {
                 format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(key.depth_write),
                 depth_compare: Some(wgpu::CompareFunction::GreaterEqual), stencil: Default::default(), bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
             fragment: Some(wgpu::FragmentState {
                 module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState { format: config.format,
@@ -445,7 +464,12 @@ impl Renderer {
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         };
-        quad([(-pattern, -pattern), (-pattern, pattern), (pattern, pattern), (pattern, -pattern)]);
+        quad([
+            (-pattern, -pattern),
+            (-pattern, pattern),
+            (pattern, pattern),
+            (pattern, -pattern),
+        ]);
         quad([
             (-extent, pattern),
             (-extent, extent),
@@ -538,13 +562,16 @@ impl Renderer {
         let cockpit_eye = aircraft
             .eyepoint
             .map(|eye| aircraft_origin + eye.as_dvec3());
-        let depth = depth_target(&device, &config);
+        let depth = depth_target(&device, &config, sample_count);
+        let multisampled_color = color_target(&device, &config, sample_count);
         Ok(Self {
             surface,
             device,
             queue,
             config,
             depth,
+            multisampled_color,
+            sample_count,
             pipelines,
             camera_buffer,
             camera_bind,
@@ -568,7 +595,8 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.depth = depth_target(&self.device, &self.config);
+        self.depth = depth_target(&self.device, &self.config, self.sample_count);
+        self.multisampled_color = color_target(&self.device, &self.config, self.sample_count);
     }
 
     pub fn update_panel(&self, name: &str, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
@@ -692,8 +720,8 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("aircraft scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: self.multisampled_color.as_ref().unwrap_or(&view),
+                    resolve_target: self.multisampled_color.as_ref().map(|_| &view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -820,7 +848,11 @@ impl Renderer {
     }
 }
 
-fn depth_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
+fn depth_target(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    sample_count: u32,
+) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
@@ -830,7 +862,7 @@ fn depth_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> w
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -839,6 +871,33 @@ fn depth_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> w
         .create_view(&Default::default())
 }
 
+fn color_target(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    sample_count: u32,
+) -> Option<wgpu::TextureView> {
+    if sample_count == 1 {
+        return None;
+    }
+    Some(
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("multisampled scene color"),
+                size: wgpu::Extent3d {
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default()),
+    )
+}
 fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
