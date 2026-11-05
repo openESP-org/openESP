@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use crate::{panel::Panel, texture::gauge_bitmap};
 
+#[cfg(test)]
+mod default_case;
 mod fallback;
 mod mask;
 mod rotation;
@@ -672,15 +674,14 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
                         omitted_elements += 1;
                         continue;
                     };
-                    let Some(source) = expression
+                    // Some stock gauges leave unfinished selectors without a
+                    // script. Display their zero case until a script is supplied.
+                    let source = expression
                         .children()
                         .find(|c| c.has_tag_name("Script"))
                         .and_then(|c| c.text())
                         .filter(|source| !source.trim().is_empty())
-                    else {
-                        omitted_elements += 1;
-                        continue;
-                    };
+                        .unwrap_or("0");
                     let Ok(program) = Program::compile(source.trim()) else {
                         omitted_elements += 1;
                         continue;
