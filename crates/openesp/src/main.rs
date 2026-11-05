@@ -26,6 +26,7 @@ use winit::{
 
 mod flight;
 mod navigation;
+mod scenery;
 mod speed_limits;
 mod vor;
 mod weather;
@@ -38,6 +39,14 @@ struct Arguments {
     aircraft: PathBuf,
     #[arg(long)]
     fsx_root: Option<PathBuf>,
+    #[arg(long, help = "Load airport runways from an FSX or Prepar3D BGL file")]
+    scenery_bgl: Option<PathBuf>,
+    #[arg(
+        long,
+        requires = "scenery_bgl",
+        help = "Select an airport by ICAO code from the BGL"
+    )]
+    airport: Option<String>,
     #[arg(long, default_value_t = 0)]
     variant: u32,
     #[arg(long)]
@@ -541,7 +550,14 @@ impl App {
                     }
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
-                    let runway = if let (Some(latitude), Some(longitude), Some(course)) = (
+                    let runways = if let Some(path) = &self.arguments.scenery_bgl {
+                        scenery::runways(
+                            path,
+                            self.arguments.airport.as_deref(),
+                            self.arguments.latitude,
+                            self.arguments.longitude,
+                        )?
+                    } else if let (Some(latitude), Some(longitude), Some(course)) = (
                         self.arguments.vor_latitude,
                         self.arguments.vor_longitude,
                         self.arguments.ils_course,
@@ -551,17 +567,19 @@ impl App {
                             self.arguments.longitude,
                         )?;
                         let (north, east) = origin.local_position(latitude, longitude)?;
-                        Some(esp_render::Runway {
+                        vec![esp_render::Runway {
                             threshold: DVec3::new(east, 0.0, north),
                             heading: (course + self.arguments.magnetic_declination).to_radians(),
-                        })
+                            length: 2000.0,
+                            width: 45.0,
+                        }]
                     } else {
-                        None
+                        Vec::new()
                     };
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
-                        runway,
+                        &runways,
                         self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);

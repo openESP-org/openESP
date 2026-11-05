@@ -81,9 +81,11 @@ pub struct Runway {
     pub threshold: DVec3,
     /// Clockwise from true north, in radians.
     pub heading: f64,
+    pub length: f32,
+    pub width: f32,
 }
 
-fn runway_mesh(markings: bool) -> (Vec<Vertex>, Vec<u32>) {
+fn runway_mesh(markings: bool, length: f32, width: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut rectangle = |left: f32, right: f32, start: f32, end: f32, height: f32| {
@@ -98,20 +100,27 @@ fn runway_mesh(markings: bool) -> (Vec<Vertex>, Vec<u32>) {
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     };
     if markings {
-        rectangle(-21.5, -21.0, 0.0, 2000.0, 0.06);
-        rectangle(21.0, 21.5, 0.0, 2000.0, 0.06);
-        for step in 0..29 {
+        let edge = (width * 0.5 - 1.0).max(0.0);
+        rectangle(-edge - 0.5, -edge, 0.0, length, 0.06);
+        rectangle(edge, edge + 0.5, 0.0, length, 0.06);
+        for step in 0..((length - 150.0).max(0.0) / 60.0).floor() as u32 {
             let start = 150.0 + step as f32 * 60.0;
-            rectangle(-0.45, 0.45, start, start + 30.0, 0.06);
+            rectangle(-0.45, 0.45, start, (start + 30.0).min(length), 0.06);
         }
         for side in [-1.0, 1.0] {
             for stripe in 0..4 {
-                let center = side * (3.0 + stripe as f32 * 4.0);
-                rectangle(center - 0.75, center + 0.75, 6.0, 36.0, 0.06);
+                let center = side * (width * (0.08 + stripe as f32 * 0.09));
+                rectangle(
+                    center - 0.75,
+                    center + 0.75,
+                    6.0_f32.min(length),
+                    36.0_f32.min(length),
+                    0.06,
+                );
             }
         }
     } else {
-        rectangle(-22.5, 22.5, 0.0, 2000.0, 0.03);
+        rectangle(-width * 0.5, width * 0.5, 0.0, length, 0.03);
     }
     (vertices, indices)
 }
@@ -120,7 +129,7 @@ impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         aircraft: &Aircraft,
-        runway: Option<Runway>,
+        runways: &[Runway],
         requested_samples: u32,
     ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
@@ -521,9 +530,14 @@ impl Renderer {
             },
         );
         let mut runway_draws = Vec::new();
-        if let Some(runway) = runway {
+        for runway in runways {
             anyhow::ensure!(
-                runway.threshold.is_finite() && runway.heading.is_finite(),
+                runway.threshold.is_finite()
+                    && runway.heading.is_finite()
+                    && runway.length.is_finite()
+                    && (1.0..=20_000.0).contains(&runway.length)
+                    && runway.width.is_finite()
+                    && (1.0..=1_000.0).contains(&runway.width),
                 "invalid runway position"
             );
             let transform = Mat4::from_translation(runway.threshold.as_vec3())
@@ -536,7 +550,7 @@ impl Renderer {
                 (false, [0.12, 0.12, 0.12, 1.0]),
                 (true, [0.92, 0.92, 0.92, 1.0]),
             ] {
-                let (vertices, indices) = runway_mesh(markings);
+                let (vertices, indices) = runway_mesh(markings, runway.length, runway.width);
                 runway_draws.push(make_draw(
                     &device,
                     &draw_layout,
@@ -1032,7 +1046,7 @@ mod runway_tests {
     #[test]
     fn runway_surface_and_markings_have_valid_triangles() {
         for marked in [false, true] {
-            let (vertices, indices) = runway_mesh(marked);
+            let (vertices, indices) = runway_mesh(marked, 2000.0, 45.0);
             assert!(!vertices.is_empty());
             assert_eq!(indices.len() % 3, 0);
             assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));

@@ -1,6 +1,7 @@
 use binrw::BinRead;
 use std::io::Cursor;
 
+pub mod airport;
 pub mod guid;
 pub mod scenery;
 
