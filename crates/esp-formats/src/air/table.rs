@@ -71,7 +71,8 @@ impl<'a> Record<'a> {
             | 0x517..=0x519
             | 0x1505
             | 0x1524
-            | 0x1525 => {
+            | 0x1525
+            | 0x154a => {
                 let mut reader = Cursor::new(self.data);
                 let count = u32::read_le(&mut reader).map_err(|_| self.size_error(4))?;
                 let available = self.data.len() - 4;

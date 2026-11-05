@@ -579,6 +579,7 @@ impl Flight {
             spoiler_difference: self.spoiler_surfaces[0] - self.spoiler_surfaces[1],
             gear: self.gear.extension(),
             ground_height: None,
+            sound_speed: None,
         };
         let ground_controls = GroundControls {
             steering: rudder_input,
@@ -830,6 +831,7 @@ impl Flight {
                 |state| {
                     let air = weather.at(-state.position.z)?;
                     let mut controls = controls;
+                    controls.sound_speed = Some(air.sound_speed);
                     controls.ground_height = Some(self.model.wing_height(
                         state,
                         self.loading.cg,

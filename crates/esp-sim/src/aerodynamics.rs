@@ -44,6 +44,8 @@ pub struct Aerodynamics {
     lift: Curve,
     pitch: Curve,
     ground_effect: Option<Curve>,
+    lift_mach: Option<Curve>,
+    drag_mach: Option<Curve>,
     coefficients: LegacyParameters,
     flaps: Vec<[f64; 3]>,
 }
@@ -60,6 +62,8 @@ pub struct Controls {
     pub spoiler_difference: f64,
     pub gear: f64,
     pub ground_height: Option<f64>,
+    /// Local speed of sound in m/s; sea-level standard is used when absent.
+    pub sound_speed: Option<f64>,
 }
 
 impl Curve {
@@ -332,6 +336,8 @@ impl Aerodynamics {
             lift,
             pitch,
             ground_effect,
+            lift_mach: optional_curve(0x401)?,
+            drag_mach: optional_curve(0x154a)?,
             coefficients,
             flaps,
         };
@@ -415,6 +421,12 @@ impl Aerodynamics {
             "invalid height above ground"
         );
         ensure!(
+            controls
+                .sound_speed
+                .is_none_or(|speed| speed.is_finite() && speed > 0.0),
+            "invalid speed of sound"
+        );
+        ensure!(
             flaps.len() == self.flaps.len() && flaps.iter().all(|n| n.is_finite()),
             "invalid flap deflections"
         );
@@ -423,6 +435,15 @@ impl Aerodynamics {
             return Ok(Wrench::default());
         }
         let alpha = velocity.z.atan2(velocity.x);
+        let mach = speed / controls.sound_speed.unwrap_or(340.293_988);
+        let lift_mach = self
+            .lift_mach
+            .as_ref()
+            .map_or(1.0, |curve| curve.sample(mach));
+        let drag_mach = self
+            .drag_mach
+            .as_ref()
+            .map_or(0.0, |curve| curve.sample(mach));
         let beta = (velocity.y / speed).clamp(-1.0, 1.0).asin();
         let angle_factor = |index: usize| {
             self.angular_effects[index]
@@ -469,13 +490,14 @@ impl Aerodynamics {
             .zip(self.ground_effect.as_ref())
             .map_or(1.0, |(height, curve)| curve.sample(height / self.span));
         let cl = ground_scalar
-            * (self.lift_scalar * (self.lift.sample(alpha) + c.lift.cl_flaps * flap.x)
+            * (self.lift_scalar * (self.lift.sample(alpha) * lift_mach + c.lift.cl_flaps * flap.x)
                 + c.lift.cl_spoiler * spoiler
                 + c.lift.cl_de * elevator
                 + c.lift.cl_ih * self.incidence
                 + c.pitch.cl_q * q);
         let cd = self.drag_scalar
             * (c.drag.cd0
+                + drag_mach
                 + c.drag.cd_flaps * flap.y
                 + c.drag.cd_spoiler * spoiler
                 + c.drag.cd_gear * controls.gear)

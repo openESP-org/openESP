@@ -12,6 +12,84 @@ mod content;
 
 #[test]
 #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+fn mach_tables_respond_to_local_speed_of_sound() {
+    let path = content::aircraft_paths()
+        .into_iter()
+        .next()
+        .expect("aircraft path");
+    let mut data = FlightData::load(&path, 0).unwrap();
+    let records = esp_formats::air::parse(&data.air).unwrap();
+    let mut air = Vec::new();
+    for record in &records {
+        if ![0x401, 0x154a].contains(&record.id) {
+            air.extend(record.id.to_le_bytes());
+            air.extend((record.data.len() as u32).to_le_bytes());
+            air.extend(record.data);
+        }
+    }
+    for (id, values) in [
+        (0x401u32, [0.0f64, 1.0, 1.0, 2.0]),
+        (0x154au32, [0.0, 0.0, 1.0, 0.1]),
+    ] {
+        air.extend(id.to_le_bytes());
+        air.extend(36u32.to_le_bytes());
+        air.extend(2u32.to_le_bytes());
+        for value in values {
+            air.extend(value.to_le_bytes());
+        }
+    }
+    data.air = air;
+    let model = Aerodynamics::from_data(&data).unwrap();
+    let loading = WeightBalance::from_config(&data.configuration)
+        .unwrap()
+        .load(0.0, false)
+        .unwrap();
+    let flaps = vec![
+        0.0;
+        esp_formats::cfg::aircraft::flaps(&data.configuration)
+            .unwrap()
+            .iter()
+            .filter(|f| f.kind != 0)
+            .count()
+    ];
+    let sample = |sound_speed| {
+        model
+            .forces(
+                DVec3::new(100.0, 0.0, 5.0),
+                DVec3::ZERO,
+                1.225,
+                Controls {
+                    sound_speed: Some(sound_speed),
+                    ..Controls::default()
+                },
+                &flaps,
+                loading.cg,
+            )
+            .unwrap()
+    };
+    let warm = sample(400.0);
+    let cold = sample(200.0);
+    assert!(cold.force.z < warm.force.z);
+    assert!(cold.force.x < warm.force.x);
+    assert!(
+        model
+            .forces(
+                DVec3::X,
+                DVec3::ZERO,
+                1.225,
+                Controls {
+                    sound_speed: Some(0.0),
+                    ..Controls::default()
+                },
+                &flaps,
+                loading.cg
+            )
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
 fn angle_of_attack_tables_change_roll_and_yaw_at_the_authored_angle() {
     let path = content::aircraft_paths()
         .into_iter()
@@ -497,7 +575,15 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
                 path.display()
             );
         }
-        let fast = forces(velocity * 2.0, DVec3::ZERO, Controls::default());
+        // Hold Mach constant while doubling dynamic pressure's velocity term.
+        let fast = forces(
+            velocity * 2.0,
+            DVec3::ZERO,
+            Controls {
+                sound_speed: Some(2.0 * 340.293_988),
+                ..Controls::default()
+            },
+        );
         assert!(fast.force.abs_diff_eq(base.force * 4.0, 1e-8));
         assert!(fast.moment.abs_diff_eq(base.moment * 4.0, 1e-8));
         let thin = model
