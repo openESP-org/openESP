@@ -231,7 +231,21 @@ impl Color {
         }
         let source = text(node, "FontColor").unwrap_or_else(|| "white".into());
         if source.trim().starts_with("%(") {
-            Ok(Self::Template(FormattedString::compile(source.trim())?))
+            let source = source.trim();
+            let template = match FormattedString::compile(source) {
+                Ok(template) => template,
+                // Stock 737 engine gauges omit the last RPN closing brace.
+                Err(esp_script::Error::Conditional)
+                    if source.ends_with(')')
+                        && source.matches('{').count() == source.matches('}').count() + 1 =>
+                {
+                    let mut repaired = source.to_owned();
+                    repaired.insert(repaired.len() - 1, '}');
+                    FormattedString::compile(&repaired)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            Ok(Self::Template(template))
         } else {
             Ok(Self::Fixed(color(&source)?))
         }
@@ -552,5 +566,40 @@ mod tests {
         assert!(color("#123").is_err());
         assert_eq!(color("cyan").unwrap(), Rgba([0, 255, 255, 255]));
         assert!(color("0x1FFFFFF").is_err());
+    }
+
+    #[test]
+    fn repairs_stock_engine_warning_color_expression() {
+        struct Engine(f64);
+        impl Host for Engine {
+            fn read(
+                &mut self,
+                _: &esp_script::Reference,
+            ) -> std::result::Result<Value, esp_script::Error> {
+                Ok(Value::Number(self.0))
+            }
+            fn write(
+                &mut self,
+                _: &esp_script::Reference,
+                _: Value,
+            ) -> std::result::Result<(), esp_script::Error> {
+                Err(esp_script::Error::Type)
+            }
+        }
+        let doc = roxmltree::Document::parse("<GaugeText><FontColor>%((A:Engine, percent) abs 100.1 &gt; if{ 'red' } els{ 'white' )</FontColor></GaugeText>").unwrap();
+        let color = Color::parse(doc.root_element()).unwrap();
+        assert_eq!(
+            color.evaluate(&mut Engine(80.0)).unwrap(),
+            Rgba([255, 255, 255, 255])
+        );
+        assert_eq!(
+            color.evaluate(&mut Engine(101.0)).unwrap(),
+            Rgba([255, 0, 0, 255])
+        );
+        let broken = roxmltree::Document::parse(
+            "<GaugeText><FontColor>%(1 if{ 1 if{ 'red' )</FontColor></GaugeText>",
+        )
+        .unwrap();
+        assert!(Color::parse(broken.root_element()).is_err());
     }
 }
