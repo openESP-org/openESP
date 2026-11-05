@@ -229,6 +229,11 @@ impl Variables {
                 0.0,
             );
             self.set_number(&format!("GENERAL ENG FUEL VALVE:{index}"), "bool", 1.0);
+            self.set_number(
+                &format!("GENERAL ENG FUEL PUMP SWITCH:{index}"),
+                "bool",
+                0.0,
+            );
         }
         self.engines = engines;
         self.configure_throttle_limit(0.0)?;
@@ -735,6 +740,26 @@ impl Variables {
                 self.set_number(name, "percent over 100", position * direction);
             }
             return Ok(());
+        }
+        if name == "TOGGLE_ELECT_FUEL_PUMP" || name == "FUEL_PUMP" {
+            if self.engines.is_empty() {
+                return Err(Error::Unsupported("fuel pumps are unavailable".into()));
+            }
+            for index in self.engines.clone() {
+                self.toggle(&format!("GENERAL ENG FUEL PUMP SWITCH:{index}"))?;
+            }
+            return Ok(());
+        }
+        if let Some(index) = name
+            .strip_prefix("TOGGLE_ELECT_FUEL_PUMP")
+            .and_then(|index| index.parse::<u32>().ok())
+        {
+            if !self.engines.contains(&index) {
+                return Err(Error::Unsupported(format!(
+                    "fuel pump {index} is unavailable"
+                )));
+            }
+            return self.toggle(&format!("GENERAL ENG FUEL PUMP SWITCH:{index}"));
         }
         if name == "TOGGLE_FUEL_VALVE_ALL" {
             if self.engines.is_empty() {

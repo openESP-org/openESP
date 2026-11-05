@@ -238,6 +238,19 @@ impl Electrical {
                 .and_then(|value| value.number().ok())
                 .is_some_and(|value| value != 0.0)
         };
+        let pump_powered = switch_on(variables, "CIRCUIT FUEL PUMP ON");
+        let mut any_fuel_pump = false;
+        for generator in &self.definition.generators {
+            let index = generator.engine;
+            let active = pump_powered
+                && switch_on(variables, &format!("GENERAL ENG FUEL PUMP SWITCH:{index}"));
+            variables.set_number(
+                &format!("GENERAL ENG FUEL PUMP ON:{index}"),
+                "bool",
+                f64::from(active),
+            );
+            any_fuel_pump |= active;
+        }
         let mut total_load = 0.0;
         let mut battery_network_load = 0.0;
         for circuit in &self.definition.circuits {
@@ -246,6 +259,7 @@ impl Electrical {
                 "avionics_bus" | "avionics" => avionics,
                 "autopilot" => switch_on(variables, "AUTOPILOT MASTER"),
                 "pitot_heat" => switch_on(variables, "PITOT HEAT"),
+                "fuel_pump" => any_fuel_pump,
                 "starter1" | "starter2" | "starter3" | "starter4" => {
                     let index = circuit.name.as_bytes()[7] - b'0';
                     switch_on(variables, &format!("GENERAL ENG STARTER ACTIVE:{index}"))
@@ -387,6 +401,91 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn fuel_pump_and_starter_loads_follow_switches_and_power() {
+        let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\nengine.1=0,0,0\n[electrical]\nmax_battery_voltage=24\nadditional_system=0,2,17\nfuel_pump=0,5,17\nstarter1=0,20,17").unwrap();
+        let mut variables = Variables::default();
+        variables.configure_engines([1, 2].into_iter()).unwrap();
+        variables
+            .configure_electrical(&Definition::from_config(&config).unwrap(), false)
+            .unwrap();
+        variables
+            .dispatch_event("TOGGLE_ELECT_FUEL_PUMP1", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP SWITCH:1", "bool"),
+            1.0
+        );
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:1", "bool"),
+            0.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            0.0
+        );
+        variables
+            .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:1", "bool"),
+            1.0
+        );
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:2", "bool"),
+            0.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            -7.0
+        );
+        variables.set_number("GENERAL ENG STARTER ACTIVE:1", "bool", 1.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            -27.0
+        );
+        variables.set_number("GENERAL ENG STARTER ACTIVE:1", "bool", 0.0);
+        variables
+            .dispatch_event("TOGGLE_ELECT_FUEL_PUMP1", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:1", "bool"),
+            0.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            -2.0
+        );
+        variables
+            .dispatch_event("TOGGLE_ELECT_FUEL_PUMP", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:1", "bool"),
+            1.0
+        );
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:2", "bool"),
+            1.0
+        );
+        assert!(
+            variables
+                .dispatch_event("TOGGLE_ELECT_FUEL_PUMP3", Value::Number(0.0))
+                .is_err()
+        );
+        variables
+            .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+            .unwrap();
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG FUEL PUMP ON:1", "bool"),
+            0.0
+        );
+    }
     #[test]
     fn generator_output_rises_with_shaft_speed_and_respects_cut_in() {
         let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=20\nadditional_system=0,10,17").unwrap();

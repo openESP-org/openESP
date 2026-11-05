@@ -523,7 +523,8 @@ impl Pistons {
                 } else {
                     0.0
                 },
-                oil_viscosity: oil_viscosity(oil_temperature_c),
+                // Only part of total mechanical friction is oil-dependent.
+                oil_viscosity: 1.0 + 0.25 * (oil_viscosity(oil_temperature_c) - 1.0),
             },
         )?;
         let fuel_kilograms_per_second = if combustion {
