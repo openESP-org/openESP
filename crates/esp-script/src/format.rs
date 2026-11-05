@@ -113,6 +113,37 @@ fn display(value: Value) -> Result<String, Error> {
     }
 }
 
+fn unescape_literal(text: &str) -> String {
+    let mut chars = text.chars().peekable();
+    let mut result = String::with_capacity(text.len());
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            match chars.peek().copied() {
+                Some('n') => {
+                    result.push('\n');
+                    chars.next();
+                }
+                Some('r') => {
+                    result.push('\r');
+                    chars.next();
+                }
+                Some('t') => {
+                    result.push('\t');
+                    chars.next();
+                }
+                Some('\\') => {
+                    result.push('\\');
+                    chars.next();
+                }
+                _ => result.push(character),
+            }
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
 impl Format {
     fn parse(text: &str) -> Result<Self, Error> {
         let fail = || Error::Unsupported(format!("gauge number format {text}"));
@@ -333,7 +364,7 @@ impl Parser<'_> {
                     || directive.starts_with("%{end}")
                     || directive.starts_with("%{else}"));
             if !indentation {
-                parts.push(Part::Literal(literal.into()));
+                parts.push(Part::Literal(unescape_literal(literal)));
             }
             self.position += end;
         }
@@ -393,6 +424,8 @@ mod tests {
         for (source, expected) in [
             ("%(12.34)%!4.3f!", "12.340"),
             ("%(12.34)%!04.3f!", "12.340"),
+            ("%(1.5)%!6.1f!", "1.5"),
+            ("%(1.5)%!06.1f!", "1.5"),
             ("%(34.56)%!+d!", "+35"),
             ("%(234)%!5d!", "  234"),
             ("%('foo')%!5s!", "  foo"),
@@ -411,6 +444,17 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn renders_gauge_string_escape_sequences() {
+        assert_eq!(
+            FormattedString::compile(r"GS %(42)%!d! \nTAS\t%(123)%!d! \\ \{clr}")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "GS 42 \nTAS\t123 \\ \\{clr}"
+        );
     }
 
     #[test]
