@@ -10,6 +10,7 @@ pub mod animation;
 pub mod flight;
 pub mod gauge;
 pub mod panel;
+pub mod sound;
 pub mod texture;
 
 pub struct Aircraft {
