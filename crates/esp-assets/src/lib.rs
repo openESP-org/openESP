@@ -292,6 +292,11 @@ impl Model {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let decoded = mdl::Model::parse(bytes)?.decode()?;
         let data = decoded.exterior.context("model has no MDLD data")?;
+        if data.unknown.iter().any(|section| {
+            &section.id == b"PBRM" && !section.data.is_empty() && section.data != [0, 0, 0, 0]
+        }) {
+            bail!("Prepar3D PBR materials are not yet supported");
+        }
         let parents = mdl::scene::parents(&data.nodes)?;
         let animations = animation::animations(&data)?;
         let visibility = animation::visibility(&data)?;

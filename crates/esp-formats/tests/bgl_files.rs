@@ -16,7 +16,7 @@ fn decodes_external_containers() {
                         assert_eq!(record.data.get(..4), Some(b"RIFF".as_slice()));
                         let size = u32::from_le_bytes(record.data[4..8].try_into().unwrap());
                         assert_eq!(size as usize + 8, record.data.len());
-                        if record.data.get(8..12) == Some(b"MDLX") {
+                        if matches!(record.data.get(8..12), Some(b"MDLX" | b"PV20" | b"PV44")) {
                             let model = esp_formats::mdl::Model::parse(record.data).unwrap();
                             let decoded = model.decode().unwrap();
                             assert_eq!(decoded.guid, Some(record.guid));

@@ -258,4 +258,34 @@ mod object_tests {
         );
         assert!(!objects[0].model.lods[0].meshes.is_empty());
     }
+
+    #[test]
+    #[ignore = "requires P3D placement and library BGLs"]
+    fn loads_p3d_scenery_objects_from_multiple_libraries() {
+        let placement = std::env::var_os("OPENESP_SCENERY_PLACEMENT_BGL")
+            .expect("set OPENESP_SCENERY_PLACEMENT_BGL");
+        let libraries = std::env::var_os("OPENESP_SCENERY_OBJECT_BGLS")
+            .expect("set OPENESP_SCENERY_OBJECT_BGLS");
+        let libraries: Vec<_> = std::env::split_paths(&libraries).collect();
+        let objects = objects(Path::new(&placement), &libraries, None, 41.168, 40.835).unwrap();
+        assert!(!objects.is_empty(), "no placed objects found");
+        let distinct: std::collections::HashSet<_> = objects
+            .iter()
+            .map(|object| std::sync::Arc::as_ptr(&object.model))
+            .collect();
+        assert!(
+            distinct.len() >= 2,
+            "expected models from multiple libraries"
+        );
+        for object in objects {
+            assert!(object.transform.is_finite());
+            assert!(
+                object
+                    .model
+                    .lods
+                    .iter()
+                    .any(|lod| lod.meshes.iter().any(|mesh| !mesh.indices.is_empty()))
+            );
+        }
+    }
 }
