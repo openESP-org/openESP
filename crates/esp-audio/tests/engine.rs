@@ -1,5 +1,5 @@
 use esp_assets::sound::SoundSet;
-use esp_audio::engine::EngineBank;
+use esp_audio::engine::{EngineBank, EngineState};
 use esp_audio::{Command, Mixer, VoiceId};
 use esp_formats::cfg::sound::EngineEvent;
 use std::sync::Arc;
@@ -12,10 +12,32 @@ mod content;
 fn prepares_real_aircraft_sound_banks() {
     for path in content::aircraft_paths() {
         let set = SoundSet::load(&path, 0, None).unwrap();
-        let (_, commands) = EngineBank::prepare(&set, 1, 0).unwrap();
+        let (bank, commands) = EngineBank::prepare(&set, 1, 0).unwrap();
         assert!(
             !commands.is_empty(),
             "{} has no engine sounds",
+            path.display()
+        );
+        let mut mixer = Mixer::new(48000, 2).unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let state = EngineState {
+            combustion: true,
+            engine_level: 0.5,
+            propeller_level: 0.5,
+            inside: true,
+            ..Default::default()
+        };
+        for command in bank.update(None, state).unwrap() {
+            mixer.command(command).unwrap();
+        }
+        let mut audio = vec![0.0; 48000];
+        mixer.render(&mut audio);
+        assert!(audio.iter().all(|value| value.is_finite()));
+        assert!(
+            audio.iter().any(|value| value.abs() > 0.0001),
+            "{} produced silence",
             path.display()
         );
     }

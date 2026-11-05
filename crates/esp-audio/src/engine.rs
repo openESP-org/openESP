@@ -35,6 +35,19 @@ pub struct LayerConditions {
     pub propeller_pitch: PropellerPitch,
 }
 
+/// Simulation values used to drive one engine's authored sound lists.
+/// Levels are normalized to 0..1 and are clamped by the mixer.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EngineState {
+    pub combustion: bool,
+    pub starter: bool,
+    pub engine_level: f64,
+    pub propeller_level: f64,
+    pub rotor_level: f64,
+    pub inside: bool,
+    pub conditions: LayerConditions,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PropellerPitch {
     #[default]
@@ -150,6 +163,71 @@ impl EngineBank {
         Ok(commands)
     }
 
+    /// Build a frame's commands. The caller supplies the last successfully
+    /// submitted state so a full device queue cannot silently lose transitions.
+    /// An absent previous state initializes loops without playing start or
+    /// shutdown samples for an aircraft that is already running or stopped.
+    pub fn update(
+        &self,
+        previous: Option<EngineState>,
+        state: EngineState,
+    ) -> Result<Vec<Command>> {
+        ensure!(
+            [state.engine_level, state.propeller_level, state.rotor_level]
+                .iter()
+                .all(|level| level.is_finite()),
+            "invalid engine sound state"
+        );
+        let mut commands = Vec::new();
+        for (event, level, active) in [
+            (
+                EngineEvent::Combustion,
+                state.engine_level,
+                state.combustion,
+            ),
+            (EngineEvent::Starter, state.engine_level, state.starter),
+            (
+                EngineEvent::JetWhine,
+                state.engine_level,
+                state.engine_level > 0.0,
+            ),
+            (
+                EngineEvent::NonCombustion,
+                state.engine_level,
+                state.engine_level > 0.0,
+            ),
+            (
+                EngineEvent::Propeller,
+                state.propeller_level,
+                state.propeller_level > 0.0,
+            ),
+            (
+                EngineEvent::Rotor,
+                state.rotor_level,
+                state.rotor_level > 0.0,
+            ),
+        ] {
+            commands.extend(self.set_with_conditions(
+                event,
+                level,
+                state.inside,
+                active,
+                state.conditions,
+            )?);
+        }
+        if let Some(previous) = previous
+            && previous.combustion != state.combustion
+        {
+            let event = if state.combustion {
+                EngineEvent::CombustionStart
+            } else {
+                EngineEvent::Shutdown
+            };
+            commands.extend(self.trigger(event, state.engine_level, state.inside)?);
+        }
+        Ok(commands)
+    }
+
     pub fn remove(self) -> Vec<Command> {
         self.voices
             .into_iter()
@@ -162,6 +240,60 @@ impl EngineBank {
 mod tests {
     use super::*;
     use crate::Mixer;
+
+    #[test]
+    fn state_drives_loops_and_only_triggers_transitions_once() {
+        let bank = EngineBank {
+            voices: vec![
+                (EngineEvent::Combustion, VoiceId(0), 0),
+                (EngineEvent::Rotor, VoiceId(1), 0),
+                (EngineEvent::CombustionStart, VoiceId(2), 0),
+                (EngineEvent::Shutdown, VoiceId(3), 0),
+            ],
+        };
+        let mut mixer = Mixer::new(8000, 1).unwrap();
+        for id in 0..4 {
+            mixer
+                .command(Command::Add {
+                    id: VoiceId(id),
+                    sample: Arc::new(esp_assets::sound::Sample {
+                        channels: 1,
+                        sample_rate: 8000,
+                        samples: vec![0.1],
+                    }),
+                    parameters: Box::default(),
+                    looping: id < 2,
+                })
+                .unwrap();
+        }
+        let mut state = EngineState {
+            inside: true,
+            ..Default::default()
+        };
+        let apply = |mixer: &mut Mixer, previous, state| {
+            for command in bank.update(previous, state).unwrap() {
+                mixer.command(command).unwrap();
+            }
+            let mut output = [0.0; 2];
+            mixer.render(&mut output);
+            output
+        };
+        assert_eq!(apply(&mut mixer, None, state), [0.0, 0.0]);
+        let previous = state;
+        state.combustion = true;
+        state.engine_level = 0.5;
+        state.rotor_level = 0.5;
+        let output = apply(&mut mixer, Some(previous), state);
+        assert!((output[0] - 0.3).abs() < 1e-6 && (output[1] - 0.2).abs() < 1e-6);
+        let output = apply(&mut mixer, Some(state), state);
+        assert!(output.iter().all(|value| (*value - 0.2).abs() < 1e-6));
+        let previous = state;
+        state.combustion = false;
+        let output = apply(&mut mixer, Some(previous), state);
+        assert!((output[0] - 0.2).abs() < 1e-6 && (output[1] - 0.1).abs() < 1e-6);
+        state.rotor_level = f64::NAN;
+        assert!(bank.update(Some(previous), state).is_err());
+    }
 
     #[test]
     fn selects_damage_and_propeller_pitch_layers() {
