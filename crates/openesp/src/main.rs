@@ -550,8 +550,8 @@ impl App {
                     }
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
-                    let runways = if let Some(path) = &self.arguments.scenery_bgl {
-                        scenery::runways(
+                    let scene = if let Some(path) = &self.arguments.scenery_bgl {
+                        scenery::airport(
                             path,
                             self.arguments.airport.as_deref(),
                             self.arguments.latitude,
@@ -567,19 +567,27 @@ impl App {
                             self.arguments.longitude,
                         )?;
                         let (north, east) = origin.local_position(latitude, longitude)?;
-                        vec![esp_render::Runway {
-                            threshold: DVec3::new(east, 0.0, north),
-                            heading: (course + self.arguments.magnetic_declination).to_radians(),
-                            length: 2000.0,
-                            width: 45.0,
-                        }]
+                        scenery::AirportScene {
+                            runways: vec![esp_render::Runway {
+                                threshold: DVec3::new(east, 0.0, north),
+                                heading: (course + self.arguments.magnetic_declination)
+                                    .to_radians(),
+                                length: 2000.0,
+                                width: 45.0,
+                            }],
+                            taxiways: Vec::new(),
+                        }
                     } else {
-                        Vec::new()
+                        scenery::AirportScene {
+                            runways: Vec::new(),
+                            taxiways: Vec::new(),
+                        }
                     };
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
-                        &runways,
+                        &scene.runways,
+                        &scene.taxiways,
                         self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);

@@ -85,6 +85,42 @@ pub struct Runway {
     pub width: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Taxiway {
+    pub start: DVec3,
+    pub end: DVec3,
+    pub width: f32,
+    pub centerline: bool,
+}
+
+fn taxiway_mesh(taxiways: &[Taxiway], markings: bool) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for taxiway in taxiways {
+        if markings && !taxiway.centerline {
+            continue;
+        }
+        let start = taxiway.start.as_vec3();
+        let end = taxiway.end.as_vec3();
+        let Some(direction) = (end - start).try_normalize() else {
+            continue;
+        };
+        let side = Vec3::new(direction.z, 0.0, -direction.x)
+            * if markings { 0.08 } else { taxiway.width * 0.5 };
+        let height = if markings { 0.025 } else { 0.02 };
+        let base = vertices.len() as u32;
+        vertices.extend(
+            [start - side, end - side, end + side, start + side].map(|point| Vertex {
+                position: [point.x, height, point.z],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
+            }),
+        );
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
 fn runway_mesh(markings: bool, length: f32, width: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -130,6 +166,7 @@ impl Renderer {
         window: Arc<Window>,
         aircraft: &Aircraft,
         runways: &[Runway],
+        taxiways: &[Taxiway],
         requested_samples: u32,
     ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
@@ -530,6 +567,42 @@ impl Renderer {
             },
         );
         let mut runway_draws = Vec::new();
+        for (markings, color) in [
+            (false, [0.18, 0.18, 0.18, 1.0]),
+            (true, [0.8, 0.62, 0.04, 1.0]),
+        ] {
+            anyhow::ensure!(
+                taxiways.iter().all(|t| t.start.is_finite()
+                    && t.end.is_finite()
+                    && t.width.is_finite()
+                    && (0.1..=1000.0).contains(&t.width)),
+                "invalid taxiway geometry"
+            );
+            let (vertices, indices) = taxiway_mesh(taxiways, markings);
+            if indices.is_empty() {
+                continue;
+            }
+            runway_draws.push(make_draw(
+                &device,
+                &draw_layout,
+                &sampler,
+                &white,
+                DrawData {
+                    vertices: &vertices,
+                    indices: &indices,
+                    transform: Mat4::IDENTITY,
+                    uniform: DrawUniform {
+                        model: Mat4::IDENTITY.to_cols_array_2d(),
+                        normal: Mat4::IDENTITY.to_cols_array_2d(),
+                        diffuse: color,
+                        settings: [0.0, 2.0, 0.0, 0.0],
+                    },
+                    blended: false,
+                    node: None,
+                    pipeline: 0,
+                },
+            ));
+        }
         for runway in runways {
             anyhow::ensure!(
                 runway.threshold.is_finite()
@@ -1042,6 +1115,46 @@ fn make_draw(
 #[cfg(test)]
 mod runway_tests {
     use super::*;
+
+    #[test]
+    fn taxiway_mesh_preserves_width_and_centerline_flags() {
+        let segment = Taxiway {
+            start: DVec3::ZERO,
+            end: DVec3::Z * 100.0,
+            width: 20.0,
+            centerline: true,
+        };
+        let (vertices, indices) = taxiway_mesh(&[segment], false);
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices.len(), 6);
+        assert_eq!(
+            (vertices[0].position[0] - vertices[3].position[0]).abs(),
+            20.0
+        );
+        assert_eq!(taxiway_mesh(&[segment], true).1.len(), 6);
+        assert!(
+            taxiway_mesh(
+                &[Taxiway {
+                    centerline: false,
+                    ..segment
+                }],
+                true
+            )
+            .1
+            .is_empty()
+        );
+        assert!(
+            taxiway_mesh(
+                &[Taxiway {
+                    end: DVec3::ZERO,
+                    ..segment
+                }],
+                false
+            )
+            .1
+            .is_empty()
+        );
+    }
 
     #[test]
     fn runway_surface_and_markings_have_valid_triangles() {

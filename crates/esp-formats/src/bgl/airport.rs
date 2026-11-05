@@ -8,6 +8,26 @@ pub struct Airport {
     pub longitude: f64,
     pub elevation_m: f64,
     pub runways: Vec<Runway>,
+    pub taxi_points: Vec<TaxiPoint>,
+    pub taxi_paths: Vec<TaxiPath>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaxiPoint {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub kind: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaxiPath {
+    pub start: u16,
+    pub end: u16,
+    pub kind: u8,
+    pub surface: u8,
+    pub width_m: f32,
+    pub draw_surface: bool,
+    pub centerline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +98,43 @@ fn runway(data: &[u8]) -> Result<Runway, Error> {
     })
 }
 
+fn taxi_points(data: &[u8], stride: usize) -> Result<Vec<TaxiPoint>, Error> {
+    let count = usize::from(u16_at(data, 6)?);
+    range(data, 8, (count * stride) as u64)?;
+    (0..count)
+        .map(|i| {
+            let offset = 8 + i * stride;
+            let longitude = f64::from(u32_at(data, offset + 4)?) * (360.0 / 805_306_368.0) - 180.0;
+            let latitude = 90.0 - f64::from(u32_at(data, offset + 8)?) * (180.0 / 536_870_912.0);
+            Ok(TaxiPoint {
+                latitude,
+                longitude,
+                kind: data[offset],
+            })
+        })
+        .collect()
+}
+
+fn taxi_paths(data: &[u8], stride: usize) -> Result<Vec<TaxiPath>, Error> {
+    let count = usize::from(u16_at(data, 6)?);
+    range(data, 8, (count * stride) as u64)?;
+    (0..count)
+        .map(|i| {
+            let offset = 8 + i * stride;
+            let flags = data[offset + 4];
+            Ok(TaxiPath {
+                start: u16_at(data, offset)?,
+                end: u16_at(data, offset + 2)? & 0x0fff,
+                kind: flags & 0x0f,
+                draw_surface: flags & 0x20 != 0,
+                centerline: data[offset + 6] & 1 != 0,
+                surface: data[offset + 7],
+                width_m: f32_at(data, offset + 8)?,
+            })
+        })
+        .collect()
+}
+
 /// Parse consecutive airport records in one BGL subsection.
 pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
     let mut airports = Vec::new();
@@ -106,6 +163,8 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 longitude,
                 elevation_m,
                 runways: Vec::new(),
+                taxi_points: Vec::new(),
+                taxi_paths: Vec::new(),
             };
             while suboffset < record.len() {
                 let child_kind = u16_at(record, suboffset)?;
@@ -119,6 +178,14 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 let child = range(record, suboffset as u64, child_size as u64)?;
                 if matches!(child_kind, 0x0004 | 0x003e) {
                     airport.runways.push(runway(child)?);
+                }
+                match child_kind {
+                    0x001a => airport.taxi_points.extend(taxi_points(child, 12)?),
+                    0x00ac => airport.taxi_points.extend(taxi_points(child, 16)?),
+                    0x001c => airport.taxi_paths.extend(taxi_paths(child, 20)?),
+                    0x0040 => airport.taxi_paths.extend(taxi_paths(child, 36)?),
+                    0x00ae => airport.taxi_paths.extend(taxi_paths(child, 40)?),
+                    _ => {}
                 }
                 suboffset += child_size;
             }
@@ -161,6 +228,37 @@ mod tests {
         bytes.extend(((body.len() + 6) as u32).to_le_bytes());
         bytes.extend(body);
         bytes
+    }
+
+    #[test]
+    fn reads_taxiway_record_versions_and_checks_count_bounds() {
+        for (point_kind, point_stride) in [(0x1a, 12), (0xac, 16)] {
+            let mut body = vec![0u8; 2 + point_stride];
+            body[..2].copy_from_slice(&1u16.to_le_bytes());
+            body[2] = 1;
+            let raw = record(point_kind, &body);
+            let points = taxi_points(&raw, point_stride).unwrap();
+            assert_eq!(points.len(), 1);
+            assert_eq!(points[0].kind, 1);
+            assert!(taxi_points(&raw[..raw.len() - 1], point_stride).is_err());
+        }
+        for (path_kind, stride) in [(0x1c, 20), (0x40, 36), (0xae, 40)] {
+            let mut body = vec![0u8; 2 + stride];
+            body[..2].copy_from_slice(&1u16.to_le_bytes());
+            body[2..4].copy_from_slice(&3u16.to_le_bytes());
+            body[4..6].copy_from_slice(&0xf005u16.to_le_bytes());
+            body[6] = 0x21;
+            body[8] = 1;
+            body[10..14].copy_from_slice(&23.0f32.to_le_bytes());
+            let raw = record(path_kind, &body);
+            let paths = taxi_paths(&raw, stride).unwrap();
+            assert_eq!(
+                (paths[0].start, paths[0].end, paths[0].width_m),
+                (3, 5, 23.0)
+            );
+            assert!(paths[0].draw_surface && paths[0].centerline);
+            assert!(taxi_paths(&raw[..raw.len() - 1], stride).is_err());
+        }
     }
 
     #[test]
