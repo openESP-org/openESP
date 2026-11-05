@@ -97,6 +97,22 @@ fn font(face: &str, bold: bool, italic: bool) -> Result<FontArc> {
     Ok(font)
 }
 
+fn fallback_font(bold: bool, italic: bool) -> Result<FontArc> {
+    // Fixed-width faces preserve the alignment of digital instrument readouts.
+    for face in [
+        "Courier New",
+        "Consolas",
+        "Liberation Mono",
+        "DejaVu Sans Mono",
+        "Arial",
+    ] {
+        if let Ok(font) = font(face, bold, italic) {
+            return Ok(font);
+        }
+    }
+    anyhow::bail!("no usable fallback font for gauge text")
+}
+
 /// Per-panel font databases prevent unrelated aircraft from replacing each
 /// other's gauge fonts; system fonts remain the fallback.
 #[derive(Default)]
@@ -275,15 +291,17 @@ impl Text {
         let face = text(node, "FontFace").unwrap_or_else(|| "Arial".into());
         let bold = flag(node, "Bold")?;
         let italic = flag(node, "Italic")?;
-        let font = match fonts.resolve(panel, module, face.trim(), bold, italic) {
-            Ok(font) => font,
-            Err(primary) => match text(node, "AlternateFont") {
-                Some(alternate) => fonts
-                    .resolve(panel, module, alternate.trim(), bold, italic)
-                    .with_context(|| format!("primary font {face} unavailable: {primary:#}"))?,
-                None => return Err(primary),
-            },
-        };
+        let font = fonts
+            .resolve(panel, module, face.trim(), bold, italic)
+            .or_else(|primary| {
+                if let Some(alternate) = text(node, "AlternateFont")
+                    && let Ok(font) = fonts.resolve(panel, module, alternate.trim(), bold, italic)
+                {
+                    return Ok(font);
+                }
+                fallback_font(bold, italic)
+                    .with_context(|| format!("primary font {face} unavailable: {primary:#}"))
+            })?;
         let height = text(node, "FontHeight")
             .map(|h| h.trim().parse::<f32>())
             .transpose()?
@@ -414,6 +432,48 @@ fn color_background(node: Node<'_, '_>) -> Result<Rgba<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_readout_when_requested_font_is_missing() {
+        struct EmptyHost;
+        impl Host for EmptyHost {
+            fn read(
+                &mut self,
+                _: &esp_script::Reference,
+            ) -> std::result::Result<Value, esp_script::Error> {
+                Err(esp_script::Error::Type)
+            }
+            fn write(
+                &mut self,
+                _: &esp_script::Reference,
+                _: Value,
+            ) -> std::result::Result<(), esp_script::Error> {
+                Err(esp_script::Error::Type)
+            }
+        }
+        // This test needs one of the usual system fonts, as does the fallback.
+        if fallback_font(false, false).is_err() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let panel_dir = root.path().join("panel");
+        std::fs::create_dir(&panel_dir).unwrap();
+        std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\ntexture=$panel").unwrap();
+        let panel = crate::panel::Panel::load(root.path(), None)
+            .unwrap()
+            .unwrap();
+        let doc = roxmltree::Document::parse("<GaugeText><Size>100,30</Size><FontFace>MissingGaugeFont</FontFace><FontHeight>18</FontHeight><Transparent>True</Transparent><GaugeString>123</GaugeString></GaugeText>").unwrap();
+        let (mut gauge, mut image) = Text::parse(
+            doc.root_element(),
+            (100, 30),
+            &FontResolver::default(),
+            &panel,
+            "test",
+        )
+        .unwrap();
+        assert!(gauge.update(&mut image, &mut EmptyHost));
+        assert!(image.pixels().any(|pixel| pixel[3] > 0));
+    }
     #[test]
     fn resolves_private_fonts_from_simulator_folder_and_gauge_cab() {
         use cabinet::{CabinetBuilder, WriteCompression};
