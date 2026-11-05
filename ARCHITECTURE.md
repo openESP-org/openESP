@@ -1,0 +1,105 @@
+# openESP architecture
+
+openESP is a flight simulator built to run FSX and Prepar3D-era content:
+aircraft, scenery, gauges and panel configuration from those ecosystems load
+unmodified. This document describes how the code is arranged and which rules
+hold permanently. Code standards live in `CODE_STANDARDS.md`.
+
+## Layers
+
+The workspace is a cargo workspace of small crates arranged in three layers.
+A crate may only depend on crates at the same layer or below. No crate above
+the app layer is allowed to depend on another crate above it.
+
+```
+app layer
+    openesp        binary: command line, frame loop, input, camera, wiring
+
+engine layer
+    esp-render     wgpu renderer
+    esp-sim        flight physics and aircraft systems
+    esp-assets     aircraft, model and gauge loading
+    esp-scenery    airport surfaces and placed scenery objects
+    esp-terrain    elevation mesh, land class and photoreal ground
+    esp-nav        VOR, ILS, DME and waypoint facilities
+    esp-script     gauge calculator and script interpreter
+
+foundation layer
+    esp-formats    binary decoders: BGL, MDL, AIR, DDS, I8N
+    esp-cfg        ini and xml configuration files from FSX and Prepar3D
+    esp-installs   detection and inspection of installed simulator versions
+    esp-geo        coordinate frames and precision-critical math
+```
+
+Two rules follow from this arrangement and are not negotiable:
+
+- `esp-sim` never depends on `esp-render`. Physics runs headless; the app
+  connects the two.
+- The app layer is the only place that knows every crate. Everything below it
+  can be built, tested and used on its own.
+
+Crates that do not exist yet are listed in their scheduled order below. When a
+domain earns its promotion, it moves out of its current module with no
+functional change, in its own commit.
+
+## Current size
+
+| crate       | files | lines |
+|-------------|------:|------:|
+| esp-sim     |    30 | 13005 |
+| esp-formats |    57 |  9995 |
+| openesp     |     7 |  8600 |
+| esp-assets  |    13 |  6408 |
+| esp-render  |     3 |  1434 |
+| esp-script  |     3 |   976 |
+
+`openesp` currently carries more than its share: about 1,500 lines of
+application bootstrap in `main.rs` and a 3,866 line `flight.rs` that covers
+loading, propulsion, electrics, gear and events in one file. Both are scheduled
+for the split described in "first steps" below.
+
+## First steps (planned, no functional change)
+
+1. `main.rs` becomes a short bootstrap file. Its contents move to `cli.rs`
+   (argument definitions and parsers) and `app/` feature modules (spawn,
+   input, camera).
+2. `flight.rs` becomes a `flight/` directory: one file per subsystem, with the
+   tests currently inside the file staying next to the code they cover.
+3. `navigation.rs` and `vor.rs` move to the `esp-nav` crate.
+4. `esp-render`'s `lib.rs` splits into `mesh.rs`, `pipeline.rs`, `ground.rs`,
+   `runway.rs` and `objects.rs` as each area grows.
+
+These steps wait for a clean working tree; the tree currently carries
+unfinished work in `flight.rs`, `main.rs` and `esp-sim`.
+
+## New crates, in build order
+
+- `esp-cfg` and `esp-installs` (foundation). Reading `fsx.cfg`, `scenery.cfg`,
+  `dll.xml`, `addon.xml` and registry entries for FSX, FSX-SE and Prepar3D
+  versions. Everything else consumes these two; build them before the launcher.
+- `esp-scenery` and `esp-terrain` (engine). Airport surfaces and placed objects
+  move out of `openesp`; terrain arrives behind the same interface the flat
+  ground already implements, so grid and terrain worlds are interchangeable.
+- `esp-nav` (engine). Absorbs navigation modules, adds the magnetic model and
+  flight plan support.
+- `esp-options`, `esp-content`, `esp-ui`, `esp-launcher` (app side). Settings
+  model with persistence; a content manager that installs and enables add-ons
+  without touching the base simulator directories; the launcher with install
+  selection, controls setup and graphics options.
+- `esp-effects` (engine). Post-processing passes (tone mapping, bloom, glare,
+  weather) as an optional chain on top of `esp-render`.
+- `tools/esp-check`. A validation binary that loads aircraft and scenery
+  packages and reports every decode failure, for content authors and debugging.
+
+## Precision rules
+
+The rules behind the ground shimmer fix apply to everything written from now
+on, including terrain and scenery code.
+
+- World positions are `f64` until the last possible moment. Anything handed
+  to the GPU is camera-relative `f32`.
+- Repeating surfaces (ground grids, runway markings) anchor to integer world
+  offsets, snapped once per frame.
+- The simulator advances fixed `1/60` second ticks. Rendering interpolates
+  between ticks with a frame alpha. Ticking and rendering are changed together
+  or not at all.
