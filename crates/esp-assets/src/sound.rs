@@ -28,7 +28,7 @@ pub struct Sample {
 
 impl SoundSet {
     pub fn load(aircraft: &Path, variant: u32, simulator_root: Option<&Path>) -> Result<Self> {
-        let aircraft_config = super::config(&super::resolve_path(aircraft, "aircraft.cfg")?)?;
+        let aircraft_config = super::config(&super::aircraft_config_path(aircraft)?)?;
         let variants = cfg::aircraft::configurations(&aircraft_config)?;
         let selected = variants
             .iter()

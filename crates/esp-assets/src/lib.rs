@@ -101,6 +101,32 @@ pub fn resolve_path(base: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// FSX and Prepar3D SimObjects can use either aircraft.cfg or sim.cfg.
+/// Prefer aircraft.cfg when a container supplies both.
+pub fn aircraft_config_path(root: &Path) -> Result<PathBuf> {
+    let mut aircraft = None;
+    let mut sim = None;
+    for entry in std::fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let slot = if name.eq_ignore_ascii_case("aircraft.cfg") {
+            &mut aircraft
+        } else if name.eq_ignore_ascii_case("sim.cfg") {
+            &mut sim
+        } else {
+            continue;
+        };
+        if entry.path().is_file() {
+            anyhow::ensure!(slot.is_none(), "ambiguous {name} in {}", root.display());
+            *slot = Some(entry.path());
+        }
+    }
+    aircraft
+        .or(sim)
+        .with_context(|| format!("missing aircraft.cfg or sim.cfg in {}", root.display()))
+}
+
 fn config(path: &Path) -> Result<cfg::Config> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     cfg::Config::from_bytes(&bytes, encoding_rs::WINDOWS_1252)
@@ -165,7 +191,7 @@ impl Aircraft {
     }
 
     pub fn load_with_root(root: &Path, variant: u32, fsx_root: Option<&Path>) -> Result<Self> {
-        let aircraft = config(&resolve_path(root, "aircraft.cfg")?)?;
+        let aircraft = config(&aircraft_config_path(root)?)?;
         let variants = cfg::aircraft::configurations(&aircraft)?;
         let variant = variants
             .iter()

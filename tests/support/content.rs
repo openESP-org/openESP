@@ -10,7 +10,10 @@ pub fn aircraft_paths() -> Vec<PathBuf> {
         std::fs::read_dir(&directory)
             .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
             .map(|entry| entry.expect("read aircraft directory").path())
-            .filter(|path| path.is_dir() && path.join("aircraft.cfg").is_file())
+            .filter(|path| {
+                path.is_dir()
+                    && (path.join("aircraft.cfg").is_file() || path.join("sim.cfg").is_file())
+            })
             .collect()
     };
     assert!(
