@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/esp-formats",
     "crates/esp-assets",
+    "crates/esp-audio",
     "crates/esp-render",
     "crates/esp-script",
     "crates/esp-sim",

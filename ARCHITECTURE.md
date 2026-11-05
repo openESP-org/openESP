@@ -17,6 +17,7 @@ app layer
 
 engine layer
     esp-render     wgpu renderer
+    esp-audio      sound mixing and output
     esp-sim        flight physics and aircraft systems
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
