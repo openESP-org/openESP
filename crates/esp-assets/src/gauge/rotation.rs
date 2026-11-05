@@ -73,6 +73,7 @@ impl<T> FailureState<T> {
             }
             let (variable, inverted) = match key.as_str() {
                 "SYSTEM_ELECTRICAL_PANELS" => ("CIRCUIT GENERAL PANEL ON", true),
+                "SYSTEM_ELECTRICAL_AVIONICS" => ("CIRCUIT AVIONICS ON", true),
                 "SYSTEM_PITOT_STATIC" => ("PARTIAL PANEL PITOT", false),
                 "SYSTEM_VACUUM" => ("PARTIAL PANEL VACUUM", false),
                 "SYSTEM_ENGINE" => ("PARTIAL PANEL ENGINE", false),
@@ -153,10 +154,12 @@ impl Delay {
         };
         let rate = number(node, "DelayValue")?.context("missing gauge delay value")?;
         anyhow::ensure!(rate.is_finite() && rate > 0.0, "invalid gauge delay value");
-        let units = child_text(node, "DelayUnits")
-            .context("missing gauge delay units")?
-            .trim()
-            .to_ascii_uppercase();
+        // Some shipped gauges omit units. Keep the instrument visible and use
+        // its undelayed movement instead of inventing an unspecified unit.
+        let Some(units) = child_text(node, "DelayUnits") else {
+            return Ok(None);
+        };
+        let units = units.trim().to_ascii_uppercase();
         let (units, rate) = match units.as_str() {
             "VALUE_PER_SECOND" => (DelayUnits::Value, rate),
             "DEGREES_PER_SECOND" if rotation => (DelayUnits::Angle, rate.to_radians()),
@@ -717,7 +720,9 @@ mod tests {
             &mut self,
             reference: &Reference,
         ) -> std::result::Result<esp_script::Value, esp_script::Error> {
-            if reference.name == "CIRCUIT GENERAL PANEL ON" {
+            if reference.name == "CIRCUIT GENERAL PANEL ON"
+                || reference.name == "CIRCUIT AVIONICS ON"
+            {
                 assert_eq!(reference.unit.as_deref(), Some("bool"));
                 Ok(esp_script::Value::Number(self.0))
             } else {
@@ -799,6 +804,30 @@ mod tests {
         host.0 = 1.0;
         shift.advance(&conditions, 0.0, &mut host);
         assert_eq!(shift.offset(&conditions), Some(DVec2::new(6.0, 0.0)));
+    }
+
+    #[test]
+    fn avionics_failure_respects_power_and_recovers() {
+        let (mut rotation, mut conditions) = self::rotation("<Rotation><Expression><Script>0</Script></Expression><FailureTable><Failure><Fail_Key>SYSTEM_ELECTRICAL_AVIONICS</Fail_Key><Fail_Action>Zero</Fail_Action></Failure></FailureTable></Rotation>").unwrap();
+        let mut host = PowerHost(1.0);
+        conditions[0].value = Some(1.5);
+        rotation.advance(&conditions, 0.0, &mut host);
+        assert_eq!(rotation.angle(&conditions), Some(1.5));
+        host.0 = 0.0;
+        rotation.advance(&conditions, 1.0, &mut host);
+        assert_eq!(rotation.angle(&conditions), Some(0.0));
+        host.0 = 1.0;
+        rotation.advance(&conditions, 1.0, &mut host);
+        assert_eq!(rotation.angle(&conditions), Some(1.5));
+    }
+
+    #[test]
+    fn missing_delay_units_keeps_motion_visible() {
+        let (mut dial, mut conditions) = rotation("<Rotation><Delay><DelayValue>30</DelayValue></Delay><Expression><Script>0</Script></Expression></Rotation>").unwrap();
+        assert!(dial.delay.is_none());
+        conditions[0].value = Some(1.0);
+        dial.advance(&conditions, 0.1, &mut NoHost);
+        assert_eq!(dial.angle(&conditions), Some(1.0));
     }
 
     fn rotation(text: &str) -> Result<(Rotation, Vec<Condition>)> {
