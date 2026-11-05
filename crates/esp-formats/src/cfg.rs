@@ -6,6 +6,7 @@ pub mod camera;
 pub mod contact;
 pub mod electrical;
 pub mod engine;
+pub mod helicopter;
 pub mod loading;
 pub mod model;
 pub mod panel;

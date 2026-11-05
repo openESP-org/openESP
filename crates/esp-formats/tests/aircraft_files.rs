@@ -1,5 +1,31 @@
 use esp_formats::cfg::{Config, aircraft::configurations};
 
+#[path = "../../../tests/support/content.rs"]
+mod content;
+
+#[test]
+#[ignore = "requires OPENESP_AIRCRAFT_PATHS with rotorcraft aircraft.cfg files"]
+fn decodes_external_helicopter_rotors() {
+    use esp_formats::cfg::helicopter::{MainRotor, SecondaryRotor};
+    let mut configured = 0;
+    for path in content::aircraft_paths() {
+        let path = path.join("aircraft.cfg");
+        let config =
+            Config::from_bytes(&std::fs::read(&path).unwrap(), encoding_rs::WINDOWS_1252).unwrap();
+        let main = MainRotor::from_config(&config)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        SecondaryRotor::from_config(&config)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        if main.radius_feet.is_some() {
+            configured += 1;
+        }
+    }
+    assert!(
+        configured > 0,
+        "no helicopter main rotor configuration found"
+    );
+}
+
 #[test]
 #[ignore = "requires ESP_FORMATS_AIRCRAFT_FILES containing paths to external aircraft.cfg files"]
 fn decodes_external_aircraft_references() {
