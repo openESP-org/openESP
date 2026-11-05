@@ -188,6 +188,11 @@ fn flag(node: Node<'_, '_>, name: &str) -> Result<bool> {
 
 fn color(value: &str) -> Result<Rgba<u8>> {
     let value = value.trim().to_ascii_lowercase();
+    if let Some(hex) = value.strip_prefix('#') {
+        ensure!(hex.len() == 6, "invalid gauge text color");
+        let rgb = u32::from_str_radix(hex, 16)?;
+        return Ok(Rgba([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255]));
+    }
     let rgb = match value.as_str() {
         "white" => [255, 255, 255],
         "black" => [0, 0, 0],
@@ -543,6 +548,8 @@ mod tests {
     #[test]
     fn decodes_sdk_bgr_colors() {
         assert_eq!(color("0x01E00D").unwrap(), Rgba([13, 224, 1, 255]));
+        assert_eq!(color("#F4AF09").unwrap(), Rgba([244, 175, 9, 255]));
+        assert!(color("#123").is_err());
         assert_eq!(color("cyan").unwrap(), Rgba([0, 255, 255, 255]));
         assert!(color("0x1FFFFFF").is_err());
     }
