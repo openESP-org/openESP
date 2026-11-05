@@ -25,7 +25,40 @@ const EVENTS: [EngineEvent; 9] = [
 
 /// Voice identifiers must be reserved exclusively for this bank by the caller.
 pub struct EngineBank {
-    voices: Vec<(EngineEvent, VoiceId)>,
+    voices: Vec<(EngineEvent, VoiceId, u32)>,
+}
+
+/// Conditions selecting special sound layers authored in sound.cfg.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayerConditions {
+    pub engine_damaged: bool,
+    pub propeller_pitch: PropellerPitch,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PropellerPitch {
+    #[default]
+    Normal,
+    Maximum,
+    Minimum,
+    MinimumReverse,
+}
+
+fn layer_enabled(event: EngineEvent, flags: u32, conditions: LayerConditions) -> bool {
+    match event {
+        EngineEvent::Combustion => (flags & 2 == 0 || conditions.engine_damaged) && flags & 4 == 0,
+        EngineEvent::Propeller => {
+            let selected = match conditions.propeller_pitch {
+                PropellerPitch::Normal => 0,
+                PropellerPitch::Maximum => 2,
+                PropellerPitch::Minimum => 4,
+                PropellerPitch::MinimumReverse => 8,
+            };
+            let special = flags & 14;
+            special == 0 || special & selected != 0
+        }
+        _ => true,
+    }
 }
 
 impl EngineBank {
@@ -41,7 +74,8 @@ impl EngineBank {
         let mut commands = Vec::new();
         for event in EVENTS {
             for layer in set.engine_layers(engine, event)? {
-                if layer.parameters.flags.unwrap_or(0) & 1 != 0 {
+                let flags = layer.parameters.flags.unwrap_or(0);
+                if flags & 1 != 0 {
                     continue;
                 }
                 let Some(filename) = layer.filenames.first() else {
@@ -67,7 +101,7 @@ impl EngineBank {
                     parameters: Box::new(layer.parameters),
                     looping,
                 });
-                voices.push((event, id));
+                voices.push((event, id, flags));
             }
         }
         Ok((Self { voices }, commands))
@@ -83,16 +117,28 @@ impl EngineBank {
         inside: bool,
         active: bool,
     ) -> Result<Vec<Command>> {
+        self.set_with_conditions(event, level, inside, active, LayerConditions::default())
+    }
+
+    /// Set an event while selecting its damaged-engine and propeller-pitch layers.
+    pub fn set_with_conditions(
+        &self,
+        event: EngineEvent,
+        level: f64,
+        inside: bool,
+        active: bool,
+        conditions: LayerConditions,
+    ) -> Result<Vec<Command>> {
         ensure!(level.is_finite(), "invalid sound control");
         Ok(self
             .voices
             .iter()
-            .filter(|(kind, _)| *kind == event)
-            .map(|(_, id)| Command::Set {
+            .filter(|(kind, _, _)| *kind == event)
+            .map(|(_, id, flags)| Command::Set {
                 id: *id,
                 level,
                 inside,
-                active,
+                active: active && layer_enabled(event, *flags, conditions),
             })
             .collect())
     }
@@ -107,7 +153,7 @@ impl EngineBank {
     pub fn remove(self) -> Vec<Command> {
         self.voices
             .into_iter()
-            .map(|(_, id)| Command::Remove(id))
+            .map(|(_, id, _)| Command::Remove(id))
             .collect()
     }
 }
@@ -116,6 +162,72 @@ impl EngineBank {
 mod tests {
     use super::*;
     use crate::Mixer;
+
+    #[test]
+    fn selects_damage_and_propeller_pitch_layers() {
+        let bank = EngineBank {
+            voices: vec![
+                (EngineEvent::Combustion, VoiceId(0), 0),
+                (EngineEvent::Combustion, VoiceId(1), 2),
+                (EngineEvent::Combustion, VoiceId(2), 4),
+                (EngineEvent::Propeller, VoiceId(3), 0),
+                (EngineEvent::Propeller, VoiceId(4), 2),
+                (EngineEvent::Propeller, VoiceId(5), 4),
+                (EngineEvent::Propeller, VoiceId(6), 8),
+            ],
+        };
+        let mut mixer = Mixer::new(8000, 1).unwrap();
+        for id in 0..7 {
+            mixer
+                .command(Command::Add {
+                    id: VoiceId(id),
+                    sample: Arc::new(esp_assets::sound::Sample {
+                        channels: 1,
+                        sample_rate: 8000,
+                        samples: vec![0.1],
+                    }),
+                    parameters: Box::default(),
+                    looping: true,
+                })
+                .unwrap();
+        }
+        let apply = |mixer: &mut Mixer, conditions| {
+            for event in [EngineEvent::Combustion, EngineEvent::Propeller] {
+                for command in bank
+                    .set_with_conditions(event, 0.5, true, true, conditions)
+                    .unwrap()
+                {
+                    mixer.command(command).unwrap();
+                }
+            }
+            let mut output = [0.0];
+            mixer.render(&mut output);
+            output[0]
+        };
+        assert!((apply(&mut mixer, LayerConditions::default()) - 0.2).abs() < 1e-6);
+        assert!(
+            (apply(
+                &mut mixer,
+                LayerConditions {
+                    engine_damaged: true,
+                    propeller_pitch: PropellerPitch::Maximum,
+                }
+            ) - 0.4)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (apply(
+                &mut mixer,
+                LayerConditions {
+                    engine_damaged: false,
+                    propeller_pitch: PropellerPitch::MinimumReverse,
+                }
+            ) - 0.3)
+                .abs()
+                < 1e-6
+        );
+    }
 
     #[test]
     fn prepares_rotor_layers_and_restarts_one_shots() {
