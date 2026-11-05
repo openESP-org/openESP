@@ -6,6 +6,47 @@ mod content;
 
 #[test]
 #[ignore = "requires OPENESP_AIRCRAFT_PATHS with the B737_800 gauge CAB"]
+fn stock_737_engine_start_selector_cycles() {
+    use esp_script::{Error, Host, Reference, Value};
+    #[derive(Default)]
+    struct HostState(f64);
+    impl Host for HostState {
+        fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+            Ok(Value::Number(if reference.name == "ENG START" {
+                self.0
+            } else {
+                0.0
+            }))
+        }
+        fn write(&mut self, reference: &Reference, value: Value) -> Result<(), Error> {
+            if reference.name == "ENG START" {
+                self.0 = value.number()?;
+            }
+            Ok(())
+        }
+    }
+    let mut checked = false;
+    for path in content::aircraft_paths() {
+        if esp_assets::resolve_path(&path, "panel/B737_800.cab").is_err() {
+            continue;
+        }
+        let aircraft = esp_assets::Aircraft::load(&path, 0).unwrap();
+        let panel = aircraft.panel.as_ref().unwrap();
+        let image = esp_assets::gauge::load_panel(panel, "$737_1")
+            .unwrap()
+            .unwrap();
+        let mut host = HostState::default();
+        for expected in [1.0, 2.0, 0.0] {
+            assert!(image.left_click(336.0, 475.0, &mut host).unwrap());
+            assert_eq!(host.0, expected);
+        }
+        checked = true;
+    }
+    assert!(checked, "no 737 gauge package found");
+}
+
+#[test]
+#[ignore = "requires OPENESP_AIRCRAFT_PATHS with the B737_800 gauge CAB"]
 fn stock_737_vertical_speed_wheel_dispatches_increment() {
     use esp_script::{Error, Host, Reference, Value};
     #[derive(Default)]

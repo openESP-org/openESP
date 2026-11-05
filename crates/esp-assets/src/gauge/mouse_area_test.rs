@@ -29,3 +29,26 @@ fn recovers_invalid_child_size_from_parent_extent() {
         .unwrap();
     assert_eq!(host.0, ["UP"]);
 }
+
+#[test]
+fn recovers_stock_selector_script_with_extra_closing_brace() {
+    struct Selector(f64);
+    impl Host for Selector {
+        fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+            Ok(Value::Number(self.0))
+        }
+        fn write(&mut self, _: &Reference, value: Value) -> Result<(), Error> {
+            self.0 = value.number()?;
+            Ok(())
+        }
+    }
+    let script = "(L:Eng Start,number) ++ 3 % (>L:Eng Start,number) }";
+    assert!(Program::compile(script).is_err());
+    let program = compile_mouse_script(script).unwrap();
+    let mut host = Selector(0.0);
+    for expected in [1.0, 2.0, 0.0] {
+        program.evaluate(&mut host).unwrap();
+        assert_eq!(host.0, expected);
+    }
+    assert!(compile_mouse_script("1 } }").is_err());
+}

@@ -909,7 +909,7 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
         let cy = canvas.position.1 as f64;
         for raw in raw_areas {
             let (ax, ay, aw, ah) = raw.bounds;
-            match Program::compile(&raw.source) {
+            match compile_mouse_script(&raw.source) {
                 Ok(script) => mouse_areas.push(PanelMouseArea {
                     x: cx + ax * sx,
                     y: cy + ay * sy,
@@ -940,6 +940,20 @@ pub fn load_panel(panel: &Panel, texture: &str) -> Result<Option<PanelImage>> {
     };
     result.compose();
     Ok(Some(result))
+}
+
+fn compile_mouse_script(source: &str) -> std::result::Result<Program, esp_script::Error> {
+    match Program::compile(source) {
+        Err(esp_script::Error::Conditional)
+            if source.matches('}').count() == source.matches('{').count() + 1 =>
+        {
+            let Some(repaired) = source.trim_end().strip_suffix('}') else {
+                return Err(esp_script::Error::Conditional);
+            };
+            Program::compile(repaired)
+        }
+        result => result,
+    }
 }
 
 fn dimension(value: f64) -> Result<u32> {
