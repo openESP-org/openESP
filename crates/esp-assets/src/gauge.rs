@@ -15,6 +15,8 @@ use crate::{panel::Panel, texture::gauge_bitmap};
 mod default_case;
 mod fallback;
 mod mask;
+#[cfg(test)]
+mod mouse_area_test;
 mod rotation;
 mod text;
 use mask::Mask;
@@ -995,12 +997,39 @@ fn collect_mouse_areas(
     offset_y: f64,
     out: &mut Vec<MouseAreaSource>,
 ) -> Result<()> {
-    let mut stack = vec![(node, offset_x, offset_y, Vec::<Arc<Program>>::new())];
-    while let Some((node, offset_x, offset_y, parents)) = stack.pop() {
+    let mut stack = vec![(
+        node,
+        offset_x,
+        offset_y,
+        None::<(f64, f64)>,
+        Vec::<Arc<Program>>::new(),
+    )];
+    while let Some((node, offset_x, offset_y, parent_extent, parents)) = stack.pop() {
         for child in node.children().filter(|c| c.has_tag_name("MouseArea")) {
             let bounds = position(child).and_then(|(dx, dy)| {
                 let (x, y) = finite_position(offset_x + dx, offset_y + dy)?;
-                let (w, h) = area_size(child)?;
+                let (w, h) = match area_size(child) {
+                    Ok(size) => size,
+                    Err(error) => {
+                        let single_number = child
+                            .children()
+                            .find(|node| node.has_tag_name("Size"))
+                            .map(esp_formats::gauge::text_content)
+                            .and_then(|text| text.trim().parse::<f64>().ok())
+                            .is_some_and(|number| number.is_finite() && number > 0.0);
+                        if !single_number {
+                            return Err(error);
+                        }
+                        let Some((right, bottom)) = parent_extent else {
+                            return Err(error);
+                        };
+                        let (w, h) = (right - x, bottom - y);
+                        if x < offset_x || y < offset_y || w <= 0.0 || h <= 0.0 {
+                            return Err(error);
+                        }
+                        (w, h)
+                    }
+                };
                 Ok((x, y, w, h))
             });
             let (x, y, w, h) = match bounds {
@@ -1093,7 +1122,7 @@ fn collect_mouse_areas(
                     });
                 }
             }
-            stack.push((child, x, y, visibility));
+            stack.push((child, x, y, Some((x + w, y + h)), visibility));
         }
     }
     Ok(())

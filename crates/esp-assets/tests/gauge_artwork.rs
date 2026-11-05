@@ -6,6 +6,41 @@ mod content;
 
 #[test]
 #[ignore = "requires OPENESP_AIRCRAFT_PATHS with the B737_800 gauge CAB"]
+fn stock_737_vertical_speed_wheel_dispatches_increment() {
+    use esp_script::{Error, Host, Reference, Value};
+    #[derive(Default)]
+    struct HostState(Vec<String>);
+    impl Host for HostState {
+        fn read(&mut self, _: &Reference) -> Result<Value, Error> {
+            Ok(Value::Number(0.0))
+        }
+        fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+            if reference.category == 'K' {
+                self.0.push(reference.name.clone());
+            }
+            Ok(())
+        }
+    }
+    let mut checked = false;
+    for path in content::aircraft_paths() {
+        if esp_assets::resolve_path(&path, "panel/B737_800.cab").is_err() {
+            continue;
+        }
+        let aircraft = esp_assets::Aircraft::load(&path, 0).unwrap();
+        let panel = aircraft.panel.as_ref().unwrap();
+        let image = esp_assets::gauge::load_panel(panel, "$737_1")
+            .unwrap()
+            .unwrap();
+        let mut host = HostState::default();
+        image.left_click(642.0, 870.0, &mut host).unwrap();
+        assert!(host.0.iter().any(|event| event == "AP_VS_VAR_INC"));
+        checked = true;
+    }
+    assert!(checked, "no 737 gauge package found");
+}
+
+#[test]
+#[ignore = "requires OPENESP_AIRCRAFT_PATHS with the B737_800 gauge CAB"]
 fn decodes_real_737_translucent_gauge_art() {
     let mut checked = 0;
     for aircraft in content::aircraft_paths() {
