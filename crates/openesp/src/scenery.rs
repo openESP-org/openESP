@@ -7,6 +7,7 @@ use crate::navigation::Origin;
 pub struct AirportScene {
     pub runways: Vec<esp_render::Runway>,
     pub taxiways: Vec<esp_render::Taxiway>,
+    pub aprons: Vec<esp_render::Apron>,
 }
 
 /// Place BGL runways and taxiways on the current local ground plane.
@@ -92,7 +93,30 @@ pub fn airport(
             centerline: path.centerline,
         });
     }
-    Ok(AirportScene { runways, taxiways })
+    let aprons = airport
+        .aprons
+        .iter()
+        .filter(|apron| apron.draw_surface)
+        .map(|apron| {
+            let vertices = apron
+                .vertices
+                .iter()
+                .map(|&(latitude, longitude)| {
+                    let (north, east) = origin.local_position(latitude, longitude)?;
+                    Ok(DVec3::new(east, 0.0, north))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(esp_render::Apron {
+                vertices,
+                indices: apron.indices.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(AirportScene {
+        runways,
+        taxiways,
+        aprons,
+    })
 }
 
 #[cfg(test)]
@@ -106,6 +130,7 @@ mod tests {
         let scene = airport(Path::new(&path), Some("KLAX"), 33.9377117, -118.4010096).unwrap();
         let runways = scene.runways;
         assert_eq!(scene.taxiways.len(), 406);
+        assert_eq!(scene.aprons.len(), 22);
         assert_eq!(runways.len(), 4);
         assert!(runways.iter().any(|r| (r.length - 3938.93).abs() < 0.1));
         let first = runways

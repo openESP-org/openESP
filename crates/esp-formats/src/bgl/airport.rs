@@ -10,6 +10,15 @@ pub struct Airport {
     pub runways: Vec<Runway>,
     pub taxi_points: Vec<TaxiPoint>,
     pub taxi_paths: Vec<TaxiPath>,
+    pub aprons: Vec<Apron>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Apron {
+    pub surface: u8,
+    pub draw_surface: bool,
+    pub vertices: Vec<(f64, f64)>,
+    pub indices: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +144,39 @@ fn taxi_paths(data: &[u8], stride: usize) -> Result<Vec<TaxiPath>, Error> {
         .collect()
 }
 
+fn apron(data: &[u8], counts_offset: usize) -> Result<Apron, Error> {
+    let vertex_count = usize::from(u16_at(data, counts_offset)?);
+    let triangle_count = usize::from(u16_at(data, counts_offset + 2)?);
+    let vertex_offset = counts_offset + 4;
+    let index_offset = vertex_offset + vertex_count * 8;
+    range(data, vertex_offset as u64, (vertex_count * 8) as u64)?;
+    range(data, index_offset as u64, (triangle_count * 6) as u64)?;
+    let mut vertices = Vec::with_capacity(vertex_count);
+    for index in 0..vertex_count {
+        let offset = vertex_offset + index * 8;
+        let longitude = f64::from(u32_at(data, offset)?) * (360.0 / 805_306_368.0) - 180.0;
+        let latitude = 90.0 - f64::from(u32_at(data, offset + 4)?) * (180.0 / 536_870_912.0);
+        vertices.push((latitude, longitude));
+    }
+    let mut indices = Vec::with_capacity(triangle_count * 3);
+    for index in 0..triangle_count * 3 {
+        let vertex = u16_at(data, index_offset + index * 2)?;
+        if usize::from(vertex) >= vertex_count {
+            return Err(Error::Range {
+                offset: u64::from(vertex),
+                size: vertex_count as u64,
+            });
+        }
+        indices.push(vertex);
+    }
+    Ok(Apron {
+        surface: data[6],
+        draw_surface: data[7] & 1 != 0,
+        vertices,
+        indices,
+    })
+}
+
 /// Parse consecutive airport records in one BGL subsection.
 pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
     let mut airports = Vec::new();
@@ -165,6 +207,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 runways: Vec::new(),
                 taxi_points: Vec::new(),
                 taxi_paths: Vec::new(),
+                aprons: Vec::new(),
             };
             while suboffset < record.len() {
                 let child_kind = u16_at(record, suboffset)?;
@@ -185,6 +228,9 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                     0x001c => airport.taxi_paths.extend(taxi_paths(child, 20)?),
                     0x0040 => airport.taxi_paths.extend(taxi_paths(child, 36)?),
                     0x00ae => airport.taxi_paths.extend(taxi_paths(child, 40)?),
+                    0x0030 => airport.aprons.push(apron(child, 8)?),
+                    0x0041 => airport.aprons.push(apron(child, 24)?),
+                    0x00b0 => airport.aprons.push(apron(child, 28)?),
                     _ => {}
                 }
                 suboffset += child_size;
@@ -258,6 +304,29 @@ mod tests {
             );
             assert!(paths[0].draw_surface && paths[0].centerline);
             assert!(taxi_paths(&raw[..raw.len() - 1], stride).is_err());
+        }
+    }
+
+    #[test]
+    fn reads_triangulated_aprons_and_rejects_bad_indices() {
+        for (kind, counts_offset) in [(0x30, 8), (0x41, 24), (0xb0, 28)] {
+            let mut body = vec![0u8; counts_offset - 6];
+            body[1] = 1;
+            body.extend(3u16.to_le_bytes());
+            body.extend(1u16.to_le_bytes());
+            body.extend([0u8; 24]);
+            for index in [0u16, 1, 2] {
+                body.extend(index.to_le_bytes());
+            }
+            let mut raw = record(kind, &body);
+            let parsed = apron(&raw, counts_offset).unwrap();
+            assert!(parsed.draw_surface);
+            assert_eq!(parsed.vertices.len(), 3);
+            assert_eq!(parsed.indices, [0, 1, 2]);
+            assert!(apron(&raw[..raw.len() - 1], counts_offset).is_err());
+            let end = raw.len();
+            raw[end - 2..].copy_from_slice(&3u16.to_le_bytes());
+            assert!(apron(&raw, counts_offset).is_err());
         }
     }
 

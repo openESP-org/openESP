@@ -93,6 +93,39 @@ pub struct Taxiway {
     pub centerline: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct Apron {
+    pub vertices: Vec<DVec3>,
+    pub indices: Vec<u16>,
+}
+
+fn apron_mesh(aprons: &[Apron]) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for apron in aprons {
+        let base = vertices.len() as u32;
+        vertices.extend(apron.vertices.iter().map(|point| Vertex {
+            position: [point.x as f32, 0.01, point.z as f32],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        }));
+        for triangle in apron.indices.as_chunks::<3>().0 {
+            let [a, b, c] = triangle.map(|index| apron.vertices[usize::from(index)]);
+            let winding = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+            if winding > 0.0 {
+                indices.extend(triangle.map(|i| base + u32::from(i)));
+            } else if winding < 0.0 {
+                indices.extend([
+                    base + u32::from(triangle[0]),
+                    base + u32::from(triangle[2]),
+                    base + u32::from(triangle[1]),
+                ]);
+            }
+        }
+    }
+    (vertices, indices)
+}
+
 fn taxiway_mesh(taxiways: &[Taxiway], markings: bool) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -167,6 +200,7 @@ impl Renderer {
         aircraft: &Aircraft,
         runways: &[Runway],
         taxiways: &[Taxiway],
+        aprons: &[Apron],
         requested_samples: u32,
     ) -> Result<Self> {
         // Avoid initializing secondary GL drivers when using native GPU APIs.
@@ -567,6 +601,40 @@ impl Renderer {
             },
         );
         let mut runway_draws = Vec::new();
+        anyhow::ensure!(
+            aprons
+                .iter()
+                .all(|apron| apron.vertices.iter().all(|p| p.is_finite())
+                    && apron.indices.len().is_multiple_of(3)
+                    && apron
+                        .indices
+                        .iter()
+                        .all(|i| usize::from(*i) < apron.vertices.len())),
+            "invalid apron geometry"
+        );
+        let (vertices, indices) = apron_mesh(aprons);
+        if !indices.is_empty() {
+            runway_draws.push(make_draw(
+                &device,
+                &draw_layout,
+                &sampler,
+                &white,
+                DrawData {
+                    vertices: &vertices,
+                    indices: &indices,
+                    transform: Mat4::IDENTITY,
+                    uniform: DrawUniform {
+                        model: Mat4::IDENTITY.to_cols_array_2d(),
+                        normal: Mat4::IDENTITY.to_cols_array_2d(),
+                        diffuse: [0.23, 0.23, 0.23, 1.0],
+                        settings: [0.0, 2.0, 0.0, 0.0],
+                    },
+                    blended: false,
+                    node: None,
+                    pipeline: 0,
+                },
+            ));
+        }
         for (markings, color) in [
             (false, [0.18, 0.18, 0.18, 1.0]),
             (true, [0.8, 0.62, 0.04, 1.0]),
@@ -1115,6 +1183,17 @@ fn make_draw(
 #[cfg(test)]
 mod runway_tests {
     use super::*;
+
+    #[test]
+    fn apron_triangles_are_oriented_upward_and_degenerates_skipped() {
+        let apron = Apron {
+            vertices: vec![DVec3::ZERO, DVec3::X, DVec3::Z],
+            indices: vec![0, 1, 2, 0, 2, 1, 0, 0, 1],
+        };
+        let (vertices, indices) = apron_mesh(&[apron]);
+        assert_eq!(vertices.len(), 3);
+        assert_eq!(indices, [0, 2, 1, 0, 2, 1]);
+    }
 
     #[test]
     fn taxiway_mesh_preserves_width_and_centerline_flags() {

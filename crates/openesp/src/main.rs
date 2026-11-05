@@ -576,11 +576,13 @@ impl App {
                                 width: 45.0,
                             }],
                             taxiways: Vec::new(),
+                            aprons: Vec::new(),
                         }
                     } else {
                         scenery::AirportScene {
                             runways: Vec::new(),
                             taxiways: Vec::new(),
+                            aprons: Vec::new(),
                         }
                     };
                     self.renderer = Some(pollster::block_on(Renderer::new(
@@ -588,6 +590,7 @@ impl App {
                         &aircraft,
                         &scene.runways,
                         &scene.taxiways,
+                        &scene.aprons,
                         self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
