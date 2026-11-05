@@ -28,6 +28,24 @@ pub enum Command {
     Remove(VoiceId),
 }
 
+enum Message {
+    Single(Command),
+    Controls(Vec<Command>),
+}
+
+fn send_controls(sender: &SyncSender<Message>, commands: Vec<Command>) -> Result<()> {
+    for command in &commands {
+        ensure!(
+            matches!(command, Command::Set { .. }),
+            "audio control batch contains a non-control command"
+        );
+        validate_command(command)?;
+    }
+    sender
+        .try_send(Message::Controls(commands))
+        .map_err(|_| anyhow::anyhow!("audio command queue unavailable or full"))
+}
+
 struct Voice {
     id: VoiceId,
     sample: Arc<Sample>,
@@ -241,7 +259,7 @@ impl Mixer {
 /// Owns the audio stream. Commands are delivered without blocking the audio callback.
 pub struct Output {
     _stream: cpal::Stream,
-    commands: SyncSender<Command>,
+    commands: SyncSender<Message>,
     errors: Receiver<String>,
 }
 
@@ -254,7 +272,7 @@ impl Output {
         let config = device.default_output_config()?;
         let channels = usize::from(config.channels());
         let sample_rate = config.sample_rate().0;
-        let (commands, receiver) = mpsc::sync_channel::<Command>(256);
+        let (commands, receiver) = mpsc::sync_channel::<Message>(256);
         let (error_sender, errors) = mpsc::channel();
         let mixer = Mixer::new(sample_rate, channels)?;
         let build = |mixer, receiver| match config.sample_format() {
@@ -327,8 +345,13 @@ impl Output {
     pub fn try_command(&self, command: Command) -> Result<()> {
         validate_command(&command)?;
         self.commands
-            .try_send(command)
+            .try_send(Message::Single(command))
             .map_err(|_| anyhow::anyhow!("audio command queue unavailable or full"))
+    }
+    /// Submit a complete frame of control changes in one queue entry.
+    /// A full queue rejects the whole frame, allowing the caller to retry it.
+    pub fn try_controls(&self, commands: Vec<Command>) -> Result<()> {
+        send_controls(&self.commands, commands)
     }
     pub fn try_error(&self) -> Option<String> {
         self.errors.try_recv().ok()
@@ -339,7 +362,7 @@ fn stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut mixer: Mixer,
-    receiver: Receiver<Command>,
+    receiver: Receiver<Message>,
     errors: mpsc::Sender<String>,
 ) -> Result<cpal::Stream>
 where
@@ -350,9 +373,20 @@ where
     Ok(device.build_output_stream(
         config,
         move |data: &mut [T], _| {
-            while let Ok(command) = receiver.try_recv() {
-                if let Err(error) = mixer.apply(command) {
-                    let _ = command_errors.send(error.to_string());
+            while let Ok(message) = receiver.try_recv() {
+                match message {
+                    Message::Single(command) => {
+                        if let Err(error) = mixer.apply(command) {
+                            let _ = command_errors.send(error.to_string());
+                        }
+                    }
+                    Message::Controls(commands) => {
+                        for command in commands {
+                            if let Err(error) = mixer.apply(command) {
+                                let _ = command_errors.send(error.to_string());
+                            }
+                        }
+                    }
                 }
             }
             scratch.resize(data.len(), 0.0);
@@ -514,5 +548,29 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn control_batches_are_validated_and_queued_as_one_frame() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let set = |id, level| Command::Set {
+            id: VoiceId(id),
+            level,
+            inside: true,
+            active: true,
+        };
+        assert!(send_controls(&sender, vec![set(1, 0.5), set(2, f64::NAN)]).is_err());
+        assert!(receiver.try_recv().is_err());
+        assert!(send_controls(&sender, vec![Command::Remove(VoiceId(1))]).is_err());
+        send_controls(&sender, vec![set(1, 0.5), set(2, 0.75)]).unwrap();
+        assert!(send_controls(&sender, vec![set(3, 0.5)]).is_err());
+        let Message::Controls(commands) = receiver.try_recv().unwrap() else {
+            panic!("expected batch")
+        };
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(commands[0], Command::Set { id: VoiceId(1), .. }));
+        assert!(matches!(commands[1], Command::Set { id: VoiceId(2), .. }));
+        assert!(receiver.try_recv().is_err());
+        send_controls(&sender, vec![set(3, 0.5)]).unwrap();
     }
 }

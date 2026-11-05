@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use esp_assets::sound::SoundSet;
-use esp_audio::{Output, engine::EngineBank};
-use esp_formats::cfg::sound::EngineEvent;
+use esp_audio::{
+    Output,
+    engine::{EngineBank, EngineState},
+};
 use std::{path::Path, time::Duration};
 
 fn main() -> Result<()> {
@@ -14,9 +16,14 @@ fn main() -> Result<()> {
     for command in commands {
         output.try_command(command)?;
     }
-    for command in bank.set(EngineEvent::Combustion, 0.5, true, true)? {
-        output.try_command(command)?;
-    }
+    let state = EngineState {
+        combustion: true,
+        engine_level: 0.5,
+        propeller_level: 0.5,
+        inside: true,
+        ..Default::default()
+    };
+    output.try_controls(bank.update(None, state)?)?;
     std::thread::sleep(Duration::from_secs(2));
     if let Some(error) = output.try_error() {
         anyhow::bail!("audio output: {error}");
