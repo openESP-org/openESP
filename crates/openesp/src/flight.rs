@@ -320,6 +320,7 @@ impl Flight {
         };
         let air = crate::weather::conditions(variables)?.at(-self.current.position.z)?;
         let wind = crate::weather::wind(variables)?;
+        let mut suction: Option<f64> = None;
         for (index, id) in engines.indices().enumerate() {
             let output = engines.output(index, &air, self.current.air_velocity(wind))?;
             match output {
@@ -343,6 +344,9 @@ impl Flight {
                     }
                 }
                 EngineOutput::Piston(output) => {
+                    if let Some(pressure) = output.suction_inhg {
+                        suction = Some(suction.unwrap_or(0.0).max(pressure));
+                    }
                     for (name, unit, value) in [
                         ("GENERAL ENG RPM", "rpm", output.rpm),
                         ("GENERAL ENG PCT MAX RPM", "percent", output.rpm_percent),
@@ -406,6 +410,17 @@ impl Flight {
             ] {
                 variables.set_number(&format!("{name}:{id}"), unit, value);
             }
+        }
+        if let Some(pressure) = suction {
+            let failed = variables
+                .read(&Reference::new('A', "PARTIAL PANEL VACUUM", Some("enum")))?
+                .number()?
+                != 0.0;
+            variables.set_number(
+                "SUCTION PRESSURE",
+                "inhg",
+                if failed { 0.0 } else { pressure },
+            );
         }
         Ok(())
     }
@@ -2160,6 +2175,62 @@ mod tests {
         assert!(verified > 0);
     }
 
+    #[test]
+    #[ignore = "requires original piston aircraft with engine-driven vacuum pump"]
+    fn piston_vacuum_follows_pump_and_failure() {
+        let mut verified = 0;
+        for path in content::aircraft_paths() {
+            let data = FlightData::load(&path, 0).unwrap();
+            if data
+                .configuration
+                .number("GeneralEngineData", "engine_type")
+                .unwrap()
+                != Some(0.0)
+                || data
+                    .configuration
+                    .number("propeller", "propeller_type")
+                    .unwrap()
+                    != Some(1.0)
+                || data
+                    .configuration
+                    .number("vacuum_system", "vacuum_type")
+                    .unwrap()
+                    != Some(1.0)
+                || data
+                    .configuration
+                    .value("vacuum_system", "engine_map")
+                    .unwrap()
+                    .is_none()
+            {
+                continue;
+            }
+            let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+            flight.prepare_engines(&data).unwrap();
+            let mut vars = controls(&data);
+            flight.configure_engines(&mut vars).unwrap();
+            flight.publish_engines(&mut vars).unwrap();
+            let read = |v: &mut Variables| {
+                v.read(&Reference::new('A', "SUCTION PRESSURE", Some("inhg")))
+                    .unwrap()
+                    .number()
+                    .unwrap()
+            };
+            assert_eq!(read(&mut vars), 0.0);
+            flight.start_running(&data).unwrap();
+            flight.publish_engines(&mut vars).unwrap();
+            assert!(read(&mut vars) > 0.0);
+            vars.dispatch_event("TOGGLE_VACUUM_FAILURE", Value::Number(0.0))
+                .unwrap();
+            flight.publish_engines(&mut vars).unwrap();
+            assert_eq!(read(&mut vars), 0.0);
+            vars.dispatch_event("TOGGLE_VACUUM_FAILURE", Value::Number(0.0))
+                .unwrap();
+            flight.publish_engines(&mut vars).unwrap();
+            assert!(read(&mut vars) > 0.0);
+            verified += 1;
+        }
+        assert!(verified > 0);
+    }
     #[test]
     #[ignore = "requires original fixed-pitch piston aircraft and AIR flight data"]
     fn piston_aircraft_idle_taxi_and_shutdown_follow_live_engine_state() {

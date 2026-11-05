@@ -29,6 +29,7 @@ pub struct Pistons {
     gyro_pitch: f64,
     gyro_yaw: f64,
     p_factor_on_yaw: f64,
+    vacuum_max_pressure: Option<f64>,
     engines: Vec<Engine>,
 }
 
@@ -45,6 +46,7 @@ struct Engine {
     rotation: f64,
     horizontal_wake_overlap: f64,
     vertical_wake_overlap: f64,
+    vacuum_pump: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +84,7 @@ pub struct EngineOutput {
     pub exhaust_temperature_c: f64,
     pub oil_temperature_c: f64,
     pub oil_pressure_psi: f64,
+    pub suction_inhg: Option<f64>,
 }
 
 // A qualitative exhaust temperature estimate: peak near stoichiometric mixture,
@@ -312,6 +315,35 @@ impl Pistons {
             p_factor_on_yaw.is_finite() && p_factor_on_yaw >= 0.0,
             "invalid p_factor_on_yaw scalar"
         );
+        let vacuum_type = config
+            .number("vacuum_system", "vacuum_type")?
+            .unwrap_or(0.0);
+        let vacuum_max = config
+            .number("vacuum_system", "max_pressure")?
+            .unwrap_or(0.0);
+        ensure!(
+            vacuum_max.is_finite() && vacuum_max >= 0.0,
+            "invalid vacuum pressure"
+        );
+        let vacuum_max_pressure = match vacuum_type {
+            0.0 => Some(0.0),
+            1.0 => Some(vacuum_max),
+            _ => None,
+        };
+        let vacuum_map = config
+            .value("vacuum_system", "engine_map")?
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|v| match v.trim() {
+                        "0" => Ok(false),
+                        "1" => Ok(true),
+                        _ => anyhow::bail!("invalid vacuum engine map"),
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
@@ -352,6 +384,10 @@ impl Pistons {
                     exhaust_temperature: None,
                     horizontal_wake_overlap,
                     vertical_wake_overlap,
+                    vacuum_pump: vacuum_map
+                        .get(definition.index as usize)
+                        .copied()
+                        .unwrap_or(false),
                     rotation: rotations
                         .get(definition.index as usize)
                         .copied()
@@ -430,6 +466,7 @@ impl Pistons {
             gyro_pitch,
             gyro_yaw,
             p_factor_on_yaw,
+            vacuum_max_pressure,
             engines,
         })
     }
@@ -512,6 +549,7 @@ impl Pistons {
             ),
             oil_temperature_c: 0.0,
             oil_pressure_psi: 0.0,
+            suction_inhg: None,
         })
     }
 
@@ -533,6 +571,15 @@ impl Pistons {
         output.oil_temperature_c = engine.oil_temperature.unwrap_or(air.temperature - 273.15);
         output.oil_pressure_psi =
             oil_pressure(engine.rpm, self.cycle.maximum_rpm, output.oil_temperature_c);
+        // Approximate an engine-driven pump reaching regulated suction by
+        // 1,000 RPM. A windmilling engine can still turn the pump.
+        output.suction_inhg = self.vacuum_max_pressure.map(|maximum| {
+            if engine.vacuum_pump {
+                maximum * (engine.rpm / 1000.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
         Ok(output)
     }
 

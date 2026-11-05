@@ -1739,6 +1739,42 @@ mod tests {
         assert!(!gauge.update(&mut host));
     }
     #[test]
+    fn fallback_vacuum_and_ammeter_show_available_values_independently() {
+        struct SystemHost {
+            suction: f64,
+            amps: Option<f64>,
+        }
+        impl Host for SystemHost {
+            fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+                match reference.name.as_str() {
+                    "SUCTION PRESSURE" => Ok(Value::Number(self.suction)),
+                    "ELECTRICAL BATTERY LOAD" => self
+                        .amps
+                        .map(Value::Number)
+                        .ok_or_else(|| Error::Variable(reference.name.clone())),
+                    _ => Err(Error::Variable(reference.name.clone())),
+                }
+            }
+            fn write(&mut self, _: &Reference, _: Value) -> Result<(), Error> {
+                Err(Error::Type)
+            }
+        }
+        let mut gauge = fallback::Instrument::new("Cessna!Vacuum_Ampermeter").unwrap();
+        let mut host = SystemHost {
+            suction: 0.0,
+            amps: None,
+        };
+        assert!(gauge.update(&mut host));
+        let stopped = gauge.image.clone();
+        host.suction = 5.0;
+        assert!(gauge.update(&mut host));
+        let running = gauge.image.clone();
+        assert_ne!(stopped, running);
+        host.amps = Some(-10.0);
+        assert!(gauge.update(&mut host));
+        assert_ne!(running, gauge.image);
+    }
+    #[test]
     fn fallback_oil_gauge_tracks_pressure_and_temperature() {
         struct OilHost {
             pressure: f64,
