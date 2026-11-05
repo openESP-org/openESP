@@ -65,8 +65,12 @@ impl Instrument {
             ("CESSNA", "TURN_INDICATOR") => Kind::TurnCoordinator,
             ("CESSNA", "VOR1") | ("CESSNAWALPHA", "VOR1_ALPHA") => Kind::Vor1,
             ("CESSNA182S", "VOR2") | ("CESSNAWALPHA", "VOR2_ALPHA") => Kind::Vor2,
-            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 1") => Kind::Radio1,
-            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 2") => Kind::Radio2,
+            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 1") | ("737-400", "NAV 1") => {
+                Kind::Radio1
+            }
+            ("BENDIX_KING_RADIO", "BENDIX-KING RADIO NAV-COMM 2") | ("737-400", "NAV 2") => {
+                Kind::Radio2
+            }
             ("BENDIX_KING_RADIO", "BENDIX-KING RADIO DME") => Kind::Dme,
             _ => return None,
         };
@@ -978,4 +982,60 @@ fn draw(kind: Kind, values: [f64; 5]) -> RgbaImage {
     }
     draw_hollow_circle_mut(&mut image, (64, 64), 56, white);
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use esp_script::{Error, Value};
+
+    #[derive(Default)]
+    struct Radios {
+        standby: f64,
+        events: Vec<String>,
+    }
+    impl Host for Radios {
+        fn read(&mut self, reference: &Reference) -> Result<Value, Error> {
+            Ok(Value::Number(
+                if reference.name == "NAV STANDBY FREQUENCY:2" {
+                    self.standby
+                } else {
+                    113_000_000.0
+                },
+            ))
+        }
+        fn write(&mut self, reference: &Reference, _: Value) -> Result<(), Error> {
+            if reference.category == 'K' {
+                self.events.push(reference.name.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn legacy_737_nav_gauges_display_and_tune_their_receivers() {
+        let root = tempfile::tempdir().unwrap();
+        let panel_dir = root.path().join("panel");
+        std::fs::create_dir(&panel_dir).unwrap();
+        std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\nsize_mm=256,192\npixel_size=256,192\ntexture=$screen\ngauge00=737-400!Nav 1,0,0,256,96\ngauge01=737-400!Nav 2,0,96,256,96\n").unwrap();
+        let panel = crate::panel::Panel::load(root.path(), None)
+            .unwrap()
+            .unwrap();
+        let mut image = crate::gauge::load_panel(&panel, "$screen")
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.omitted_gauges, 0);
+        let mut host = Radios {
+            standby: 110_025_000.0,
+            ..Default::default()
+        };
+        assert!(image.update(&mut host));
+        let before = image.image.clone();
+        host.standby = 110_050_000.0;
+        assert!(image.update(&mut host));
+        assert_ne!(image.image, before);
+        assert!(image.left_click(195.0, 40.0, &mut host).unwrap());
+        assert!(image.left_click(195.0, 136.0, &mut host).unwrap());
+        assert_eq!(host.events, ["NAV1_RADIO_SWAP", "NAV2_RADIO_SWAP"]);
+    }
 }
