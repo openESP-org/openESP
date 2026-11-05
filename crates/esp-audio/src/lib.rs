@@ -65,6 +65,43 @@ fn envelope(points: &[[f64; 2]], x: f64, default: f64) -> f64 {
     points.last().map_or(default, |point| point[1])
 }
 
+// Sample validation can scan millions of frames. Keep it off the device callback.
+fn validate_command(command: &Command) -> Result<()> {
+    match command {
+        Command::Add {
+            sample, parameters, ..
+        } => {
+            ensure!(
+                sample.sample_rate > 0
+                    && (1..=2).contains(&sample.channels)
+                    && !sample.samples.is_empty()
+                    && sample
+                        .samples
+                        .len()
+                        .is_multiple_of(sample.channels as usize)
+                    && sample.samples.iter().all(|value| value.is_finite()),
+                "invalid audio sample"
+            );
+            for points in [
+                parameters.pitch_envelope.as_deref(),
+                parameters.volume_envelope.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                ensure!(
+                    points.iter().all(|p| p[0].is_finite() && p[1].is_finite())
+                        && points.windows(2).all(|p| p[0][0] <= p[1][0]),
+                    "invalid sound envelope"
+                );
+            }
+        }
+        Command::Set { level, .. } => ensure!(level.is_finite(), "invalid sound control"),
+        Command::Remove(_) => {}
+    }
+    Ok(())
+}
+
 impl Mixer {
     pub fn new(sample_rate: u32, channels: usize) -> Result<Self> {
         ensure!(
@@ -79,6 +116,11 @@ impl Mixer {
     }
 
     pub fn command(&mut self, command: Command) -> Result<()> {
+        validate_command(&command)?;
+        self.apply(command)
+    }
+
+    fn apply(&mut self, command: Command) -> Result<()> {
         match command {
             Command::Add {
                 id,
@@ -87,33 +129,9 @@ impl Mixer {
                 looping,
             } => {
                 ensure!(
-                    sample.sample_rate > 0
-                        && (1..=2).contains(&sample.channels)
-                        && !sample.samples.is_empty()
-                        && sample
-                            .samples
-                            .len()
-                            .is_multiple_of(sample.channels as usize)
-                        && sample.samples.iter().all(|value| value.is_finite()),
-                    "invalid audio sample"
-                );
-                ensure!(
                     !self.voices.iter().any(|voice| voice.id == id),
                     "duplicate sound voice"
                 );
-                for points in [
-                    parameters.pitch_envelope.as_deref(),
-                    parameters.volume_envelope.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    ensure!(
-                        points.iter().all(|p| p[0].is_finite() && p[1].is_finite())
-                            && points.windows(2).all(|p| p[0][0] <= p[1][0]),
-                        "invalid sound envelope"
-                    );
-                }
                 self.voices.push(Voice {
                     id,
                     sample,
@@ -131,7 +149,6 @@ impl Mixer {
                 inside,
                 active,
             } => {
-                ensure!(level.is_finite(), "invalid sound control");
                 if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
                     if active && !voice.active {
                         voice.position = 0.0;
@@ -308,6 +325,7 @@ impl Output {
         })
     }
     pub fn try_command(&self, command: Command) -> Result<()> {
+        validate_command(&command)?;
         self.commands
             .try_send(command)
             .map_err(|_| anyhow::anyhow!("audio command queue unavailable or full"))
@@ -333,7 +351,7 @@ where
         config,
         move |data: &mut [T], _| {
             while let Ok(command) = receiver.try_recv() {
-                if let Err(error) = mixer.command(command) {
+                if let Err(error) = mixer.apply(command) {
                     let _ = command_errors.send(error.to_string());
                 }
             }
@@ -466,5 +484,35 @@ mod tests {
         let mut output = [0.0; 2];
         mixer.render(&mut output);
         assert_eq!(output, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn validates_commands_before_the_audio_callback() {
+        let invalid_sample = Command::Add {
+            id: VoiceId(7),
+            sample: sample(&[0.0, f32::NAN], 1, 8000),
+            parameters: Box::new(Parameters::default()),
+            looping: true,
+        };
+        assert!(validate_command(&invalid_sample).is_err());
+        let invalid_envelope = Command::Add {
+            id: VoiceId(7),
+            sample: sample(&[0.0, 1.0], 1, 8000),
+            parameters: Box::new(Parameters {
+                pitch_envelope: Some(vec![[1.0, 1.0], [0.0, 1.0]]),
+                ..Default::default()
+            }),
+            looping: true,
+        };
+        assert!(validate_command(&invalid_envelope).is_err());
+        assert!(
+            validate_command(&Command::Set {
+                id: VoiceId(7),
+                level: f64::NAN,
+                inside: true,
+                active: true,
+            })
+            .is_err()
+        );
     }
 }
