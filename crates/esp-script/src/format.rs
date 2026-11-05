@@ -225,6 +225,13 @@ impl Parser<'_> {
             }
             if rest.starts_with("%(") {
                 let program = self.expression()?;
+                // Gauge authors often put control directives on the next line.
+                // Only consume the separator when a directive actually follows.
+                let rest = self.rest();
+                let trimmed = rest.trim_start_matches(char::is_whitespace);
+                if trimmed.starts_with("%{if}") || trimmed.starts_with("%{case}") {
+                    self.position += rest.len() - trimmed.len();
+                }
                 if self.rest().starts_with("%{if}") {
                     self.position += 5;
                     let (yes, stop) = self.block(depth + 1)?;
@@ -281,7 +288,18 @@ impl Parser<'_> {
             if end == 0 {
                 return Err(Error::Syntax(self.position));
             }
-            parts.push(Part::Literal(rest[..end].into()));
+            let literal = &rest[..end];
+            let directive = &rest[end..];
+            // Indentation between a case body and the next directive is XML
+            // formatting, not another line in the instrument display.
+            let indentation = literal.trim().is_empty()
+                && literal.contains(['\r', '\n'])
+                && (directive.starts_with("%{:")
+                    || directive.starts_with("%{end}")
+                    || directive.starts_with("%{else}"));
+            if !indentation {
+                parts.push(Part::Literal(literal.into()));
+            }
             self.position += end;
         }
         Ok((parts, Stop::Eof))
@@ -384,6 +402,36 @@ mod tests {
                 .evaluate(&mut Empty)
                 .unwrap(),
             "VOR"
+        );
+        assert_eq!(
+            FormattedString::compile("%(1)\n  %{case}\n%{:0}OFF%{:1}ON%{end}")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "ON"
+        );
+        assert_eq!(
+            FormattedString::compile(
+                "%(1)\n%{case}\n%{:0}0.0\n%{:1} %(4.2)%!4.1f!\n\t%{:2}0.0\n%{end}"
+            )
+            .unwrap()
+            .evaluate(&mut Empty)
+            .unwrap(),
+            " 4.2"
+        );
+        assert_eq!(
+            FormattedString::compile("%(1)  %{if}ON%{else}OFF%{end}")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "ON"
+        );
+        assert_eq!(
+            FormattedString::compile("%(1)  units")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "1  units"
         );
     }
 
