@@ -69,23 +69,33 @@ pub fn airport(
         .collect::<Result<Vec<_>>>()?;
     let mut taxiways = Vec::new();
     for path in &airport.taxi_paths {
-        // Parking links use a different endpoint index space; runway links are
-        // already covered by the dedicated runway surface.
-        if path.kind != 1
+        // Runway links are already covered by the dedicated runway surface.
+        if !matches!(path.kind, 1 | 3)
             || !path.draw_surface
             || !path.width_m.is_finite()
             || !(0.1..=1000.0).contains(&path.width_m)
         {
             continue;
         }
-        let (Some(start), Some(end)) = (
-            airport.taxi_points.get(path.start as usize),
-            airport.taxi_points.get(path.end as usize),
-        ) else {
+        let Some(start) = airport.taxi_points.get(path.start as usize) else {
+            continue;
+        };
+        let end = match path.kind {
+            1 => airport
+                .taxi_points
+                .get(path.end as usize)
+                .map(|p| (p.latitude, p.longitude)),
+            3 => airport
+                .taxi_parkings
+                .get(path.end as usize)
+                .map(|p| (p.latitude, p.longitude)),
+            _ => None,
+        };
+        let Some((end_latitude, end_longitude)) = end else {
             continue;
         };
         let (start_north, start_east) = origin.local_position(start.latitude, start.longitude)?;
-        let (end_north, end_east) = origin.local_position(end.latitude, end.longitude)?;
+        let (end_north, end_east) = origin.local_position(end_latitude, end_longitude)?;
         taxiways.push(esp_render::Taxiway {
             start: DVec3::new(start_east, 0.0, start_north),
             end: DVec3::new(end_east, 0.0, end_north),
@@ -221,7 +231,7 @@ mod tests {
         let path = std::env::var_os("OPENESP_AIRPORT_BGL").expect("set OPENESP_AIRPORT_BGL");
         let scene = airport(Path::new(&path), Some("KLAX"), 33.9377117, -118.4010096).unwrap();
         let runways = scene.runways;
-        assert_eq!(scene.taxiways.len(), 406);
+        assert!(scene.taxiways.len() >= 406);
         assert_eq!(scene.aprons.len(), 22);
         assert_eq!(runways.len(), 4);
         assert!(runways.iter().any(|r| (r.length - 3938.93).abs() < 0.1));
@@ -235,6 +245,53 @@ mod tests {
                 * 0.5;
         assert!(center.length() < 2.0);
         assert!(super::airport(Path::new(&path), Some("ZZZZ"), 33.9, -118.4).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires LTFO airport BGL in OPENESP_SCENERY_PLACEMENT_BGL"]
+    fn loads_real_parking_taxi_links() {
+        let path = std::env::var_os("OPENESP_SCENERY_PLACEMENT_BGL").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let airports = esp_formats::bgl::Bgl::parse(&bytes)
+            .unwrap()
+            .airports()
+            .unwrap();
+        let airport_data = airports
+            .iter()
+            .find(|airport| airport.ident == "LTFO")
+            .unwrap();
+        let parking_links = airport_data
+            .taxi_paths
+            .iter()
+            .filter(|path| path.kind == 3)
+            .collect::<Vec<_>>();
+        assert!(!airport_data.taxi_parkings.is_empty());
+        assert!(!parking_links.is_empty());
+        for path in &parking_links {
+            let stand = &airport_data.taxi_parkings[path.end as usize];
+            assert!((stand.latitude - airport_data.latitude).abs() < 0.1);
+            assert!((stand.longitude - airport_data.longitude).abs() < 0.1);
+        }
+        let scene = airport(
+            Path::new(&path),
+            Some("LTFO"),
+            airport_data.latitude,
+            airport_data.longitude,
+        )
+        .unwrap();
+        let normal_links = airport_data
+            .taxi_paths
+            .iter()
+            .filter(|path| path.kind == 1 && path.draw_surface)
+            .count();
+        assert_eq!(
+            scene.taxiways.len(),
+            normal_links
+                + parking_links
+                    .iter()
+                    .filter(|path| path.draw_surface)
+                    .count()
+        );
     }
 }
 

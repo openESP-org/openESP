@@ -9,6 +9,7 @@ pub struct Airport {
     pub elevation_m: f64,
     pub runways: Vec<Runway>,
     pub taxi_points: Vec<TaxiPoint>,
+    pub taxi_parkings: Vec<TaxiParking>,
     pub taxi_paths: Vec<TaxiPath>,
     pub aprons: Vec<Apron>,
 }
@@ -26,6 +27,12 @@ pub struct TaxiPoint {
     pub latitude: f64,
     pub longitude: f64,
     pub kind: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaxiParking {
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +151,25 @@ fn taxi_paths(data: &[u8], stride: usize) -> Result<Vec<TaxiPath>, Error> {
         .collect()
 }
 
+fn taxi_parkings(data: &[u8], p3d_v5: bool) -> Result<Vec<TaxiParking>, Error> {
+    let count = usize::from(u16_at(data, 6)?);
+    let mut offset = 8;
+    let mut parkings = Vec::with_capacity(count);
+    for _ in 0..count {
+        let flags = u32_at(data, offset)?;
+        let longitude = f64::from(u32_at(data, offset + 28)?) * (360.0 / 805_306_368.0) - 180.0;
+        let latitude = 90.0 - f64::from(u32_at(data, offset + 32)?) * (180.0 / 536_870_912.0);
+        let size = 36 + ((flags >> 24) as usize) * 4 + if p3d_v5 { 4 } else { 0 };
+        range(data, offset as u64, size as u64)?;
+        parkings.push(TaxiParking {
+            latitude,
+            longitude,
+        });
+        offset += size;
+    }
+    Ok(parkings)
+}
+
 fn apron(data: &[u8], counts_offset: usize) -> Result<Apron, Error> {
     let vertex_count = usize::from(u16_at(data, counts_offset)?);
     let triangle_count = usize::from(u16_at(data, counts_offset + 2)?);
@@ -206,6 +232,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 elevation_m,
                 runways: Vec::new(),
                 taxi_points: Vec::new(),
+                taxi_parkings: Vec::new(),
                 taxi_paths: Vec::new(),
                 aprons: Vec::new(),
             };
@@ -225,6 +252,8 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 match child_kind {
                     0x001a => airport.taxi_points.extend(taxi_points(child, 12)?),
                     0x00ac => airport.taxi_points.extend(taxi_points(child, 16)?),
+                    0x003d => airport.taxi_parkings.extend(taxi_parkings(child, false)?),
+                    0x00ad => airport.taxi_parkings.extend(taxi_parkings(child, true)?),
                     0x001c => airport.taxi_paths.extend(taxi_paths(child, 20)?),
                     0x0040 => airport.taxi_paths.extend(taxi_paths(child, 36)?),
                     0x00ae => airport.taxi_paths.extend(taxi_paths(child, 40)?),
@@ -304,6 +333,27 @@ mod tests {
             );
             assert!(paths[0].draw_surface && paths[0].centerline);
             assert!(taxi_paths(&raw[..raw.len() - 1], stride).is_err());
+        }
+    }
+
+    #[test]
+    fn reads_variable_length_parking_records_and_checks_bounds() {
+        for (kind, extra) in [(0x3d, 0), (0xad, 4)] {
+            let mut body = 2u16.to_le_bytes().to_vec();
+            let mut first = vec![0u8; 36 + 8 + extra];
+            first[..4].copy_from_slice(&(2u32 << 24).to_le_bytes());
+            first[28..32].copy_from_slice(&402_653_184u32.to_le_bytes());
+            first[32..36].copy_from_slice(&268_435_456u32.to_le_bytes());
+            body.extend(first);
+            let mut second = vec![0u8; 36 + extra];
+            second[28..32].copy_from_slice(&402_653_184u32.to_le_bytes());
+            second[32..36].copy_from_slice(&268_435_456u32.to_le_bytes());
+            body.extend(second);
+            let raw = record(kind, &body);
+            let parsed = taxi_parkings(&raw, extra != 0).unwrap();
+            assert_eq!(parsed.len(), 2);
+            assert_eq!((parsed[1].latitude, parsed[1].longitude), (0.0, 0.0));
+            assert!(taxi_parkings(&raw[..raw.len() - 1], extra != 0).is_err());
         }
     }
 
