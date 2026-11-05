@@ -12,6 +12,73 @@ mod content;
 
 #[test]
 #[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
+fn angle_of_attack_tables_change_roll_and_yaw_at_the_authored_angle() {
+    let path = content::aircraft_paths()
+        .into_iter()
+        .next()
+        .expect("aircraft path");
+    let mut data = FlightData::load(&path, 0).unwrap();
+    let records = esp_formats::air::parse(&data.air).unwrap();
+    let ids = [0x451u32, 0x456, 0x460, 0x464];
+    let mut base = Vec::new();
+    for record in &records {
+        if !ids.contains(&record.id) {
+            base.extend(record.id.to_le_bytes());
+            base.extend((record.data.len() as u32).to_le_bytes());
+            base.extend(record.data);
+        }
+    }
+    data.air = base.clone();
+    let reference = Aerodynamics::from_data(&data).unwrap();
+    let loading = WeightBalance::from_config(&data.configuration)
+        .unwrap()
+        .load(0.0, false)
+        .unwrap();
+    let flaps = vec![
+        0.0;
+        esp_formats::cfg::aircraft::flaps(&data.configuration)
+            .unwrap()
+            .iter()
+            .filter(|flap| flap.kind != 0)
+            .count()
+    ];
+    let sample = |model: &Aerodynamics, alpha: f64| {
+        model
+            .forces(
+                DVec3::new(50.0, 5.0, 50.0 * alpha.to_radians().tan()),
+                DVec3::new(0.2, 0.0, 0.2),
+                1.225,
+                Controls::default(),
+                &flaps,
+                loading.cg,
+            )
+            .unwrap()
+    };
+    let low = sample(&reference, 0.0);
+    let high = sample(&reference, 10.0);
+    for (index, id) in ids.into_iter().enumerate() {
+        data.air = base.clone();
+        data.air.extend(id.to_le_bytes());
+        data.air.extend(36u32.to_le_bytes());
+        data.air.extend(2u32.to_le_bytes());
+        for value in [0.0f64, 1.0, 10.0, 0.0] {
+            data.air.extend(value.to_le_bytes());
+        }
+        let model = Aerodynamics::from_data(&data).unwrap();
+        let same = sample(&model, 0.0);
+        let changed = sample(&model, 10.0);
+        assert!(same.moment.abs_diff_eq(low.moment, 1e-8));
+        let delta = changed.moment - high.moment;
+        if index < 2 {
+            assert!(delta.x.abs() > 1e-3, "record {id:#x} did not affect roll");
+        } else {
+            assert!(delta.z.abs() > 1e-3, "record {id:#x} did not affect yaw");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires original aircraft AIR data and OPENESP_AIRCRAFT_PATHS"]
 fn sdk_aerodynamic_blocks_drive_the_same_forces_as_legacy_coefficients() {
     let path = content::aircraft_paths()
         .into_iter()

@@ -26,6 +26,8 @@ pub struct Aerodynamics {
     control_scaling: [Option<Curve>; 3],
     control_elasticity: [Option<Curve>; 3],
     trim_elasticity: Option<Curve>,
+    /// Angle-of-attack scalars for roll sideslip, roll damping, yaw sideslip and yaw damping.
+    angular_effects: [Option<Curve>; 4],
     elevator: [f64; 2],
     elevator_trim: f64,
     elevator_trim_limit: f64,
@@ -290,6 +292,12 @@ impl Aerodynamics {
                 optional_curve(0x519)?,
             ],
             trim_elasticity: optional_curve(0x1525)?,
+            angular_effects: [
+                optional_curve(0x451)?,
+                optional_curve(0x456)?,
+                optional_curve(0x460)?,
+                optional_curve(0x464)?,
+            ],
             elevator: [
                 geometry("elevator_up_limit")?.to_radians(),
                 geometry("elevator_down_limit")?.to_radians(),
@@ -416,6 +424,11 @@ impl Aerodynamics {
         }
         let alpha = velocity.z.atan2(velocity.x);
         let beta = (velocity.y / speed).clamp(-1.0, 1.0).asin();
+        let angle_factor = |index: usize| {
+            self.angular_effects[index]
+                .as_ref()
+                .map_or(1.0, |curve| curve.sample(alpha.to_degrees()))
+        };
         let dynamic_pressure = 0.5 * density * speed * speed;
         let qbar_area = dynamic_pressure * self.area;
         let pressure_psf = dynamic_pressure / 47.88025898033584;
@@ -471,12 +484,12 @@ impl Aerodynamics {
             + c.side.cy_delta_rudder * rudder
             + c.side.cy_p * p
             + c.side.cy_r * r;
-        let roll = c.roll.cl_beta * beta
+        let roll = c.roll.cl_beta * beta * angle_factor(0)
             + c.roll.cl_delta_aileron * aileron
             + self.lateral_trim[0] * controls.aileron_trim * self.lateral_trim_limits[0]
             + c.roll.cl_delta_spoiler * controls.spoiler_difference * self.spoiler_limit
             + c.roll.cl_delta_rudder * rudder
-            + c.roll.cl_p * p * self.stability.x
+            + c.roll.cl_p * p * self.stability.x * angle_factor(1)
             + c.roll.cl_r * r;
         let pitch = c.pitch.cm0
             + self.pitch.sample(alpha)
@@ -487,12 +500,12 @@ impl Aerodynamics {
             + c.pitch.cm_ih * self.incidence
             + c.pitch.cm_flap * flap.z
             + c.pitch.cm_q * q * self.stability.y;
-        let yaw = c.yaw.cn_beta * beta
+        let yaw = c.yaw.cn_beta * beta * angle_factor(2)
             + c.yaw.cn_delta_aileron * aileron
             + c.yaw.cn_delta_rudder * rudder
             + self.lateral_trim[1] * controls.rudder_trim * self.lateral_trim_limits[1]
             + c.yaw.cn_p * p
-            + c.yaw.cn_r * r * self.stability.z;
+            + c.yaw.cn_r * r * self.stability.z * angle_factor(3);
         let lift_direction = DVec3::new(alpha.sin(), 0.0, -alpha.cos());
         let force = (lift_direction * cl - velocity / speed * cd + DVec3::Y * cy) * qbar_area;
         // AIR roll/pitch moments use the opposite signs to forward-right-down body axes.
