@@ -348,6 +348,9 @@ fn operation(word: &str) -> Result<Instruction, Error> {
         "&" => Instruction::Binary(|a, b| bitwise(a, b, |a, b| a & b)),
         "|" => Instruction::Binary(|a, b| bitwise(a, b, |a, b| a | b)),
         "^" => Instruction::Binary(|a, b| bitwise(a, b, |a, b| a ^ b)),
+        "~" => Instruction::Unary(|a| bitwise(a, -1.0, |a, b| a ^ b)),
+        "<<" => Instruction::Binary(|a, b| shift(a, b, true)),
+        ">>" => Instruction::Binary(|a, b| shift(a, b, false)),
         "min" => Instruction::Binary(f64::min),
         "max" => Instruction::Binary(f64::max),
         "pow" => Instruction::Binary(f64::powf),
@@ -434,14 +437,28 @@ fn operation(word: &str) -> Result<Instruction, Error> {
 }
 
 fn bitwise(a: f64, b: f64, operation: fn(i32, i32) -> i32) -> f64 {
-    let integer = |value: f64| {
-        (value >= f64::from(i32::MIN) && value <= f64::from(u32::MAX))
-            .then_some(value.trunc() as i64 as i32)
-    };
     match (integer(a), integer(b)) {
         (Some(a), Some(b)) => f64::from(operation(a, b)),
         _ => f64::NAN,
     }
+}
+
+fn integer(value: f64) -> Option<i32> {
+    (value >= f64::from(i32::MIN) && value <= f64::from(u32::MAX))
+        .then_some(value.trunc() as i64 as i32)
+}
+
+fn shift(value: f64, count: f64, left: bool) -> f64 {
+    if count.fract() != 0.0 || !(0.0..32.0).contains(&count) {
+        return f64::NAN;
+    }
+    integer(value).map_or(f64::NAN, |value| {
+        f64::from(if left {
+            value.wrapping_shl(count as u32)
+        } else {
+            value.wrapping_shr(count as u32)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -486,6 +503,31 @@ mod tests {
         assert_eq!(number("-1.1 int"), -2.0);
         assert_eq!(number("-4.5 near"), -4.0);
         assert_eq!(number("50 40 30 20 10 5 2.5 case"), 30.0);
+        assert_eq!(number("5 ~"), -6.0);
+        assert_eq!(number("5 3 <<"), 40.0);
+        assert_eq!(number("5 3 >>"), 0.0);
+        assert_eq!(number("-8 2 >>"), -2.0);
+        assert_eq!(
+            Program::compile("1 32 <<")
+                .unwrap()
+                .evaluate(&mut Variables::default()),
+            Err(Error::Number)
+        );
+    }
+
+    #[test]
+    fn evaluates_master_caution_bitmask() {
+        let current = Reference::new('L', "Current cautions", Some("mask"));
+        let acknowledged = Reference::new('L', "Acq cautions", Some("mask"));
+        let mut host = Variables::default();
+        host.0.insert(current, Value::Number(5.0));
+        host.0.insert(acknowledged.clone(), Value::Number(1.0));
+        let code = "(L:Current cautions, mask) s0 (L:Acq cautions, mask) s1 & (>L:Acq cautions, mask) l0 l1 ~ & 0 !=";
+        assert_eq!(
+            Program::compile(code).unwrap().evaluate(&mut host).unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(host.0[&acknowledged], Value::Number(1.0));
     }
     #[test]
     fn reads_and_writes_variables_without_silent_defaults() {
