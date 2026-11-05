@@ -1,10 +1,25 @@
 use esp_assets::sound::SoundSet;
+use esp_audio::engine::EngineBank;
 use esp_audio::{Command, Mixer, VoiceId};
 use esp_formats::cfg::sound::EngineEvent;
 use std::sync::Arc;
 
 #[path = "../../../tests/support/content.rs"]
 mod content;
+
+#[test]
+#[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]
+fn prepares_real_aircraft_sound_banks() {
+    for path in content::aircraft_paths() {
+        let set = SoundSet::load(&path, 0, None).unwrap();
+        let (_, commands) = EngineBank::prepare(&set, 1, 0).unwrap();
+        assert!(
+            !commands.is_empty(),
+            "{} has no engine sounds",
+            path.display()
+        );
+    }
+}
 
 #[test]
 #[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]

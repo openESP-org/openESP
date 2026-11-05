@@ -1,4 +1,5 @@
 //! Aircraft sound mixing, independent of the simulation and rendering layers.
+pub mod engine;
 use anyhow::{Context, Result, ensure};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use esp_assets::sound::Sample;
