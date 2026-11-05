@@ -101,17 +101,49 @@ impl Electrical {
                 .map(|v| v.number())
                 .transpose()?
                 .is_some_and(|v| v != 0.0);
+            // Approximate a regulator cut-in and increasing current capability
+            // with shaft speed. Legacy integrations without RPM data retain the
+            // previous combustion-based behavior.
+            let mut shaft_speed = |name: &str| -> Result<Option<f64>> {
+                variables
+                    .read(&Reference::new(
+                        'A',
+                        &format!("{name}:{index}"),
+                        Some("percent"),
+                    ))
+                    .ok()
+                    .map(|v| v.number().map_err(Into::into))
+                    .transpose()
+            };
+            let piston_speed = shaft_speed("GENERAL ENG PCT MAX RPM")?;
+            let turbine_speed = shaft_speed("TURB ENG N2")?;
+            let speed_factor = if let Some(percent) = piston_speed {
+                ensure!(
+                    percent.is_finite() && percent >= 0.0,
+                    "invalid generator shaft speed"
+                );
+                ((percent / 100.0 - 0.15) / 0.25).clamp(0.0, 1.0)
+            } else if let Some(percent) = turbine_speed {
+                ensure!(
+                    percent.is_finite() && percent >= 0.0,
+                    "invalid generator shaft speed"
+                );
+                ((percent / 100.0 - 0.25) / 0.30).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let active = generator.count > 0
                 && self.definition.generator_amperes > 0.0
                 && self.definition.generator_voltage > 0.0
                 && switch
-                && combustion;
+                && combustion
+                && speed_factor > 0.0;
             let bus = index as usize + 3;
             ensure!(bus < sources.len(), "generator bus index is out of range");
             if active {
                 sources[bus] = self.definition.generator_voltage;
                 generator_capacity[bus] =
-                    self.definition.generator_amperes * f64::from(generator.count);
+                    self.definition.generator_amperes * f64::from(generator.count) * speed_factor;
             }
             if read(
                 variables,
@@ -355,6 +387,65 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn generator_output_rises_with_shaft_speed_and_respects_cut_in() {
+        let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=20\nadditional_system=0,10,17").unwrap();
+        let definition = Definition::from_config(&config).unwrap();
+        let mut variables = Variables::default();
+        variables.configure_electrical(&definition, false).unwrap();
+        variables
+            .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+            .unwrap();
+        variables
+            .dispatch_event("TOGGLE_ALTERNATOR1", Value::Number(0.0))
+            .unwrap();
+        variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
+        variables.set_number("GENERAL ENG PCT MAX RPM:1", "percent", 10.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG GENERATOR ACTIVE:1", "bool"),
+            0.0
+        );
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            -10.0
+        );
+        variables.set_number("GENERAL ENG PCT MAX RPM:1", "percent", 20.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG GENERATOR ACTIVE:1", "bool"),
+            1.0
+        );
+        assert!((number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps") + 6.0).abs() < 1e-9);
+        variables.set_number("GENERAL ENG PCT MAX RPM:1", "percent", 40.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "ELECTRICAL BATTERY LOAD", "amps"),
+            0.0
+        );
+        variables.set_number("GENERAL ENG PCT MAX RPM:1", "percent", 0.0);
+        variables.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut variables, "GENERAL ENG GENERATOR ACTIVE:1", "bool"),
+            0.0
+        );
+        let mut turbine = Variables::default();
+        turbine.configure_electrical(&definition, false).unwrap();
+        turbine.set_number("GENERAL ENG GENERATOR SWITCH:1", "bool", 1.0);
+        turbine.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
+        turbine.set_number("TURB ENG N2:1", "percent", 20.0);
+        turbine.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut turbine, "GENERAL ENG GENERATOR ACTIVE:1", "bool"),
+            0.0
+        );
+        turbine.set_number("TURB ENG N2:1", "percent", 55.0);
+        turbine.update_electrical().unwrap();
+        assert_eq!(
+            number(&mut turbine, "GENERAL ENG GENERATOR ACTIVE:1", "bool"),
+            1.0
+        );
+    }
     #[test]
     fn battery_discharge_and_recharge_follow_simulation_time() {
         let config = Config::parse("[GeneralEngineData]\nengine.0=0,0,0\n[electrical]\nmax_battery_voltage=24\nbattery_max_capacity_amph=1\nbattery_charging_current=1\ngenerator_alternator_voltage=28\nmax_generator_alternator_amps=10\nadditional_system=0,2,17").unwrap();
