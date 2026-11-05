@@ -195,7 +195,7 @@ impl<'a> Model<'a> {
         let end = 8usize.checked_add(size).ok_or(Error::InvalidSize)?;
         let body = data.get(8..end).ok_or(Error::Truncated { offset: 8 })?;
         let form: [u8; 4] = body[..4].try_into().map_err(|_| Error::InvalidSize)?;
-        if &form != b"MDLX" {
+        if !matches!(&form, b"MDLX" | b"PV20") {
             return Err(Error::UnsupportedFormat(form));
         }
         let chunks = parse_chunks(&body[4..])?;
@@ -307,8 +307,8 @@ mod tests {
             Error::InvalidSize
         );
         assert_eq!(
-            Model::parse(b"RIFF\x04\0\0\0PV20").unwrap_err(),
-            Error::UnsupportedFormat(*b"PV20")
+            Model::parse(b"RIFF\x04\0\0\0PV44").unwrap_err(),
+            Error::UnsupportedFormat(*b"PV44")
         );
         assert!(matches!(
             Model::parse(b"RIFF\x0d\0\0\0MDLXTEST\x02\0\0\0X"),

@@ -57,7 +57,7 @@ pub struct Lod {
 
 pub struct Mesh {
     pub vertices: Vec<mdl::geometry::Vertex>,
-    pub indices: Vec<u16>,
+    pub indices: Vec<u32>,
     pub node: usize,
     pub material: usize,
     pub mouse_rectangle: i32,

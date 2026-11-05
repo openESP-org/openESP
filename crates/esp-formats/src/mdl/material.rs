@@ -73,6 +73,20 @@ pub fn materials(data: &[u8]) -> Result<Vec<Material>, Error> {
     records(data, 120)
 }
 
+/// Prepar3D's MAT3 extends the legacy material record by one 32-bit word.
+pub fn materials3(data: &[u8]) -> Result<(Vec<Material>, Vec<u32>), Error> {
+    if !data.len().is_multiple_of(124) {
+        return Err(Error::InvalidSize);
+    }
+    let mut materials = Vec::new();
+    let mut extensions = Vec::new();
+    for entry in data.chunks_exact(124) {
+        materials.extend(records::<Material>(&entry[..120], 120)?);
+        extensions.push(u32::from_le_bytes(entry[120..124].try_into().unwrap()));
+    }
+    Ok((materials, extensions))
+}
+
 pub fn textures(data: &[u8]) -> Result<Vec<&[u8]>, Error> {
     if !data.len().is_multiple_of(64) {
         return Err(Error::InvalidSize);
@@ -119,6 +133,17 @@ mod tests {
         for end in 1..120 {
             assert_eq!(materials(&bytes[..end]), Err(Error::InvalidSize));
         }
+    }
+
+    #[test]
+    fn reads_prepar3d_material_extensions() {
+        let mut data = vec![0; 248];
+        data[120..124].copy_from_slice(&42u32.to_le_bytes());
+        data[244..248].copy_from_slice(&99u32.to_le_bytes());
+        let (materials, extensions) = materials3(&data).unwrap();
+        assert_eq!(materials.len(), 2);
+        assert_eq!(extensions, [42, 99]);
+        assert_eq!(materials3(&data[..247]), Err(Error::InvalidSize));
     }
 
     #[test]

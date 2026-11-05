@@ -45,7 +45,7 @@ struct Draw {
 
 struct DrawData<'a> {
     vertices: &'a [Vertex],
-    indices: &'a [u16],
+    indices: &'a [u32],
     transform: Mat4,
     uniform: DrawUniform,
     blended: bool,
@@ -83,11 +83,11 @@ pub struct Runway {
     pub heading: f64,
 }
 
-fn runway_mesh(markings: bool) -> (Vec<Vertex>, Vec<u16>) {
+fn runway_mesh(markings: bool) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut rectangle = |left: f32, right: f32, start: f32, end: f32, height: f32| {
-        let base = vertices.len() as u16;
+        let base = vertices.len() as u32;
         vertices.extend(
             [(left, start), (left, end), (right, end), (right, start)].map(|(x, z)| Vertex {
                 position: [x, height, z],
@@ -454,7 +454,7 @@ impl Renderer {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut quad = |points: [(f64, f64); 4]| {
-            let base = vertices.len() as u16;
+            let base = vertices.len() as u32;
             for (x, z) in points {
                 vertices.push(Vertex {
                     position: [x as f32, 0.0, z as f32],
@@ -750,7 +750,7 @@ impl Renderer {
                 pass.set_pipeline(&self.pipelines[draw.pipeline]);
                 pass.set_bind_group(1, &draw.bind, &[]);
                 pass.set_vertex_buffer(0, draw.vertices.slice(..));
-                pass.set_index_buffer(draw.indices.slice(..), wgpu::IndexFormat::Uint16);
+                pass.set_index_buffer(draw.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..draw.count, 0, 0..1);
             };
             draw_one(&mut pass, &self.ground);
@@ -1035,7 +1035,7 @@ mod runway_tests {
             let (vertices, indices) = runway_mesh(marked);
             assert!(!vertices.is_empty());
             assert_eq!(indices.len() % 3, 0);
-            assert!(indices.iter().all(|&i| usize::from(i) < vertices.len()));
+            assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));
             assert!(
                 vertices
                     .iter()

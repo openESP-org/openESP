@@ -7,7 +7,8 @@ use std::collections::{HashMap, HashSet};
 pub struct ModelData<'a> {
     pub textures: Vec<&'a [u8]>,
     pub materials: Vec<material::Material>,
-    pub indices: Vec<u16>,
+    pub material_extensions: Vec<u32>,
+    pub indices: Vec<u32>,
     pub vertices: Vec<Vec<geometry::Vertex>>,
     pub tangents: Vec<geometry::VertexBufferData<geometry::Tangent>>,
     pub bone_maps: Vec<geometry::VertexBufferData<i32>>,
@@ -45,7 +46,7 @@ pub struct PartGeometry<'a> {
     pub tangents: Option<&'a [geometry::Tangent]>,
     pub skin_weights: Option<&'a [geometry::SkinWeight]>,
     pub bone_map: Option<&'a [i32]>,
-    pub indices: &'a [u16],
+    pub indices: &'a [u32],
     pub material: &'a material::Material,
     pub scene_node: &'a scene::Node,
 }
@@ -190,7 +191,7 @@ impl<'a> ModelData<'a> {
             "indices",
         )?;
         for &index in indices {
-            if usize::from(index) >= vertices.len() {
+            if index as usize >= vertices.len() {
                 return Err(Error::InvalidReference {
                     field: "vertex index",
                     value: i64::from(index),
@@ -224,7 +225,9 @@ impl<'a> ModelData<'a> {
                 &child.id,
                 b"TEXT"
                     | b"MATE"
+                    | b"MAT3"
                     | b"INDE"
+                    | b"IND3"
                     | b"VERB"
                     | b"TRAN"
                     | b"SCEN"
@@ -241,13 +244,23 @@ impl<'a> ModelData<'a> {
                     | b"MREC"
                     | b"MREI"
             );
-            if known && !seen.insert(child.id) {
+            let identity = match &child.id {
+                b"MAT3" => *b"MATE",
+                b"IND3" => *b"INDE",
+                _ => child.id,
+            };
+            if known && !seen.insert(identity) {
                 return Err(Error::DuplicateSection(child.id));
             }
             match &child.id {
                 b"TEXT" => result.textures = material::textures(child.data)?,
                 b"MATE" => result.materials = material::materials(child.data)?,
+                b"MAT3" => {
+                    (result.materials, result.material_extensions) =
+                        material::materials3(child.data)?;
+                }
                 b"INDE" => result.indices = geometry::indices(child.data)?,
+                b"IND3" => result.indices = geometry::indices32(child.data)?,
                 b"TRAN" => result.transforms = geometry::transforms(child.data)?,
                 b"SCEN" => result.nodes = scene::nodes(child.data)?,
                 b"AMAP" => result.animation_map = scene::animation_map(child.data)?,
@@ -523,6 +536,44 @@ mod tests {
             data.part_geometry(&part),
             Err(Error::InvalidReference {
                 field: "material",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolves_indices_above_the_legacy_16_bit_limit() {
+        let data = ModelData {
+            vertices: vec![vec![
+                geometry::Vertex {
+                    position: [0.0; 3],
+                    normal: [0.0; 3],
+                    uv: [0.0; 2],
+                };
+                70_001
+            ]],
+            indices: vec![70_000],
+            materials: material::materials(&[0; 120]).unwrap(),
+            nodes: scene::nodes(&[255, 255, 255, 255, 0, 0, 0, 0]).unwrap(),
+            ..ModelData::default()
+        };
+        let mut part = geometry::Part {
+            primitive_type: 1,
+            scene_node: 0,
+            material: 0,
+            vertex_buffer: 0,
+            vertex_offset: 0,
+            vertex_count: 70_001,
+            index_offset: 0,
+            index_count: 1,
+            mouse_rectangle: -1,
+        };
+        assert_eq!(data.part_geometry(&part).unwrap().indices, &[70_000]);
+        part.vertex_count = 70_000;
+        assert!(matches!(
+            data.part_geometry(&part),
+            Err(Error::InvalidReference {
+                field: "vertex index",
                 ..
             })
         ));

@@ -72,8 +72,15 @@ pub fn vertices(data: &[u8]) -> Result<Vec<Vertex>, Error> {
     records(data, 32)
 }
 
-pub fn indices(data: &[u8]) -> Result<Vec<u16>, Error> {
-    records(data, 2)
+pub fn indices(data: &[u8]) -> Result<Vec<u32>, Error> {
+    Ok(records::<u16>(data, 2)?
+        .into_iter()
+        .map(u32::from)
+        .collect())
+}
+
+pub fn indices32(data: &[u8]) -> Result<Vec<u32>, Error> {
+    records(data, 4)
 }
 
 pub fn parts(data: &[u8]) -> Result<Vec<Part>, Error> {
@@ -156,6 +163,8 @@ mod tests {
     fn retains_indices_and_unknown_primitive_types() {
         assert_eq!(indices(&[0, 0, 255, 255]).unwrap(), [0, 65535]);
         assert_eq!(indices(&[0]), Err(Error::InvalidSize));
+        assert_eq!(indices32(&[0x70, 0x11, 1, 0]).unwrap(), [70000]);
+        assert_eq!(indices32(&[0, 0, 0]), Err(Error::InvalidSize));
         let bytes: Vec<_> = [99i32, -1, 2, 3, 4, 5, 6, 7, -1]
             .into_iter()
             .flat_map(i32::to_le_bytes)
