@@ -1,4 +1,4 @@
-use crate::{Error, Host, Program, Value};
+use crate::{Error, Evaluation, Host, Program, Value};
 
 #[derive(Debug)]
 pub struct FormattedString(Vec<Part>);
@@ -7,6 +7,7 @@ pub struct FormattedString(Vec<Part>);
 enum Part {
     Literal(String),
     Value(Program, Option<Format>),
+    StackValue(Format),
     If(Program, Vec<Part>, Vec<Part>),
     Case(Program, Vec<(i32, Vec<Part>)>),
 }
@@ -48,38 +49,50 @@ impl FormattedString {
 
     pub fn evaluate(&self, host: &mut impl Host) -> Result<String, Error> {
         let mut result = String::new();
-        evaluate(&self.0, host, &mut result)?;
+        evaluate(&self.0, host, &mut result, &mut Evaluation::default())?;
         Ok(result)
     }
 }
 
-fn evaluate(parts: &[Part], host: &mut impl Host, result: &mut String) -> Result<(), Error> {
-    let value = |program: &Program, host: &mut _| program.evaluate(host)?.ok_or(Error::Stack);
+fn evaluate(
+    parts: &[Part],
+    host: &mut impl Host,
+    result: &mut String,
+    context: &mut Evaluation,
+) -> Result<(), Error> {
+    let value = |program: &Program, host: &mut _, context: &mut Evaluation| {
+        program.execute(host, context)?;
+        context.stack.pop().ok_or(Error::Stack)
+    };
     for part in parts {
         match part {
             Part::Literal(text) => result.push_str(text),
             Part::Value(program, format) => {
-                let value = value(program, host)?;
+                let value = value(program, host, context)?;
                 result.push_str(&if let Some(format) = format {
                     format.apply(value)?
                 } else {
                     display(value)?
                 });
             }
+            Part::StackValue(format) => {
+                result.push_str(&format.apply(context.stack.pop().ok_or(Error::Stack)?)?)
+            }
             Part::If(program, yes, no) => evaluate(
-                if value(program, host)?.number()? != 0.0 {
+                if value(program, host, context)?.number()? != 0.0 {
                     yes
                 } else {
                     no
                 },
                 host,
                 result,
+                context,
             )?,
             Part::Case(program, cases) => {
-                let value = value(program, host)?.number()?;
+                let value = value(program, host, context)?.number()?;
                 if let Some((_, parts)) = cases.iter().find(|(index, _)| f64::from(*index) == value)
                 {
-                    evaluate(parts, host, result)?;
+                    evaluate(parts, host, result, context)?;
                 }
             }
         }
@@ -223,12 +236,34 @@ impl Parser<'_> {
                 self.position += 2;
                 continue;
             }
+            if rest.starts_with("%!") {
+                self.position += 2;
+                let end = self.rest().find('!').ok_or(Error::Syntax(self.position))?;
+                let format = Format::parse(&self.rest()[..end])?;
+                self.position += end + 1;
+                parts.push(Part::StackValue(format));
+                continue;
+            }
             if rest.starts_with("%(") {
                 let program = self.expression()?;
                 // Gauge authors often put control directives on the next line.
                 // Only consume the separator when a directive actually follows.
                 let rest = self.rest();
                 let trimmed = rest.trim_start_matches(char::is_whitespace);
+                // Some stock clock gauges insert an extra percent before the
+                // case directive, separated from it by whitespace.
+                let trimmed = if let Some(after_percent) = trimmed.strip_prefix('%') {
+                    let after_space = after_percent.trim_start_matches(char::is_whitespace);
+                    if after_space.len() != after_percent.len()
+                        && after_space.starts_with("%{case}")
+                    {
+                        after_space
+                    } else {
+                        trimmed
+                    }
+                } else {
+                    trimmed
+                };
                 if trimmed.starts_with("%{if}") || trimmed.starts_with("%{case}") {
                     self.position += rest.len() - trimmed.len();
                 }
@@ -432,6 +467,37 @@ mod tests {
                 .evaluate(&mut Empty)
                 .unwrap(),
             "1  units"
+        );
+    }
+
+    #[test]
+    fn shares_stack_and_registers_across_formatted_expressions() {
+        assert_eq!(
+            FormattedString::compile("%(1 s1)%{if}%(l1 41 +)%!d!%{end}")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "42"
+        );
+        assert_eq!(
+            FormattedString::compile("%(5 12)%!02d!:%!02d!")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "12:05"
+        );
+        assert_eq!(
+            FormattedString::compile("%(1)%\n%{case}\n%{:0}OFF%{:1}ON%{end}")
+                .unwrap()
+                .evaluate(&mut Empty)
+                .unwrap(),
+            "ON"
+        );
+        assert_eq!(
+            FormattedString::compile("%!d!")
+                .unwrap()
+                .evaluate(&mut Empty),
+            Err(Error::Stack)
         );
     }
 

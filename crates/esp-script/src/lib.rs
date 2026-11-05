@@ -112,6 +112,20 @@ pub struct Program {
     instructions: Vec<Instruction>,
 }
 
+struct Evaluation {
+    stack: Vec<Value>,
+    registers: [Value; 50],
+}
+
+impl Default for Evaluation {
+    fn default() -> Self {
+        Self {
+            stack: Vec::new(),
+            registers: std::array::from_fn(|_| Value::Number(0.0)),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Token<'a> {
     Word(&'a str),
@@ -209,8 +223,14 @@ impl Program {
     }
 
     pub fn evaluate(&self, host: &mut impl Host) -> Result<Option<Value>, Error> {
-        let mut stack: Vec<Value> = Vec::new();
-        let mut registers: [Value; 50] = std::array::from_fn(|_| Value::Number(0.0));
+        let mut context = Evaluation::default();
+        self.execute(host, &mut context)?;
+        Ok(context.stack.pop())
+    }
+
+    fn execute(&self, host: &mut impl Host, context: &mut Evaluation) -> Result<(), Error> {
+        let stack = &mut context.stack;
+        let registers = &mut context.registers;
         let mut pc = 0;
         let pop = |stack: &mut Vec<Value>| stack.pop().ok_or(Error::Stack);
         while let Some(instruction) = self.instructions.get(pc) {
@@ -221,24 +241,24 @@ impl Program {
                     let value = if reference.category == 'K' {
                         stack.pop().unwrap_or(Value::Number(0.0))
                     } else {
-                        pop(&mut stack)?
+                        pop(stack)?
                     };
                     host.write(reference, value)?;
                 }
                 Instruction::Unary(op) => {
-                    let a = pop(&mut stack)?.number()?;
+                    let a = pop(stack)?.number()?;
                     stack.push(Value::Number(op(a)));
                 }
                 Instruction::Binary(op) => {
-                    let b = pop(&mut stack)?.number()?;
-                    let a = pop(&mut stack)?.number()?;
+                    let b = pop(stack)?.number()?;
+                    let a = pop(stack)?.number()?;
                     stack.push(Value::Number(op(a, b)));
                 }
                 Instruction::CompareString(insensitive) => {
-                    let Value::Text(b) = pop(&mut stack)? else {
+                    let Value::Text(b) = pop(stack)? else {
                         return Err(Error::Type);
                     };
-                    let Value::Text(a) = pop(&mut stack)? else {
+                    let Value::Text(a) = pop(stack)? else {
                         return Err(Error::Type);
                     };
                     let order = if *insensitive {
@@ -254,7 +274,7 @@ impl Program {
                 }
                 Instruction::Duplicate => stack.push(stack.last().ok_or(Error::Stack)?.clone()),
                 Instruction::Pop => {
-                    pop(&mut stack)?;
+                    pop(stack)?;
                 }
                 Instruction::Swap => {
                     let length = stack.len();
@@ -267,19 +287,19 @@ impl Program {
                 Instruction::Store(index, remove) => {
                     registers[*index] = stack.last().ok_or(Error::Stack)?.clone();
                     if *remove {
-                        pop(&mut stack)?;
+                        pop(stack)?;
                     }
                 }
                 Instruction::Load(index) => stack.push(registers[*index].clone()),
                 Instruction::Select => {
-                    let condition = pop(&mut stack)?.number()?;
-                    let b = pop(&mut stack)?;
-                    let a = pop(&mut stack)?;
+                    let condition = pop(stack)?.number()?;
+                    let b = pop(stack)?;
+                    let a = pop(stack)?;
                     stack.push(if condition != 0.0 { a } else { b });
                 }
                 Instruction::Case => {
-                    let index = pop(&mut stack)?.number()?.floor();
-                    let count = pop(&mut stack)?.number()?;
+                    let index = pop(stack)?.number()?.floor();
+                    let count = pop(stack)?.number()?;
                     if count < 1.0
                         || count.fract() != 0.0
                         || count > stack.len() as f64
@@ -294,7 +314,7 @@ impl Program {
                     stack.push(value);
                 }
                 Instruction::JumpFalse(target) => {
-                    if pop(&mut stack)?.number()? == 0.0 {
+                    if pop(stack)?.number()? == 0.0 {
                         pc = *target;
                         continue;
                     }
@@ -311,7 +331,7 @@ impl Program {
             }
             pc += 1;
         }
-        Ok(stack.pop())
+        Ok(())
     }
 }
 
