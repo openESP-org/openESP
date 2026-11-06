@@ -10,7 +10,7 @@ pub struct AirportScene {
     pub aprons: Vec<esp_render::Apron>,
 }
 
-/// Place BGL runways and taxiways on the current local ground plane.
+/// Place BGL airport surfaces on the current local ground plane.
 pub fn airport(
     path: &Path,
     ident: Option<&str>,
@@ -22,20 +22,29 @@ pub fn airport(
     let airport = airports
         .iter()
         .find(|airport| {
-            ident.map_or(!airport.runways.is_empty(), |ident| {
-                airport.ident.eq_ignore_ascii_case(ident)
-            })
+            ident.map_or(
+                !airport.runways.is_empty() || !airport.helipads.is_empty(),
+                |ident| airport.ident.eq_ignore_ascii_case(ident),
+            )
         })
         .with_context(|| {
             format!(
                 "airport {} not found in {}",
-                ident.unwrap_or("with runways"),
+                ident.unwrap_or("with runways or helipads"),
                 path.display()
             )
         })?;
+    airport_scene(airport, latitude, longitude)
+}
+
+fn airport_scene(
+    airport: &esp_formats::bgl::airport::Airport,
+    latitude: f64,
+    longitude: f64,
+) -> Result<AirportScene> {
     ensure!(
-        !airport.runways.is_empty(),
-        "airport {} has no runways",
+        !airport.runways.is_empty() || !airport.helipads.is_empty(),
+        "airport {} has no runways or helipads",
         airport.ident
     );
     let origin = Origin::new(latitude, longitude)?;
@@ -103,7 +112,7 @@ pub fn airport(
             centerline: path.centerline,
         });
     }
-    let aprons = airport
+    let mut aprons = airport
         .aprons
         .iter()
         .filter(|apron| apron.draw_surface)
@@ -122,6 +131,31 @@ pub fn airport(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    for pad in airport.helipads.iter().filter(|pad| !pad.transparent) {
+        ensure!(
+            pad.length_m.is_finite()
+                && (0.1..=1000.0).contains(&pad.length_m)
+                && pad.width_m.is_finite()
+                && (0.1..=1000.0).contains(&pad.width_m)
+                && pad.heading_deg.is_finite(),
+            "invalid helipad geometry at {}",
+            airport.ident
+        );
+        let (north, east) = origin.local_position(pad.latitude, pad.longitude)?;
+        let heading = f64::from(pad.heading_deg).to_radians();
+        let along = DVec3::new(heading.sin(), 0.0, heading.cos()) * f64::from(pad.length_m) * 0.5;
+        let across = DVec3::new(heading.cos(), 0.0, -heading.sin()) * f64::from(pad.width_m) * 0.5;
+        let center = DVec3::new(east, 0.0, north);
+        aprons.push(esp_render::Apron {
+            vertices: vec![
+                center - along - across,
+                center + along - across,
+                center + along + across,
+                center - along + across,
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+    }
     Ok(AirportScene {
         runways,
         taxiways,
@@ -224,6 +258,44 @@ pub fn objects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_heliport_without_runways() {
+        use esp_formats::bgl::airport::{Airport, Helipad};
+        let pad = Helipad {
+            surface: 0,
+            kind: 1,
+            transparent: false,
+            closed: false,
+            latitude: 0.0,
+            longitude: 0.0,
+            elevation_m: 0.0,
+            length_m: 30.0,
+            width_m: 20.0,
+            heading_deg: 90.0,
+        };
+        let mut airport = Airport {
+            ident: "HEL1".into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            elevation_m: 0.0,
+            runways: vec![],
+            helipads: vec![pad],
+            taxi_points: vec![],
+            taxi_parkings: vec![],
+            taxi_paths: vec![],
+            aprons: vec![],
+        };
+        let scene = airport_scene(&airport, 0.0, 0.0).unwrap();
+        assert!(scene.runways.is_empty());
+        assert_eq!(scene.aprons.len(), 1);
+        let vertices = &scene.aprons[0].vertices;
+        assert!(((vertices[1] - vertices[0]).length() - 30.0).abs() < 1e-6);
+        assert!(((vertices[2] - vertices[1]).length() - 20.0).abs() < 1e-6);
+        assert!((vertices[1].x - vertices[0].x - 30.0).abs() < 1e-6);
+        airport.helipads[0].transparent = true;
+        assert!(airport_scene(&airport, 0.0, 0.0).unwrap().aprons.is_empty());
+    }
 
     #[test]
     #[ignore = "requires a P3D airport BGL in OPENESP_AIRPORT_BGL"]

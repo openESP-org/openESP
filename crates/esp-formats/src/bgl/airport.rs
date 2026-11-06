@@ -8,6 +8,7 @@ pub struct Airport {
     pub longitude: f64,
     pub elevation_m: f64,
     pub runways: Vec<Runway>,
+    pub helipads: Vec<Helipad>,
     pub taxi_points: Vec<TaxiPoint>,
     pub taxi_parkings: Vec<TaxiParking>,
     pub taxi_paths: Vec<TaxiPath>,
@@ -53,6 +54,20 @@ pub struct Runway {
     pub secondary_number: u8,
     pub secondary_designator: u8,
     pub surface: u16,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub elevation_m: f64,
+    pub length_m: f32,
+    pub width_m: f32,
+    pub heading_deg: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Helipad {
+    pub surface: u8,
+    pub kind: u8,
+    pub transparent: bool,
+    pub closed: bool,
     pub latitude: f64,
     pub longitude: f64,
     pub elevation_m: f64,
@@ -111,6 +126,23 @@ fn runway(data: &[u8]) -> Result<Runway, Error> {
         length_m: f32_at(data, 32)?,
         width_m: f32_at(data, 36)?,
         heading_deg: f32_at(data, 40)?,
+    })
+}
+
+fn helipad(data: &[u8]) -> Result<Helipad, Error> {
+    range(data, 0, 36)?;
+    let (latitude, longitude, elevation_m) = position(data, 12)?;
+    Ok(Helipad {
+        surface: data[6],
+        kind: data[7] & 0x0f,
+        transparent: data[7] & 0x10 != 0,
+        closed: data[7] & 0x20 != 0,
+        latitude,
+        longitude,
+        elevation_m,
+        length_m: f32_at(data, 24)?,
+        width_m: f32_at(data, 28)?,
+        heading_deg: f32_at(data, 32)?,
     })
 }
 
@@ -231,6 +263,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                 longitude,
                 elevation_m,
                 runways: Vec::new(),
+                helipads: Vec::new(),
                 taxi_points: Vec::new(),
                 taxi_parkings: Vec::new(),
                 taxi_paths: Vec::new(),
@@ -250,6 +283,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Airport>, Error> {
                     airport.runways.push(runway(child)?);
                 }
                 match child_kind {
+                    0x0026 => airport.helipads.push(helipad(child)?),
                     0x001a => airport.taxi_points.extend(taxi_points(child, 12)?),
                     0x00ac => airport.taxi_points.extend(taxi_points(child, 16)?),
                     0x003d => airport.taxi_parkings.extend(taxi_parkings(child, false)?),
@@ -355,6 +389,40 @@ mod tests {
             assert_eq!((parsed[1].latitude, parsed[1].longitude), (0.0, 0.0));
             assert!(taxi_parkings(&raw[..raw.len() - 1], extra != 0).is_err());
         }
+    }
+
+    #[test]
+    fn reads_helipad_position_flags_and_dimensions() {
+        let mut body = vec![0u8; 30];
+        body[0] = 4;
+        body[1] = 0x32;
+        body[6..10].copy_from_slice(&402_653_184u32.to_le_bytes());
+        body[10..14].copy_from_slice(&268_435_456u32.to_le_bytes());
+        body[14..18].copy_from_slice(&12_345i32.to_le_bytes());
+        body[18..22].copy_from_slice(&30f32.to_le_bytes());
+        body[22..26].copy_from_slice(&20f32.to_le_bytes());
+        body[26..30].copy_from_slice(&90f32.to_le_bytes());
+        let raw = record(0x26, &body);
+        let pad = helipad(&raw).unwrap();
+        assert_eq!(
+            (pad.latitude, pad.longitude, pad.elevation_m),
+            (0.0, 0.0, 12.345)
+        );
+        assert_eq!((pad.kind, pad.surface), (2, 4));
+        assert!(pad.transparent && pad.closed);
+        assert_eq!(
+            (pad.length_m, pad.width_m, pad.heading_deg),
+            (30.0, 20.0, 90.0)
+        );
+        assert!(helipad(&raw[..35]).is_err());
+        let mut airport_body = vec![0; 50];
+        airport_body.extend(raw);
+        assert_eq!(
+            parse(&record(0x3c, &airport_body)).unwrap()[0]
+                .helipads
+                .len(),
+            1
+        );
     }
 
     #[test]
