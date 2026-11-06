@@ -51,13 +51,14 @@ impl Propulsion {
     pub fn from_data(
         data: &FlightData,
         propeller: impl FnOnce() -> Result<crate::propeller::Propeller>,
+        cycle: impl FnOnce() -> Result<crate::piston::PistonCycle>,
     ) -> Result<Self> {
         match data
             .configuration
             .number("GeneralEngineData", "engine_type")?
         {
             Some(0.0) => Ok(Self::Piston {
-                model: Box::new(piston::Pistons::from_data(data, propeller)?),
+                model: Box::new(piston::Pistons::from_data(data, propeller, cycle)?),
                 commands: Vec::new(),
             }),
             Some(1.0) => Ok(Self::Turbine {

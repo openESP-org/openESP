@@ -2,7 +2,7 @@ use esp_assets::flight::FlightData;
 use esp_formats::air;
 use esp_physics::{
     atmosphere::Atmosphere,
-    piston::{Charge, Command, PistonCycle},
+    piston::{Charge, Command},
 };
 
 #[path = "../../../tests/support/content.rs"]
@@ -49,7 +49,7 @@ fn original_piston_tables_drive_cycle_torque_and_propeller_equilibrium() {
             heat_release: 0.083 * 43_500_000.0,
             oil_viscosity: 1.0,
         };
-        let cycle = PistonCycle::from_data(&data).unwrap();
+        let cycle = esp_sim::content::piston_cycle(&data).unwrap();
         let rated_rpm = data
             .configuration
             .number("piston_engine", "max_rated_rpm")
@@ -61,7 +61,7 @@ fn original_piston_tables_drive_cycle_torque_and_propeller_equilibrium() {
         );
         let mut changed = FlightData::load(&path, 0).unwrap();
         scale_curve(&mut changed, 0x508, 0.5);
-        let reduced = PistonCycle::from_data(&changed)
+        let reduced = esp_sim::content::piston_cycle(&changed)
             .unwrap()
             .sample(rated_rpm, charge)
             .unwrap();
@@ -69,7 +69,7 @@ fn original_piston_tables_drive_cycle_torque_and_propeller_equilibrium() {
         assert_eq!(reduced.friction_torque, reference.friction_torque);
         let mut changed = FlightData::load(&path, 0).unwrap();
         scale_curve(&mut changed, 0x509, 2.0);
-        let friction = PistonCycle::from_data(&changed)
+        let friction = esp_sim::content::piston_cycle(&changed)
             .unwrap()
             .sample(rated_rpm, charge)
             .unwrap();
@@ -279,7 +279,7 @@ fn original_piston_oil_indications_follow_engine_state() {
             .unwrap();
         let cranking = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert!(cranking.rpm > 0.0);
-        let reference_cycle = PistonCycle::from_data(&data).unwrap();
+        let reference_cycle = esp_sim::content::piston_cycle(&data).unwrap();
         let reference = reference_cycle
             .sample(
                 cranking.rpm,

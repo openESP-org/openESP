@@ -233,6 +233,7 @@ impl Pistons {
     pub fn from_data(
         data: &FlightData,
         propeller: impl FnOnce() -> Result<Propeller>,
+        cycle: impl FnOnce() -> Result<PistonCycle>,
     ) -> Result<Self> {
         let config = &data.configuration;
         ensure!(
@@ -399,7 +400,7 @@ impl Pistons {
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(!engines.is_empty(), "aircraft has no configured engines");
-        let cycle = PistonCycle::from_data(data)?;
+        let cycle = cycle()?;
         let rated_power = config
             .number("piston_engine", "max_rated_hp")?
             .context("missing piston rated power")?

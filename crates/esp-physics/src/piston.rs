@@ -1,6 +1,4 @@
-use anyhow::{Context, Result, ensure};
-use esp_assets::flight::FlightData;
-use esp_formats::air;
+use anyhow::{Result, ensure};
 use std::f64::consts::PI;
 
 use crate::lookup::Curve;
@@ -8,6 +6,19 @@ use crate::lookup::Curve;
 mod engine;
 pub use engine::{Command, EngineOutput, Pistons};
 
+pub struct PistonParameters {
+    pub efficiency: Curve,
+    pub friction: Curve,
+    pub displacement: f64,
+    pub cylinders: f64,
+    pub compression: f64,
+    pub maximum_rpm: f64,
+    pub power_scalar: f64,
+    pub mechanical_scalars: [f64; 2],
+    pub friction_scalars: [f64; 2],
+    pub fuel_scalar: f64,
+    pub specific_consumption: f64,
+}
 pub struct PistonCycle {
     efficiency: Curve,
     friction: Curve,
@@ -44,52 +55,20 @@ pub struct Output {
 }
 
 impl PistonCycle {
-    pub fn from_data(data: &FlightData) -> Result<Self> {
-        let config = &data.configuration;
-        ensure!(
-            config.number("GeneralEngineData", "engine_type")? == Some(0.0),
-            "piston cycle requires a reciprocating engine"
-        );
-        let records = air::parse(&data.air)?;
-        let curve = |id| -> Result<Curve> {
-            let mut records = records.iter().filter(|r| r.id == id);
-            let record = records
-                .next()
-                .with_context(|| format!("missing piston AIR record {id:#x}"))?;
-            ensure!(
-                records.next().is_none(),
-                "duplicate piston AIR record {id:#x}"
-            );
-            Curve::from_record(record)
-        };
-        let required = |key| -> Result<f64> {
-            config
-                .number("piston_engine", key)?
-                .with_context(|| format!("missing [piston_engine] {key}"))
-        };
-        let displacement = required("cylinder_displacement")? * 0.000016387064;
-        let cylinders = required("number_of_cylinders")?;
-        let compression = required("compression_ratio")?;
-        let maximum_rpm = required("max_rated_rpm")?;
-        let power_scalar = config
-            .number("piston_engine", "power_scalar")?
-            .unwrap_or(1.0);
-        let scalar =
-            |key| -> Result<f64> { Ok(config.number("piston_engine", key)?.unwrap_or(1.0)) };
-        let mechanical_scalars = [
-            scalar("idle_rpm_mechanical_efficiency_scalar")?,
-            scalar("max_rpm_mechanical_efficiency_scalar")?,
-        ];
-        let friction_scalars = [
-            scalar("idle_rpm_friction_scalar")?,
-            scalar("max_rpm_friction_scalar")?,
-        ];
-        let specific_consumption = config
-            .number("piston_engine", "BestPowerSpecificFuelConsumption")?
-            .unwrap_or(0.49);
-        let fuel_scalar = config
-            .number("GeneralEngineData", "fuel_flow_scalar")?
-            .unwrap_or(1.0);
+    pub fn new(parameters: PistonParameters) -> Result<Self> {
+        let PistonParameters {
+            efficiency,
+            friction,
+            displacement,
+            cylinders,
+            compression,
+            maximum_rpm,
+            power_scalar,
+            mechanical_scalars,
+            friction_scalars,
+            fuel_scalar,
+            specific_consumption,
+        } = parameters;
         ensure!(
             displacement > 0.0
                 && cylinders > 0.0
@@ -106,14 +85,13 @@ impl PistonCycle {
                 .all(|v| *v >= 0.0),
             "invalid piston tuning scalar"
         );
-        let efficiency = curve(0x508)?;
         ensure!(
-            efficiency.0.iter().all(|p| p.output >= 0.0),
+            efficiency.outputs_nonnegative(),
             "negative piston mechanical efficiency"
         );
         Ok(Self {
             efficiency,
-            friction: curve(0x509)?,
+            friction,
             displacement,
             cylinders,
             compression,
@@ -125,7 +103,6 @@ impl PistonCycle {
             specific_consumption,
         })
     }
-
     pub fn sample(&self, rpm: f64, charge: Charge) -> Result<Output> {
         ensure!(
             rpm.is_finite()

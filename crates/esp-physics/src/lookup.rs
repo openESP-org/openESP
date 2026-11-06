@@ -4,9 +4,21 @@ use esp_formats::air::{
     table::{Point, Table},
 };
 
-pub(crate) struct Curve(pub Vec<Point>);
+pub struct Curve(pub(crate) Vec<Point>);
 
 impl Curve {
+    pub fn from_values(values: &[(f64, f64)]) -> Result<Self> {
+        Self::new(
+            values
+                .iter()
+                .map(|&(input, output)| Point { input, output })
+                .collect(),
+        )
+    }
+
+    pub fn outputs_nonnegative(&self) -> bool {
+        self.0.iter().all(|point| point.output >= 0.0)
+    }
     pub fn new(points: Vec<Point>) -> Result<Self> {
         ensure!(
             points.len() >= 2
