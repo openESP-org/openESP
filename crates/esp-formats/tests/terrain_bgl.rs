@@ -1,6 +1,27 @@
 use esp_formats::bgl::Bgl;
 
 #[test]
+#[ignore = "requires LTFO photoreal BGL in OPENESP_LTFO_PHOTOREAL_BGL"]
+fn locates_ltfo_photo_tiles_on_the_world_grid() {
+    let path = std::env::var_os("OPENESP_LTFO_PHOTOREAL_BGL").unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let bgl = Bgl::parse(&bytes).unwrap();
+    let found = bgl.raster_tiles().unwrap().into_iter().any(|(kind, tile)| {
+        let Some(cell) = esp_formats::bgl::qmid::Qmid::from_packed(tile.qmid) else {
+            return false;
+        };
+        let bounds = cell.bounds();
+        (0x8c..=0x98).contains(&kind)
+            && cell.level() >= 13
+            && bounds.south <= 41.17556
+            && bounds.north >= 41.17556
+            && bounds.west <= 40.845
+            && bounds.east >= 40.845
+    });
+    assert!(found, "no detailed photo tile covers the LTFO terminal");
+}
+
+#[test]
 #[ignore = "requires photoreal BGL in OPENESP_PHOTOREAL_BGL"]
 fn reads_real_photoreal_tiles_and_masks() {
     let path = std::env::var_os("OPENESP_PHOTOREAL_BGL").unwrap();
@@ -14,6 +35,13 @@ fn reads_real_photoreal_tiles_and_masks() {
     let mut best_coverage = 0;
     let mut masks = 0;
     for (kind, tile) in &tiles {
+        if (0x8c..=0x98).contains(kind) {
+            assert!(
+                esp_formats::bgl::qmid::Qmid::from_packed(tile.qmid).is_some(),
+                "invalid photo QMID {:?}",
+                tile.qmid
+            );
+        }
         let mask = tile
             .decode_mask()
             .unwrap_or_else(|error| panic!("mask {:?}: {error}", tile.qmid));

@@ -3,6 +3,7 @@ use std::io::Cursor;
 
 pub mod airport;
 pub mod guid;
+pub mod qmid;
 pub mod raster;
 pub mod scenery;
 
