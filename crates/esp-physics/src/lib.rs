@@ -9,6 +9,7 @@ pub mod lookup;
 pub mod piston;
 pub mod propeller;
 pub mod propulsion;
+pub mod solar;
 pub mod time;
 pub mod turbine;
 pub mod variables;

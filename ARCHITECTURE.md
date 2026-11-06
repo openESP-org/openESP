@@ -82,6 +82,10 @@ object loading will move together into `esp-scenery` as that domain grows.
 the renderer. The app projects selected bounds into its local scene; the
 renderer uploads and composites the imagery beneath airport surfaces.
 
+`esp-physics::solar` computes the sun's local direction from UTC and position.
+The app updates that direction from the live flight position; `esp-render`
+uses it for surface lighting and atmospheric sky scattering.
+
 `esp-formats` builds the MIT-licensed flightsimlib PTC decoder from vendored C
 sources under `native/ptc`. A fixed-size photo bridge validates container,
 frame and tile ranges before decoding 256x256 ARGB1555 images. Rust owns the

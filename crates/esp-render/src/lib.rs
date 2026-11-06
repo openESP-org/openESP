@@ -9,6 +9,7 @@ use winit::window::Window;
 
 pub mod camera;
 mod material;
+mod sky;
 mod tangent;
 pub use camera::Camera;
 use material::{PipelineKey, texture_format};
@@ -69,6 +70,7 @@ pub struct Renderer {
     multisampled_color: Option<wgpu::TextureView>,
     sample_count: u32,
     pipelines: Vec<wgpu::RenderPipeline>,
+    sky: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     exterior: Vec<Draw>,
@@ -308,7 +310,7 @@ impl Renderer {
             label: Some("camera"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -408,9 +410,14 @@ impl Renderer {
         };
         let mut pipelines = vec![pipeline(ground_key)?];
         let mut pipeline_indices = HashMap::from([(ground_key, 0)]);
+        let sky = sky::pipeline(&device, &camera_layout, config.format, sample_count);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
-            contents: bytemuck::cast_slice(&Mat4::IDENTITY.to_cols_array()),
+            contents: bytemuck::bytes_of(&sky::CameraUniform {
+                view_projection: Mat4::IDENTITY.to_cols_array_2d(),
+                inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
+                sun: [0.0, 1.0, 0.0, 0.0],
+            }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -936,6 +943,7 @@ impl Renderer {
             multisampled_color,
             sample_count,
             pipelines,
+            sky,
             camera_buffer,
             camera_bind,
             exterior,
@@ -1020,6 +1028,7 @@ impl Renderer {
         &mut self,
         camera: &Camera,
         cockpit: bool,
+        sun: Vec3,
         screenshot: Option<&Path>,
     ) -> Result<bool> {
         let frame = match self.surface.get_current_texture() {
@@ -1035,11 +1044,18 @@ impl Renderer {
             error => anyhow::bail!("surface acquisition failed: {error:?}"),
         };
         let matrix = camera.view_projection(self.config.width as f32 / self.config.height as f32);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&matrix.to_cols_array()),
+        anyhow::ensure!(
+            sun.is_finite() && sun.length_squared() > 0.0,
+            "invalid sun direction"
         );
+        let sun = sun.normalize();
+        let camera_uniform = sky::CameraUniform {
+            view_projection: matrix.to_cols_array_2d(),
+            inverse_view_projection: matrix.inverse().to_cols_array_2d(),
+            sun: [sun.x, sun.y, sun.z, camera.position.y.max(0.0) as f32],
+        };
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         let draws = if cockpit {
             &mut self.interior
         } else {
@@ -1113,6 +1129,8 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_bind, &[]);
+            pass.set_pipeline(&self.sky);
+            pass.draw(0..3, 0..1);
             let draw_one = |pass: &mut wgpu::RenderPass<'_>, draw: &Draw| {
                 pass.set_pipeline(&self.pipelines[draw.pipeline]);
                 pass.set_bind_group(1, &draw.bind, &[]);

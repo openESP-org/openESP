@@ -528,7 +528,18 @@ impl App {
             } else {
                 None
             };
-            if renderer.render(&self.camera, self.arguments.cockpit, screenshot)? {
+            let origin =
+                navigation::Origin::new(self.arguments.latitude, self.arguments.longitude)?;
+            let (latitude, longitude) =
+                origin.position(renderer.aircraft_origin.z, renderer.aircraft_origin.x)?;
+            let sun =
+                esp_physics::solar::direction(latitude, longitude, self.sim_time.unix_seconds())?;
+            if renderer.render(
+                &self.camera,
+                self.arguments.cockpit,
+                Vec3::new(sun.y as f32, sun.z as f32, sun.x as f32),
+                screenshot,
+            )? {
                 self.frames += 1;
             }
         }
@@ -900,11 +911,10 @@ pub(crate) fn run() -> Result<()> {
             let _ = sender.send(loaded);
         })?;
     let mut variables = Variables::default();
-    let sim_time = if let Some(utc) = arguments.utc_time {
-        SimTime::new(utc)?
-    } else {
-        SimTime::now()?
-    };
+    let mut sim_time = SimTime::now()?;
+    if let Some(utc) = arguments.utc_time {
+        sim_time.set_utc(utc)?;
+    }
     sim_time.publish(&mut variables);
     variables.set_number("WORLD ORIGIN LATITUDE", "degrees", arguments.latitude);
     variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", arguments.longitude);

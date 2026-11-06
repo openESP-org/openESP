@@ -7,6 +7,7 @@ const MAX_FRAME: f64 = 0.25;
 
 pub struct SimTime {
     utc_seconds: f64,
+    unix_day: f64,
     elapsed: f64,
 }
 
@@ -18,6 +19,7 @@ impl SimTime {
         );
         Ok(Self {
             utc_seconds,
+            unix_day: 0.0,
             elapsed: 0.0,
         })
     }
@@ -26,7 +28,23 @@ impl SimTime {
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
-        Self::new(seconds.rem_euclid(86_400.0))
+        let mut result = Self::new(seconds.rem_euclid(86_400.0))?;
+        result.unix_day = (seconds / 86_400.0).floor();
+        Ok(result)
+    }
+
+    /// Replace time of day while keeping the current simulated UTC date.
+    pub fn set_utc(&mut self, utc_seconds: f64) -> Result<()> {
+        ensure!(
+            utc_seconds.is_finite() && (0.0..86_400.0).contains(&utc_seconds),
+            "UTC time must be within a day"
+        );
+        self.utc_seconds = utc_seconds;
+        Ok(())
+    }
+
+    pub fn unix_seconds(&self) -> f64 {
+        self.unix_day * 86_400.0 + self.utc_seconds
     }
 
     pub fn advance(&mut self, dt: f64) -> Result<()> {
@@ -34,7 +52,15 @@ impl SimTime {
             dt.is_finite() && dt >= 0.0 && (self.elapsed + dt).is_finite(),
             "invalid simulation time step"
         );
-        self.utc_seconds = (self.utc_seconds + dt.rem_euclid(86_400.0)).rem_euclid(86_400.0);
+        let next = self.utc_seconds + dt;
+        let day = self.unix_day + (next / 86_400.0).floor();
+        let utc = next.rem_euclid(86_400.0);
+        ensure!(
+            next.is_finite() && (day * 86_400.0 + utc).is_finite(),
+            "invalid simulation time step"
+        );
+        self.unix_day = day;
+        self.utc_seconds = utc;
         self.elapsed += dt;
         Ok(())
     }

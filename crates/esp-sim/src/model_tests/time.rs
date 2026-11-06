@@ -16,9 +16,14 @@ fn simulation_time_advances_and_utc_wraps_at_midnight() {
     };
     assert_eq!(read(&mut variables, "ZULU TIME"), 86_399.5);
     time.advance(1.0).unwrap();
+    assert_eq!(time.unix_seconds(), 86_400.5);
     time.publish(&mut variables);
     assert_eq!(read(&mut variables, "ZULU TIME"), 0.5);
     assert_eq!(read(&mut variables, "SIMULATION TIME"), 1.0);
+    time.set_utc(1.0).unwrap();
+    assert_eq!(time.unix_seconds(), 86_401.0);
+    assert!(time.set_utc(-1.0).is_err());
+    assert_eq!(time.unix_seconds(), 86_401.0);
     assert!(time.advance(-1.0).is_err());
     assert!(SimTime::new(86_400.0).is_err());
 }
