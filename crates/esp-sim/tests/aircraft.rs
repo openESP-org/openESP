@@ -1,6 +1,6 @@
 use esp_assets::Aircraft;
-use esp_physics::animation::ModelState;
 use esp_script::{Error, Host, Reference, Value};
+use esp_sim::animation::ModelState;
 use esp_sim::variables::Variables;
 
 #[path = "../../../tests/support/content.rs"]
@@ -66,7 +66,7 @@ fn original_nonlinear_airspeed_tape_moves_with_indicated_speed() {
 #[ignore = "requires original MDL cockpit controls and OPENESP_AIRCRAFT_PATHS"]
 fn original_model_click_changes_switch_state_and_animation() {
     use esp_assets::gauge::MouseEvent;
-    use esp_physics::{interaction::model_mouse, picking::pick};
+    use esp_sim::{interaction::model_mouse, picking::pick};
     use glam::Vec3;
 
     let mut verified = std::collections::HashSet::new();
@@ -200,7 +200,7 @@ fn animates_external_aircraft_hierarchies() {
 #[test]
 #[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn picks_external_cockpit_panel_surfaces() {
-    use esp_physics::picking::pick;
+    use esp_sim::picking::pick;
     use glam::Vec3;
     for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();

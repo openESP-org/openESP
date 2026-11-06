@@ -836,7 +836,6 @@ dependencies = [
  "esp-script",
  "esp-sim",
  "glam 0.30.10",
- "petgraph",
  "tempfile",
 ]
 
@@ -874,6 +873,7 @@ dependencies = [
  "esp-script",
  "glam 0.30.10",
  "image",
+ "petgraph",
  "tempfile",
 ]
 

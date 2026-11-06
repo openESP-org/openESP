@@ -1,14 +1,11 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use esp_assets::{Aircraft, gauge::MouseEvent};
-use esp_physics::{
-    animation::ModelState,
-    interaction, picking,
-    time::{Clock, STEP, SimTime},
-};
+use esp_physics::time::{Clock, STEP, SimTime};
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
 use esp_sim::variables::Variables;
+use esp_sim::{animation::ModelState, interaction, picking};
 use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,

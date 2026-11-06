@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use esp_assets::{Model, gauge::MouseEvent};
 use esp_script::Value;
 
-use crate::variables::VariableStore;
+use esp_physics::variables::VariableStore;
 
 pub fn model_mouse(
     model: &Model,

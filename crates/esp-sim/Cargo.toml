@@ -11,6 +11,7 @@ esp-formats = { path = "../esp-formats" }
 esp-script = { path = "../esp-script" }
 esp-nav = { path = "../esp-nav" }
 glam = "0.30"
+petgraph = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

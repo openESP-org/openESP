@@ -1,7 +1,7 @@
+use crate::interaction::*;
 use crate::variables::Variables;
 use esp_assets::ModelMouseRectangle;
 use esp_assets::{Model, gauge::MouseEvent};
-use esp_physics::interaction::*;
 use esp_script::Value;
 use esp_script::{Host, Reference};
 
