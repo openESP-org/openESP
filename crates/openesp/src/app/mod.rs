@@ -5,10 +5,10 @@ use esp_physics::{
     animation::ModelState,
     interaction, picking,
     time::{Clock, STEP, SimTime},
-    variables::Variables,
 };
 use esp_render::{Camera, Renderer};
 use esp_script::Value;
+use esp_sim::variables::Variables;
 use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,

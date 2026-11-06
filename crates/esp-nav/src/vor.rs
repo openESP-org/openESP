@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
-use esp_physics::variables::Variables;
-use esp_script::{Host, Reference};
+use esp_physics::variables::VariableStore;
+use esp_script::Reference;
 use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS: f64 = 6_371_008.8;
@@ -81,7 +81,7 @@ pub fn publish(
     longitude: f64,
     altitude: f64,
     variation: f64,
-    variables: &mut Variables,
+    variables: &mut dyn VariableStore,
 ) -> Result<()> {
     for index in 1..=2 {
         publish_receiver(index, latitude, longitude, altitude, variation, variables)?;
@@ -95,10 +95,10 @@ fn publish_receiver(
     longitude: f64,
     altitude: f64,
     variation: f64,
-    variables: &mut Variables,
+    variables: &mut dyn VariableStore,
 ) -> Result<()> {
     let key = |name: &str| format!("{name}:{index}");
-    fn read(v: &mut Variables, name: &str, unit: &str) -> Result<f64> {
+    fn read(v: &mut dyn VariableStore, name: &str, unit: &str) -> Result<f64> {
         Ok(v.read(&Reference::new('A', name, Some(unit)))?.number()?)
     }
     let count = read(variables, "VOR STATION COUNT", "number")?;

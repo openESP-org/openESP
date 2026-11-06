@@ -834,6 +834,7 @@ dependencies = [
  "esp-assets",
  "esp-formats",
  "esp-script",
+ "esp-sim",
  "glam 0.30.10",
  "petgraph",
  "tempfile",
@@ -859,6 +860,21 @@ dependencies = [
  "esp-formats",
  "thiserror 2.0.21",
  "winnow",
+]
+
+[[package]]
+name = "esp-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "esp-assets",
+ "esp-formats",
+ "esp-nav",
+ "esp-physics",
+ "esp-script",
+ "glam 0.30.10",
+ "image",
+ "tempfile",
 ]
 
 [[package]]
@@ -2033,6 +2049,7 @@ dependencies = [
  "esp-physics",
  "esp-render",
  "esp-script",
+ "esp-sim",
  "glam 0.30.10",
  "image",
  "pollster",

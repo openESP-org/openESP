@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
-use esp_physics::{flight::State, variables::Variables};
-use esp_script::{Host, Reference};
+use esp_physics::{flight::State, variables::VariableStore};
+use esp_script::Reference;
 use glam::{DVec3, EulerRot};
 use std::f64::consts::{PI, TAU};
 
@@ -122,7 +122,7 @@ pub fn publish_acceleration(
     before: &State,
     after: &State,
     dt: f64,
-    variables: &mut Variables,
+    variables: &mut dyn VariableStore,
 ) -> Result<()> {
     ensure!(dt.is_finite() && dt >= 0.0, "invalid acceleration timestep");
     if dt == 0.0 {
@@ -218,7 +218,7 @@ impl Origin {
     }
 }
 
-pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
+pub fn publish(state: &State, variables: &mut dyn VariableStore) -> Result<()> {
     let latitude = variables
         .read(&Reference::new(
             'A',
@@ -320,8 +320,8 @@ pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
     Ok(())
 }
 
-fn publish_hsi(variables: &mut Variables) -> Result<()> {
-    let read = |variables: &mut Variables, name, unit| -> Result<f64> {
+fn publish_hsi(variables: &mut dyn VariableStore) -> Result<()> {
+    let read = |variables: &mut dyn VariableStore, name, unit| -> Result<f64> {
         Ok(variables
             .read(&Reference::new('A', name, Some(unit)))?
             .number()?)
@@ -411,7 +411,7 @@ fn publish_direct_to(
     variation: f64,
     ground_speed: f64,
     track: f64,
-    variables: &mut Variables,
+    variables: &mut dyn VariableStore,
 ) -> Result<()> {
     let active = variables
         .read(&Reference::new(

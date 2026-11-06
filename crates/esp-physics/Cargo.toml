@@ -13,3 +13,5 @@ petgraph = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+esp-sim = { path = "../esp-sim" }

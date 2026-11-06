@@ -340,7 +340,7 @@ mod tests {
         };
         let mut state = ModelState::new(&model).unwrap();
         state
-            .update(&model, &mut crate::variables::Variables::default(), 0.0)
+            .update(&model, &mut esp_sim::variables::Variables::default(), 0.0)
             .unwrap();
         assert!(
             state.transforms[0]
@@ -386,7 +386,7 @@ mod tests {
         parameter.value = Some(0.0);
         assert_eq!(
             parameter
-                .evaluate(&mut crate::variables::Variables::default(), 0.1)
+                .evaluate(&mut esp_sim::variables::Variables::default(), 0.1)
                 .unwrap(),
             Some(5.0)
         );

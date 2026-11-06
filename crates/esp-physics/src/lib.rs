@@ -17,5 +17,4 @@ pub mod propeller;
 pub mod propulsion;
 pub mod time;
 pub mod turbine;
-mod units;
 pub mod variables;

@@ -1,0 +1,17 @@
+[package]
+name = "esp-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+esp-physics = { path = "../esp-physics" }
+esp-assets = { path = "../esp-assets" }
+esp-formats = { path = "../esp-formats" }
+esp-script = { path = "../esp-script" }
+esp-nav = { path = "../esp-nav" }
+glam = "0.30"
+
+[dev-dependencies]
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }

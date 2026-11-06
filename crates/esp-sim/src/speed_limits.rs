@@ -1,9 +1,10 @@
+use crate::variables::Variables;
 use anyhow::{Result, ensure};
 use esp_formats::{
     air::{self, table::Table},
     cfg::Config,
 };
-use esp_physics::{atmosphere::Atmosphere, flight::State, variables::Variables};
+use esp_physics::{atmosphere::Atmosphere, flight::State};
 use esp_script::{Host, Reference};
 #[cfg(test)]
 use glam::DVec3;

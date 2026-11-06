@@ -18,7 +18,8 @@ app layer
 engine layer
     esp-render     wgpu renderer
     esp-audio      sound mixing and output
-    esp-physics    reusable solver models
+    esp-physics    reusable, session-free solver models
+    esp-sim        flight session runtime and simulator variables
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
     esp-terrain    elevation mesh, land class and photoreal ground
@@ -34,8 +35,8 @@ foundation layer
 
 Two rules follow from this arrangement and are not negotiable:
 
-- `esp-physics` never depends on `esp-render`. Physics runs headless; the app
-  connects the two.
+- `esp-physics` and `esp-sim` never depend on `esp-render` or `esp-ui`.
+- `esp-ui` and `esp-launcher` never contain simulation logic.
 - The app layer is the only place that knows every crate. Everything below it
   can be built, tested and used on its own.
 

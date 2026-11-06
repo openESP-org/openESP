@@ -11,6 +11,7 @@ esp-formats = { path = "../esp-formats" }
 esp-render = { path = "../esp-render" }
 esp-nav = { path = "../esp-nav" }
 esp-physics = { path = "../esp-physics" }
+esp-sim = { path = "../esp-sim" }
 esp-script = { path = "../esp-script" }
 glam = "0.30"
 pollster = "0.4"

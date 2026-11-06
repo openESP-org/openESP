@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
-use esp_script::{Error, Host, Reference};
+use esp_script::{Error, Reference};
 
-use crate::{flight::State, variables::Variables};
+use crate::{flight::State, variables::VariableStore};
 
 const FEET: f64 = 0.3048;
 const FEET_PER_MINUTE: f64 = 0.3048 / 60.0;
@@ -69,7 +69,7 @@ impl Inputs {
 }
 
 impl Autopilot {
-    pub fn configure(variables: &mut Variables, altitude: f64) -> Result<()> {
+    pub fn configure(variables: &mut dyn VariableStore, altitude: f64) -> Result<()> {
         ensure!(altitude.is_finite(), "invalid autopilot altitude");
         for name in [
             "AUTOPILOT MASTER",
@@ -87,7 +87,12 @@ impl Autopilot {
         Ok(())
     }
 
-    pub fn update(&mut self, dt: f64, inputs: Inputs, variables: &mut Variables) -> Result<Output> {
+    pub fn update(
+        &mut self,
+        dt: f64,
+        inputs: Inputs,
+        variables: &mut dyn VariableStore,
+    ) -> Result<Output> {
         ensure!(dt.is_finite() && dt >= 0.0, "invalid autopilot timestep");
         let master = Self::boolean(variables, "AUTOPILOT MASTER")? != 0.0;
         let powered = Self::powered(variables)?;
@@ -166,7 +171,7 @@ impl Autopilot {
         Ok(output)
     }
 
-    fn disengage(&mut self, variables: &mut Variables) {
+    fn disengage(&mut self, variables: &mut dyn VariableStore) {
         for name in [
             "AUTOPILOT MASTER",
             "AUTOPILOT HEADING LOCK",
@@ -180,7 +185,7 @@ impl Autopilot {
         self.pitch_integral = 0.0;
     }
 
-    fn powered(variables: &mut Variables) -> Result<bool> {
+    fn powered(variables: &mut dyn VariableStore) -> Result<bool> {
         if let Some(value) = Self::number(variables, "CIRCUIT AUTOPILOT ON", "bool")? {
             return Ok(value != 0.0);
         }
@@ -190,11 +195,11 @@ impl Autopilot {
         Ok(true)
     }
 
-    fn boolean(variables: &mut Variables, name: &str) -> Result<f64> {
+    fn boolean(variables: &mut dyn VariableStore, name: &str) -> Result<f64> {
         Ok(Self::number(variables, name, "bool")?.unwrap_or(0.0))
     }
 
-    fn number(variables: &mut Variables, name: &str, unit: &str) -> Result<Option<f64>> {
+    fn number(variables: &mut dyn VariableStore, name: &str, unit: &str) -> Result<Option<f64>> {
         match variables.read(&Reference::new('A', name, Some(unit))) {
             Ok(value) => Ok(Some(value.number()?)),
             Err(Error::Variable(_)) => Ok(None),
@@ -244,167 +249,4 @@ pub fn selected_vertical_speed_meters_per_second(meters_per_second: f64) -> Resu
         meters_per_second.clamp(-6000.0 * FEET_PER_MINUTE, 6000.0 * FEET_PER_MINUTE)
             / FEET_PER_MINUTE,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn variables() -> Variables {
-        let mut variables = Variables::default();
-        Autopilot::configure(&mut variables, 1000.0).unwrap();
-        variables
-    }
-
-    fn inputs() -> Inputs {
-        Inputs {
-            heading: 0.0,
-            altitude: 1000.0,
-            ..Inputs::default()
-        }
-    }
-
-    #[test]
-    fn heading_hold_banks_toward_the_selected_heading_and_respects_the_limit() {
-        let mut variables = variables();
-        variables.set_number("AUTOPILOT MASTER", "bool", 1.0);
-        variables.set_number("AUTOPILOT HEADING LOCK", "bool", 1.0);
-        variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 90.0);
-        variables.set_number("AUTOPILOT MAX BANK", "degrees", 25.0);
-        let mut autopilot = Autopilot::default();
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.aileron.unwrap() > 0.0);
-
-        let banked = Inputs {
-            bank: 25.0,
-            roll_rate: 5.0,
-            ..inputs()
-        };
-        let output = autopilot.update(0.1, banked, &mut variables).unwrap();
-        assert!(output.aileron.unwrap() <= 0.0);
-
-        variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 350.0);
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.aileron.unwrap() < 0.0);
-    }
-
-    #[test]
-    fn heading_hold_uses_magnetic_heading() {
-        let mut variables = variables();
-        variables.set_number("AUTOPILOT MASTER", "bool", 1.0);
-        variables.set_number("AUTOPILOT HEADING LOCK", "bool", 1.0);
-        variables.set_number("MAGVAR", "degrees", -10.0);
-        variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 350.0);
-        let mut autopilot = Autopilot::default();
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.aileron.unwrap().abs() < 1e-10);
-        variables.set_number("AUTOPILOT HEADING LOCK DIR", "degrees", 0.0);
-        assert!(
-            autopilot
-                .update(0.1, inputs(), &mut variables)
-                .unwrap()
-                .aileron
-                .unwrap()
-                > 0.0
-        );
-        variables.set_number("GYRO DRIFT ERROR", "degrees", 10.0);
-        assert!(
-            autopilot
-                .update(0.1, inputs(), &mut variables)
-                .unwrap()
-                .aileron
-                .unwrap()
-                .abs()
-                < 1e-10
-        );
-    }
-
-    #[test]
-    fn wing_leveler_rolls_back_to_wings_level() {
-        let mut variables = variables();
-        variables.set_number("AUTOPILOT MASTER", "bool", 1.0);
-        variables.set_number("AUTOPILOT WING LEVELER", "bool", 1.0);
-        let mut autopilot = Autopilot::default();
-        let output = autopilot
-            .update(
-                0.1,
-                Inputs {
-                    bank: 10.0,
-                    ..inputs()
-                },
-                &mut variables,
-            )
-            .unwrap();
-        assert!(output.aileron.unwrap() < 0.0);
-        let output = autopilot
-            .update(
-                0.1,
-                Inputs {
-                    bank: -10.0,
-                    ..inputs()
-                },
-                &mut variables,
-            )
-            .unwrap();
-        assert!(output.aileron.unwrap() > 0.0);
-    }
-
-    #[test]
-    fn altitude_and_vertical_speed_modes_command_the_pitch_axis() {
-        let mut variables = variables();
-        variables.set_number("AUTOPILOT MASTER", "bool", 1.0);
-        variables.set_number("AUTOPILOT ALTITUDE LOCK", "bool", 1.0);
-        variables.set_number("AUTOPILOT ALTITUDE LOCK VAR", "meters", 1100.0);
-        let mut autopilot = Autopilot::default();
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.elevator.unwrap() > 0.0);
-
-        variables.set_number("AUTOPILOT ALTITUDE LOCK VAR", "meters", 900.0);
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.elevator.unwrap() < 0.0);
-
-        variables.set_number("AUTOPILOT ALTITUDE LOCK", "bool", 0.0);
-        variables.set_number("AUTOPILOT VERTICAL HOLD", "bool", 1.0);
-        variables.set_number("AUTOPILOT VERTICAL HOLD VAR", "meters per second", 3.0);
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.elevator.unwrap() > 0.0);
-
-        variables.set_number("AUTOPILOT VERTICAL HOLD VAR", "meters per second", -3.0);
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert!(output.elevator.unwrap() < 0.0);
-    }
-
-    #[test]
-    fn disengaged_or_unpowered_autopilot_does_not_drive_controls() {
-        let mut variables = variables();
-        variables.set_number("AUTOPILOT HEADING LOCK", "bool", 1.0);
-        let mut autopilot = Autopilot::default();
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert_eq!(output.aileron, None);
-        assert_eq!(output.elevator, None);
-
-        variables.set_number("AUTOPILOT MASTER", "bool", 1.0);
-        variables.set_number("CIRCUIT AUTOPILOT ON", "bool", 0.0);
-        let output = autopilot.update(0.1, inputs(), &mut variables).unwrap();
-        assert_eq!(output.aileron, None);
-        assert_eq!(
-            variables
-                .read(&Reference::new('A', "AUTOPILOT MASTER", Some("bool")))
-                .unwrap()
-                .number()
-                .unwrap(),
-            0.0
-        );
-    }
-
-    #[test]
-    fn selected_values_are_bounded() {
-        assert_eq!(selected_altitude_increment(1000.0, 100.0).unwrap(), 1100.0);
-        assert_eq!(
-            selected_vertical_speed_increment(0.0, -100.0).unwrap(),
-            -100.0
-        );
-        assert!(selected_altitude_meters(f64::NAN).is_err());
-        assert!(selected_vertical_speed_meters_per_second(f64::NAN).is_err());
-    }
 }

@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod navigation {
     use esp_nav::navigation::*;
-    use esp_physics::{flight::State, variables::Variables};
+    use esp_physics::flight::State;
     use esp_script::{Host, Reference};
+    use esp_sim::variables::Variables;
     use glam::EulerRot;
     use std::f64::consts::PI;
     const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
@@ -391,9 +392,9 @@ mod navigation {
 mod vor {
     use esp_nav::vor::*;
     use esp_physics::flight::State;
-    use esp_physics::variables::Variables;
     use esp_script::Value;
     use esp_script::{Host, Reference};
+    use esp_sim::variables::Variables;
     use glam::DVec3;
 
     #[test]
