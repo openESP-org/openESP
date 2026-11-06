@@ -76,7 +76,11 @@ the app because they exercise flight and weather together.
 `app/scenery_folder.rs` resolves a CLI add-on folder to the existing airport
 and object loaders before `app/spawn.rs` resolves the selected runway or parking
 stand. It reads content without modifying the add-on. Airport surface and
-object loading will move together into `esp-scenery` when terrain is introduced.
+object loading will move together into `esp-scenery` as that domain grows.
+
+`esp-terrain` decodes and selects geographic imagery tiles independently of
+the renderer. The app projects selected bounds into its local scene; the
+renderer uploads and composites the imagery beneath airport surfaces.
 
 `esp-formats` builds the MIT-licensed flightsimlib PTC decoder from vendored C
 sources under `native/ptc`. A fixed-size photo bridge validates container,

@@ -1,0 +1,8 @@
+[package]
+name = "esp-terrain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+esp-formats = { path = "../esp-formats" }

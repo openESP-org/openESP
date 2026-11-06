@@ -878,6 +878,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-terrain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "esp-formats",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2050,6 +2058,7 @@ dependencies = [
  "esp-render",
  "esp-script",
  "esp-sim",
+ "esp-terrain",
  "glam 0.30.10",
  "image",
  "pollster",

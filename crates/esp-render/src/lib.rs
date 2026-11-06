@@ -69,6 +69,7 @@ pub struct Renderer {
     interior: Vec<Draw>,
     panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
+    photos: Vec<Draw>,
     runway: Vec<Draw>,
     objects: Vec<Draw>,
     pub centre: Vec3,
@@ -105,6 +106,22 @@ pub struct SceneryObject {
     pub model: Arc<Model>,
     pub transform: Mat4,
     pub textures: std::path::PathBuf,
+}
+
+/// A geographically projected image in northwest, southwest, southeast, northeast order.
+pub struct PhotoTile {
+    pub corners: [DVec3; 4],
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+pub struct Scene<'a> {
+    pub runways: &'a [Runway],
+    pub taxiways: &'a [Taxiway],
+    pub aprons: &'a [Apron],
+    pub objects: &'a [SceneryObject],
+    pub photos: &'a [PhotoTile],
 }
 
 fn apron_mesh(aprons: &[Apron]) -> (Vec<Vertex>, Vec<u32>) {
@@ -206,12 +223,16 @@ impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         aircraft: &Aircraft,
-        runways: &[Runway],
-        taxiways: &[Taxiway],
-        aprons: &[Apron],
-        objects: &[SceneryObject],
+        scene: Scene<'_>,
         requested_samples: u32,
     ) -> Result<Self> {
+        let Scene {
+            runways,
+            taxiways,
+            aprons,
+            objects,
+            photos,
+        } = scene;
         // Avoid initializing secondary GL drivers when using native GPU APIs.
         // Some Windows GL drivers can fail even when DX12 was selected for
         // rendering.
@@ -629,6 +650,67 @@ impl Renderer {
                 pipeline: 0,
             },
         );
+        let photo_key = PipelineKey {
+            source: 5,
+            destination: 6,
+            depth_write: false,
+            double_sided: true,
+        };
+        let photo_pipeline = if let Some(&index) = pipeline_indices.get(&photo_key) {
+            index
+        } else {
+            let index = pipelines.len();
+            pipelines.push(pipeline(photo_key)?);
+            index
+        };
+        let photo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let mut photo_draws = Vec::with_capacity(photos.len());
+        for photo in photos {
+            anyhow::ensure!(
+                photo.width > 0
+                    && photo.height > 0
+                    && photo.corners.iter().all(|corner| corner.is_finite())
+                    && (photo.width as usize)
+                        .checked_mul(photo.height as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        == Some(photo.rgba.len()),
+                "invalid photo tile"
+            );
+            let vertices = std::array::from_fn::<_, 4, _>(|i| Vertex {
+                position: [photo.corners[i].x as f32, 0.001, photo.corners[i].z as f32],
+                normal: [0.0, 1.0, 0.0],
+                uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][i],
+            });
+            let image =
+                texture::Texture::rgba(photo.width, photo.height, photo.rgba.clone(), false);
+            let view = upload_texture(&device, &queue, &image)?.create_view(&Default::default());
+            photo_draws.push(make_draw(
+                &device,
+                &draw_layout,
+                &photo_sampler,
+                &view,
+                DrawData {
+                    vertices: &vertices,
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    transform: Mat4::IDENTITY,
+                    uniform: DrawUniform {
+                        model: Mat4::IDENTITY.to_cols_array_2d(),
+                        normal: Mat4::IDENTITY.to_cols_array_2d(),
+                        diffuse: [1.0; 4],
+                        settings: [0.0, 2.0, 0.0, 0.0],
+                    },
+                    blended: true,
+                    node: None,
+                    pipeline: photo_pipeline,
+                },
+            ));
+        }
         let mut runway_draws = Vec::new();
         anyhow::ensure!(
             aprons
@@ -763,6 +845,7 @@ impl Renderer {
             interior,
             panels,
             ground,
+            photos: photo_draws,
             runway: runway_draws,
             objects: scenery_draws,
             centre,
@@ -873,6 +956,7 @@ impl Renderer {
         for draw in draws
             .iter_mut()
             .chain(std::iter::once(&mut self.ground))
+            .chain(self.photos.iter_mut())
             .chain(self.runway.iter_mut())
             .chain(self.objects.iter_mut())
         {
@@ -940,6 +1024,9 @@ impl Renderer {
                 pass.draw_indexed(0..draw.count, 0, 0..1);
             };
             draw_one(&mut pass, &self.ground);
+            for draw in &self.photos {
+                draw_one(&mut pass, draw);
+            }
             for draw in &self.runway {
                 draw_one(&mut pass, draw);
             }

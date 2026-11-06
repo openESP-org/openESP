@@ -9,5 +9,6 @@ members = [
     "crates/esp-script",
     "crates/esp-physics",
     "crates/esp-sim",
+    "crates/esp-terrain",
     "crates/openesp"
 ]

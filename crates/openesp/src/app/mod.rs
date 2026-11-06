@@ -315,13 +315,17 @@ impl App {
                     } else {
                         Vec::new()
                     };
+                    let photos = terrain::photos(&self.arguments)?;
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
-                        &scene.runways,
-                        &scene.taxiways,
-                        &scene.aprons,
-                        &objects,
+                        esp_render::Scene {
+                            runways: &scene.runways,
+                            taxiways: &scene.taxiways,
+                            aprons: &scene.aprons,
+                            objects: &objects,
+                            photos: &photos,
+                        },
                         self.arguments.msaa,
                     ))?);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
@@ -794,6 +798,7 @@ impl ApplicationHandler for App {
 
 mod scenery_folder;
 mod spawn;
+mod terrain;
 
 pub(crate) fn run() -> Result<()> {
     let mut arguments = Arguments::parse();
