@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use esp_formats::{cabinet::Cabinet, cfg};
 use std::{
+    collections::HashMap,
     io::Read,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 pub struct Panel {
@@ -10,6 +12,13 @@ pub struct Panel {
     gauges: Option<PathBuf>,
     fonts: Option<PathBuf>,
     config: cfg::Config,
+    resources: Mutex<ResourceCache>,
+}
+
+#[derive(Default)]
+struct ResourceCache {
+    bytes: usize,
+    entries: HashMap<(PathBuf, Option<std::time::SystemTime>, u64, String), Vec<u8>>,
 }
 
 impl Panel {
@@ -44,6 +53,7 @@ impl Panel {
             gauges,
             fonts,
             config,
+            resources: Mutex::new(ResourceCache::default()),
         }))
     }
 
@@ -183,14 +193,53 @@ impl Panel {
                 return Ok(Some(bytes));
             }
             if let Some(path) = child(root, &format!("{module}.cab"))? {
+                let metadata = std::fs::metadata(&path)?;
+                let key = (
+                    path.clone(),
+                    metadata.modified().ok(),
+                    metadata.len(),
+                    archive_name.to_ascii_lowercase(),
+                );
+                if let Some(bytes) = self
+                    .resources
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("gauge resource cache lock was poisoned"))?
+                    .entries
+                    .get(&key)
+                {
+                    anyhow::ensure!(bytes.len() <= limit, "gauge resource exceeds size limit");
+                    return Ok(Some(bytes.clone()));
+                }
                 let mut cabinet = Cabinet::new(std::fs::File::open(&path)?)
                     .with_context(|| format!("opening {}", path.display()))?;
                 if cabinet.entry(&archive_name).is_some() {
-                    return Ok(Some(cabinet.read_file_bytes(&archive_name, limit)?));
+                    let bytes = cabinet.read_file_bytes(&archive_name, limit)?;
+                    self.cache_resource(key, &bytes)?;
+                    return Ok(Some(bytes));
                 }
             }
         }
         Ok(None)
+    }
+
+    fn cache_resource(
+        &self,
+        key: (PathBuf, Option<std::time::SystemTime>, u64, String),
+        bytes: &[u8],
+    ) -> Result<()> {
+        const MAX_RESOURCE: usize = 4 * 1024 * 1024;
+        const MAX_TOTAL: usize = 128 * 1024 * 1024;
+        if bytes.len() <= MAX_RESOURCE {
+            let mut cache = self
+                .resources
+                .lock()
+                .map_err(|_| anyhow::anyhow!("gauge resource cache lock was poisoned"))?;
+            if !cache.entries.contains_key(&key) && bytes.len() <= MAX_TOTAL - cache.bytes {
+                cache.bytes += bytes.len();
+                cache.entries.insert(key, bytes.to_vec());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -233,6 +282,40 @@ fn child(directory: &Path, name: &str) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caches_repeated_resources_without_bypassing_limits() {
+        use cabinet::{CabinetBuilder, WriteCompression};
+        use std::io::Cursor;
+        let root = tempfile::tempdir().unwrap();
+        let panel_dir = root.path().join("panel");
+        std::fs::create_dir_all(&panel_dir).unwrap();
+        std::fs::write(panel_dir.join("panel.cfg"), "[VCockpit01]\ntexture=$panel").unwrap();
+        let mut builder = CabinetBuilder::new(WriteCompression::MsZip);
+        builder.add_file("Needle.bmp", b"artwork").unwrap();
+        let mut archive = Cursor::new(Vec::new());
+        builder.write(&mut archive).unwrap();
+        std::fs::write(panel_dir.join("Example.cab"), archive.into_inner()).unwrap();
+        let panel = Panel::load(root.path(), None).unwrap().unwrap();
+        assert_eq!(
+            panel
+                .read_resource("example", "needle.bmp", 7)
+                .unwrap()
+                .unwrap(),
+            b"artwork"
+        );
+        assert_eq!(
+            panel
+                .read_resource("EXAMPLE", "NEEDLE.BMP", 7)
+                .unwrap()
+                .unwrap(),
+            b"artwork"
+        );
+        assert!(panel.read_resource("example", "needle.bmp", 6).is_err());
+        let cache = panel.resources.lock().unwrap();
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, 7);
+    }
+
     #[test]
     fn loads_nested_gauge_art_from_directories_and_cabinets() {
         use cabinet::{CabinetBuilder, WriteCompression};
