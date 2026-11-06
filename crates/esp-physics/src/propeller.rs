@@ -193,7 +193,7 @@ mod tests {
                 values.into_iter().flat_map(f64::to_le_bytes).collect(),
             ]
             .concat();
-            Grid::from_record(&air::Record {
+            crate::content_tables::grid(&air::Record {
                 id,
                 offset: 0,
                 data: &bytes,

@@ -151,7 +151,7 @@ impl Aerodynamics {
             Ok(result)
         };
         let curve = |id| -> Result<Curve> {
-            Curve::from_record(record(id)?).with_context(|| format!("AIR record {id:#x}"))
+            crate::content_tables::curve(record(id)?).with_context(|| format!("AIR record {id:#x}"))
         };
         let optional_curve = |id| -> Result<Option<Curve>> {
             if records.iter().any(|r| r.id == id) {
@@ -674,7 +674,7 @@ impl Aerodynamics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use esp_formats::air::table::Point;
+    use crate::lookup::Point;
 
     #[test]
     fn uses_complete_modern_aerodynamic_blocks_in_preference_to_legacy() {

@@ -1,6 +1,7 @@
 //! esp-physics owns reusable solvers for aerodynamics, ground, propulsion, atmosphere and time.
 pub mod aerodynamics;
 pub mod atmosphere;
+mod content_tables;
 pub mod flaps;
 pub mod flight;
 pub mod ground;

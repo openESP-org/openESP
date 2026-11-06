@@ -171,7 +171,7 @@ impl PistonCycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use esp_formats::air::table::Point;
+    use crate::lookup::Point;
 
     fn cycle() -> PistonCycle {
         let curve = |a, b| {

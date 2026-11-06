@@ -79,9 +79,10 @@ impl Turbines {
             Ok(record)
         };
         let grid = |id| {
-            Grid::from_record(record(id)?).with_context(|| format!("engine AIR record {id:#x}"))
+            crate::content_tables::grid(record(id)?)
+                .with_context(|| format!("engine AIR record {id:#x}"))
         };
-        let spool = Curve::from_record(record(0x1505)?)?;
+        let spool = crate::content_tables::curve(record(0x1505)?)?;
         ensure!(
             spool.0.windows(2).all(|p| p[0].output <= p[1].output),
             "non-monotonic turbine spool table"

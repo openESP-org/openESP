@@ -45,6 +45,8 @@ read aircraft content. Those constructors must move behind content adapters
 before the physics crate is fully content-agnostic.
 The propeller and piston-cycle content adapters live in `esp-sim::content`;
 they decode AIR and configuration data into parameters for `esp-physics`.
+Physics lookup curves and grids accept numerical values; the remaining AIR
+record conversions are isolated in the transitional `content_tables` module.
 
 The session owns its flight state. Physics and navigation consume `Motion`
 snapshots; rigid-body integration returns a new snapshot and the session

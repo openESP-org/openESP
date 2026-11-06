@@ -1,8 +1,10 @@
 use anyhow::{Result, ensure};
-use esp_formats::air::{
-    Record,
-    table::{Point, Table},
-};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub input: f64,
+    pub output: f64,
+}
 
 pub struct Curve(pub(crate) Vec<Point>);
 
@@ -29,13 +31,6 @@ impl Curve {
             "invalid AIR curve"
         );
         Ok(Self(points))
-    }
-
-    pub fn from_record(record: &Record<'_>) -> Result<Self> {
-        let Some(Table::Curve(table)) = record.table()? else {
-            anyhow::bail!("AIR record {:#x} is not a curve", record.id);
-        };
-        Self::new(table.points)
     }
 
     pub fn sample(&self, value: f64) -> f64 {
@@ -71,13 +66,6 @@ pub struct Grid {
 }
 
 impl Grid {
-    pub fn from_record(record: &Record<'_>) -> Result<Self> {
-        let Some(Table::Surface(table)) = record.table()? else {
-            anyhow::bail!("AIR record {:#x} is not a surface", record.id);
-        };
-        Self::from_values(table.rows as usize, table.columns as usize, &table.values)
-    }
-
     pub fn from_values(rows: usize, columns: usize, values: &[f64]) -> Result<Self> {
         ensure!(
             rows >= 3
@@ -132,20 +120,7 @@ mod tests {
         for (index, value) in [(0, f64::NAN), (4, f64::INFINITY), (2, 0.0), (6, 0.0)] {
             let old = values[index];
             values[index] = value;
-            let bytes = [
-                3u32.to_le_bytes().to_vec(),
-                3u32.to_le_bytes().to_vec(),
-                values.into_iter().flat_map(f64::to_le_bytes).collect(),
-            ]
-            .concat();
-            assert!(
-                Grid::from_record(&Record {
-                    id: 0x1503,
-                    offset: 0,
-                    data: &bytes
-                })
-                .is_err()
-            );
+            assert!(Grid::from_values(3, 3, &values).is_err());
             values[index] = old;
         }
     }
@@ -155,18 +130,7 @@ mod tests {
         let values = [
             0.9f64, 1.0, 4.0, 0.0, 10.0, 40.0, 10.0, 30.0, 60.0, 20.0, 50.0, 80.0,
         ];
-        let bytes = [
-            4u32.to_le_bytes().to_vec(),
-            3u32.to_le_bytes().to_vec(),
-            values.into_iter().flat_map(f64::to_le_bytes).collect(),
-        ]
-        .concat();
-        let grid = Grid::from_record(&Record {
-            id: 0x1503,
-            offset: 0,
-            data: &bytes,
-        })
-        .unwrap();
+        let grid = Grid::from_values(4, 3, &values).unwrap();
         assert_eq!(grid.corner, 0.9);
         assert_eq!(grid.sample(5.0, 2.5), 35.0);
         assert_eq!(grid.sample(-100.0, 100.0), 40.0);

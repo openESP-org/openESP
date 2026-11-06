@@ -1,6 +1,7 @@
+use crate::lookup::Point;
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
-use esp_formats::{air, air::table::Point, cfg};
+use esp_formats::{air, cfg};
 use glam::DVec3;
 use std::f64::consts::PI;
 
@@ -263,7 +264,7 @@ impl Pistons {
                 throttle.next().is_none(),
                 "duplicate piston AIR throttle profile"
             );
-            Curve::from_record(record)?
+            crate::content_tables::curve(record)?
         } else {
             // Published SDK defaults when a legacy AIR throttle table is absent.
             // docs.flightsimulator.com/html/Content_Configuration/SimObjects/Aircraft_SimO/engines_cfg.htm
