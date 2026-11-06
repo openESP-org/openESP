@@ -116,6 +116,67 @@ struct Derivative {
     angular_velocity: DVec3,
 }
 
+pub fn integrate(
+    initial: &State,
+    mass: &MassProperties,
+    dt: f64,
+    gravity: DVec3,
+    loads: impl Fn(&State) -> Result<Wrench>,
+) -> Result<State> {
+    ensure!(
+        dt.is_finite() && dt >= 0.0 && gravity.is_finite(),
+        "invalid flight timestep or gravity"
+    );
+    initial.validate()?;
+    if dt == 0.0 {
+        return Ok(*initial);
+    }
+    let derivative = |state: &State| -> Result<Derivative> {
+        let wrench = loads(state)?;
+        ensure!(
+            wrench.force.is_finite() && wrench.moment.is_finite(),
+            "invalid aircraft forces"
+        );
+        let omega = state.angular_velocity;
+        Ok(Derivative {
+            position: state.velocity,
+            velocity: state.orientation * wrench.force / mass.kilograms + gravity,
+            orientation: (state.orientation * DQuat::from_xyzw(omega.x, omega.y, omega.z, 0.0))
+                * 0.5,
+            angular_velocity: mass.inverse_inertia
+                * (wrench.moment - omega.cross(mass.inertia * omega)),
+        })
+    };
+    let at = |derivative: &Derivative, interval: f64| State {
+        position: initial.position + derivative.position * interval,
+        velocity: initial.velocity + derivative.velocity * interval,
+        orientation: (initial.orientation + derivative.orientation * interval).normalize(),
+        angular_velocity: initial.angular_velocity + derivative.angular_velocity * interval,
+    };
+    let a = derivative(initial)?;
+    let b = derivative(&at(&a, dt * 0.5))?;
+    let c = derivative(&at(&b, dt * 0.5))?;
+    let d = derivative(&at(&c, dt))?;
+    let next = State {
+        position: initial.position
+            + (a.position + 2.0 * b.position + 2.0 * c.position + d.position) * (dt / 6.0),
+        velocity: initial.velocity
+            + (a.velocity + 2.0 * b.velocity + 2.0 * c.velocity + d.velocity) * (dt / 6.0),
+        orientation: (initial.orientation
+            + (a.orientation + b.orientation * 2.0 + c.orientation * 2.0 + d.orientation)
+                * (dt / 6.0))
+            .normalize(),
+        angular_velocity: initial.angular_velocity
+            + (a.angular_velocity
+                + 2.0 * b.angular_velocity
+                + 2.0 * c.angular_velocity
+                + d.angular_velocity)
+                * (dt / 6.0),
+    };
+    next.validate()?;
+    Ok(next)
+}
+
 impl State {
     pub fn advance(
         &mut self,
@@ -124,58 +185,7 @@ impl State {
         gravity: DVec3,
         loads: impl Fn(&Self) -> Result<Wrench>,
     ) -> Result<()> {
-        ensure!(
-            dt.is_finite() && dt >= 0.0 && gravity.is_finite(),
-            "invalid flight timestep or gravity"
-        );
-        self.validate()?;
-        if dt == 0.0 {
-            return Ok(());
-        }
-        let derivative = |state: &Self| -> Result<Derivative> {
-            let wrench = loads(state)?;
-            ensure!(
-                wrench.force.is_finite() && wrench.moment.is_finite(),
-                "invalid aircraft forces"
-            );
-            let omega = state.angular_velocity;
-            Ok(Derivative {
-                position: state.velocity,
-                velocity: state.orientation * wrench.force / mass.kilograms + gravity,
-                orientation: (state.orientation * DQuat::from_xyzw(omega.x, omega.y, omega.z, 0.0))
-                    * 0.5,
-                angular_velocity: mass.inverse_inertia
-                    * (wrench.moment - omega.cross(mass.inertia * omega)),
-            })
-        };
-        let at = |derivative: &Derivative, interval: f64| Self {
-            position: self.position + derivative.position * interval,
-            velocity: self.velocity + derivative.velocity * interval,
-            orientation: (self.orientation + derivative.orientation * interval).normalize(),
-            angular_velocity: self.angular_velocity + derivative.angular_velocity * interval,
-        };
-        let a = derivative(self)?;
-        let b = derivative(&at(&a, dt * 0.5))?;
-        let c = derivative(&at(&b, dt * 0.5))?;
-        let d = derivative(&at(&c, dt))?;
-        let next = Self {
-            position: self.position
-                + (a.position + 2.0 * b.position + 2.0 * c.position + d.position) * (dt / 6.0),
-            velocity: self.velocity
-                + (a.velocity + 2.0 * b.velocity + 2.0 * c.velocity + d.velocity) * (dt / 6.0),
-            orientation: (self.orientation
-                + (a.orientation + b.orientation * 2.0 + c.orientation * 2.0 + d.orientation)
-                    * (dt / 6.0))
-                .normalize(),
-            angular_velocity: self.angular_velocity
-                + (a.angular_velocity
-                    + 2.0 * b.angular_velocity
-                    + 2.0 * c.angular_velocity
-                    + d.angular_velocity)
-                    * (dt / 6.0),
-        };
-        next.validate()?;
-        *self = next;
+        *self = integrate(self, mass, dt, gravity, loads)?;
         Ok(())
     }
 }
@@ -210,6 +220,24 @@ mod tests {
             DMat3::from_diagonal(DVec3::new(800.0, 1200.0, 1600.0)),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn integration_returns_next_snapshot_without_mutating_input() {
+        let initial = State::default();
+        let next = integrate(&initial, &mass(), 1.0, DVec3::Z * 10.0, |_| {
+            Ok(Wrench::default())
+        })
+        .unwrap();
+        assert_eq!(initial, State::default());
+        assert!(next.position.abs_diff_eq(DVec3::Z * 5.0, 1e-12));
+        assert!(
+            integrate(&initial, &mass(), -1.0, DVec3::ZERO, |_| Ok(
+                Wrench::default()
+            ))
+            .is_err()
+        );
+        assert_eq!(initial, State::default());
     }
 
     #[test]

@@ -45,6 +45,9 @@ in `esp-physics`, and several solver constructors still read aircraft content.
 Those responsibilities must move behind session and content adapters before
 the physics crate is fully session-free and content-agnostic.
 
+Rigid-body integration is exposed as a pure physics calculation; the session
+owns the decision to advance and commits the returned state only on success.
+
 Crates that do not exist yet are listed in their scheduled order below. When a
 domain earns its promotion, it moves out of its current module with no
 functional change, in its own commit.

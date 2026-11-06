@@ -405,7 +405,8 @@ impl Flight {
         let steps = (dt / max_step).ceil().max(1.0) as u32;
         for _ in 0..steps {
             let before = next;
-            next.advance(
+            next = esp_physics::flight::integrate(
+                &next,
                 &self.loading.mass,
                 dt / f64::from(steps),
                 DVec3::Z * 9.80665,
