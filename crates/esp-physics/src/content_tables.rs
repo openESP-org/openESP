@@ -2,7 +2,9 @@
 use anyhow::Result;
 use esp_formats::air::{Record, table::Table};
 
-use crate::lookup::{Curve, Grid};
+use crate::lookup::Curve;
+#[cfg(test)]
+use crate::lookup::Grid;
 
 pub(crate) fn curve(record: &Record<'_>) -> Result<Curve> {
     let Some(Table::Curve(table)) = record.table()? else {
@@ -17,6 +19,7 @@ pub(crate) fn curve(record: &Record<'_>) -> Result<Curve> {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn grid(record: &Record<'_>) -> Result<Grid> {
     let Some(Table::Surface(table)) = record.table()? else {
         anyhow::bail!("AIR record {:#x} is not a surface", record.id);

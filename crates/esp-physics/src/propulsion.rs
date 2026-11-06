@@ -52,6 +52,7 @@ impl Propulsion {
         data: &FlightData,
         propeller: impl FnOnce() -> Result<crate::propeller::Propeller>,
         cycle: impl FnOnce() -> Result<crate::piston::PistonCycle>,
+        turbines: impl FnOnce() -> Result<crate::turbine::Turbines>,
     ) -> Result<Self> {
         match data
             .configuration
@@ -62,7 +63,7 @@ impl Propulsion {
                 commands: Vec::new(),
             }),
             Some(1.0) => Ok(Self::Turbine {
-                model: Box::new(turbine::Turbines::from_data(data)?),
+                model: Box::new(turbines()?),
                 commands: Vec::new(),
             }),
             kind => bail!("unsupported running engine type: {kind:?}"),

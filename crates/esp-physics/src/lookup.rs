@@ -21,6 +21,16 @@ impl Curve {
     pub fn outputs_nonnegative(&self) -> bool {
         self.0.iter().all(|point| point.output >= 0.0)
     }
+
+    pub fn outputs_nondecreasing(&self) -> bool {
+        self.0
+            .windows(2)
+            .all(|points| points[0].output <= points[1].output)
+    }
+
+    pub fn first_input(&self) -> f64 {
+        self.0[0].input
+    }
     pub fn new(points: Vec<Point>) -> Result<Self> {
         ensure!(
             points.len() >= 2

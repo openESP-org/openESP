@@ -1,6 +1,4 @@
 use anyhow::{Context, Result, ensure};
-use esp_assets::flight::FlightData;
-use esp_formats::{air, cfg};
 use glam::DVec3;
 
 use crate::{
@@ -12,6 +10,29 @@ use crate::{
 const POUND: f64 = 0.45359237;
 const POUND_FORCE: f64 = 4.4482216152605;
 
+pub struct TurbineEngine {
+    pub index: u32,
+    pub position: DVec3,
+    pub direction: DVec3,
+}
+
+pub struct TurbineParameters {
+    pub n1: Grid,
+    pub low_n2: Grid,
+    pub high_n2: Grid,
+    pub spool: Curve,
+    pub thrust: Grid,
+    pub airflow: Grid,
+    pub static_thrust: f64,
+    pub inlet_area: f64,
+    pub thrust_scalar: f64,
+    pub fuel_scalar: f64,
+    pub consumption: f64,
+    pub gain: f64,
+    pub throttle_lower_limit: f64,
+    pub reverse_scalar: f64,
+    pub engines: Vec<TurbineEngine>,
+}
 pub struct Turbines {
     n1: Grid,
     low_n2: Grid,
@@ -60,87 +81,56 @@ pub struct Output {
 }
 
 impl Turbines {
-    pub fn from_data(data: &FlightData) -> Result<Self> {
-        let config = &data.configuration;
+    pub fn new(parameters: TurbineParameters) -> Result<Self> {
+        let TurbineParameters {
+            n1,
+            low_n2,
+            high_n2,
+            spool,
+            thrust,
+            airflow,
+            static_thrust,
+            inlet_area,
+            thrust_scalar,
+            fuel_scalar,
+            consumption,
+            gain,
+            throttle_lower_limit,
+            reverse_scalar,
+            engines,
+        } = parameters;
         ensure!(
-            config.number("GeneralEngineData", "engine_type")? == Some(1.0),
-            "only turbojet/turbofan propulsion is implemented yet"
-        );
-        let records = air::parse(&data.air)?;
-        let record = |id| -> Result<&air::Record<'_>> {
-            let mut found = records.iter().filter(|r| r.id == id);
-            let record = found
-                .next()
-                .with_context(|| format!("missing engine AIR record {id:#x}"))?;
-            ensure!(
-                found.next().is_none(),
-                "duplicate engine AIR record {id:#x}"
-            );
-            Ok(record)
-        };
-        let grid = |id| {
-            crate::content_tables::grid(record(id)?)
-                .with_context(|| format!("engine AIR record {id:#x}"))
-        };
-        let spool = crate::content_tables::curve(record(0x1505)?)?;
-        ensure!(
-            spool.0.windows(2).all(|p| p[0].output <= p[1].output),
+            spool.outputs_nondecreasing(),
             "non-monotonic turbine spool table"
         );
-        let number = |section, key| -> Result<f64> {
-            config
-                .number(section, key)?
-                .with_context(|| format!("missing [{section}] {key}"))
-        };
-        let datum = cfg::aircraft::ReferencePoints::from_config(config)?
-            .datum_feet
-            .context("missing engine reference datum")?;
-        let engines = cfg::engine::engines(config)?
-            .into_iter()
-            .map(|definition| -> Result<Engine> {
-                let index = definition
-                    .index
-                    .checked_add(1)
-                    .context("engine index is too large")?;
-                let [x, y, z] = definition.position_feet;
-                let pitch = definition.pitch_degrees.to_radians();
-                let heading = definition.heading_degrees.to_radians();
-                Ok(Engine {
-                    index,
-                    position: DVec3::new(x + datum[0], y + datum[1], -z - datum[2]) * 0.3048,
-                    direction: DVec3::new(
-                        pitch.cos() * heading.cos(),
-                        pitch.cos() * heading.sin(),
-                        pitch.sin(),
-                    ),
-                    coordinate: spool.0[0].input,
-                    lit: false,
-                    reversing: false,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
         ensure!(!engines.is_empty(), "aircraft has no configured engines");
+        let coordinate = spool.first_input();
+        let engines = engines
+            .into_iter()
+            .map(|engine| Engine {
+                index: engine.index,
+                position: engine.position,
+                direction: engine.direction,
+                coordinate,
+                lit: false,
+                reversing: false,
+            })
+            .collect();
         let model = Self {
-            n1: grid(0x1502)?,
-            low_n2: grid(0x1503)?,
-            high_n2: grid(0x1504)?,
+            n1,
+            low_n2,
+            high_n2,
             spool,
-            thrust: grid(0x1506)?,
-            airflow: grid(0x1507)?,
-            static_thrust: number("TurbineEngineData", "static_thrust")? * POUND_FORCE,
-            inlet_area: number("TurbineEngineData", "inlet_area")?,
-            thrust_scalar: config.number("jet_engine", "thrust_scalar")?.unwrap_or(1.0),
-            fuel_scalar: config
-                .number("GeneralEngineData", "fuel_flow_scalar")?
-                .unwrap_or(1.0),
-            consumption: number("TurbineEngineData", "ThrustSpecificFuelConsumption")?,
-            gain: number("TurbineEngineData", "fuel_flow_gain")?,
-            throttle_lower_limit: config
-                .number("GeneralEngineData", "min_throttle_limit")?
-                .unwrap_or(0.0),
-            reverse_scalar: config
-                .number("TurbineEngineData", "reverser_available")?
-                .unwrap_or(0.0),
+            thrust,
+            airflow,
+            static_thrust,
+            inlet_area,
+            thrust_scalar,
+            fuel_scalar,
+            consumption,
+            gain,
+            throttle_lower_limit,
+            reverse_scalar,
             engines,
         };
         ensure!(

@@ -41,7 +41,7 @@ fn original_turbine_tables_control_thrust_spooling_and_shutdown() {
         {
             continue;
         }
-        let mut model = Turbines::from_data(&data).unwrap();
+        let mut model = esp_sim::content::turbines(&data).unwrap();
         model.start_running(&sea, 0.0).unwrap();
         let idle = model.output(0, &sea, 0.0).unwrap();
         assert!(idle.n2 > 0.0 && idle.n1 > 0.0 && idle.gross_thrust > 0.0);
@@ -144,7 +144,7 @@ fn modifying_original_thrust_table_changes_thrust_without_changing_speed_map() {
         {
             continue;
         }
-        let mut original = Turbines::from_data(&data).unwrap();
+        let mut original = esp_sim::content::turbines(&data).unwrap();
         full(&mut original, &sea, 100.0);
         let original = original.output(0, &sea, 100.0).unwrap();
         let offset = esp_formats::air::parse(&data.air)
@@ -164,7 +164,7 @@ fn modifying_original_thrust_table_changes_thrust_without_changing_speed_map() {
                 data.air[offset..offset + 8].copy_from_slice(&(value * 0.5).to_le_bytes());
             }
         }
-        let mut changed = Turbines::from_data(&data).unwrap();
+        let mut changed = esp_sim::content::turbines(&data).unwrap();
         full(&mut changed, &sea, 100.0);
         let changed = changed.output(0, &sea, 100.0).unwrap();
         assert_eq!(changed.n1, original.n1);

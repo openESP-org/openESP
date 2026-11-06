@@ -43,7 +43,7 @@ These rules follow from this arrangement and are not negotiable:
 The partition remains in progress: several physics solver constructors still
 read aircraft content. Those constructors must move behind content adapters
 before the physics crate is fully content-agnostic.
-The propeller and piston-cycle content adapters live in `esp-sim::content`;
+The propeller, piston-cycle and turbine content adapters live in `esp-sim::content`;
 they decode AIR and configuration data into parameters for `esp-physics`.
 Physics lookup curves and grids accept numerical values; the remaining AIR
 record conversions are isolated in the transitional `content_tables` module.
