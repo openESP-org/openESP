@@ -846,6 +846,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "esp-assets",
+ "esp-formats",
  "glam 0.30.10",
  "image",
  "wgpu",

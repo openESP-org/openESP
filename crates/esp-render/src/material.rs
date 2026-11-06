@@ -1,5 +1,46 @@
 use anyhow::{Result, bail};
 use esp_assets::texture;
+use std::{collections::HashMap, path::Path};
+
+pub(super) fn linear_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    aircraft: &esp_assets::Aircraft,
+    root: Option<&Path>,
+    compressed: bool,
+    cache: &mut HashMap<String, (wgpu::TextureView, bool, bool)>,
+    name: Option<&str>,
+) -> Result<Option<(wgpu::TextureView, bool, bool)>> {
+    let Some(name) = name else { return Ok(None) };
+    let key = format!(
+        "linear|{}|{name}",
+        root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+    );
+    if let Some((view, flip, alpha)) = cache.get(&key) {
+        return Ok(Some((view.clone(), *flip, *alpha)));
+    }
+    let resolved = if let Some(root) = root {
+        esp_assets::resolve_path(root, name).map(Some)
+    } else {
+        aircraft.texture_path(name)
+    };
+    match resolved {
+        Ok(Some(path)) => {
+            let image = texture::Texture::load(&path, compressed)?;
+            let flip = image.flip_v;
+            let alpha = image.normal_x_in_alpha;
+            let view = super::upload_texture_with_color_space(device, queue, &image, false)?
+                .create_view(&Default::default());
+            cache.insert(key, (view.clone(), flip, alpha));
+            Ok(Some((view, flip, alpha)))
+        }
+        Ok(None) => Ok(None),
+        Err(error) => {
+            eprintln!("material data texture: {error}");
+            Ok(None)
+        }
+    }
+}
 
 pub(super) fn texture_format(format: texture::Format, srgb: bool) -> wgpu::TextureFormat {
     match (format, srgb) {

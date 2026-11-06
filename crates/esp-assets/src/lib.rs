@@ -52,6 +52,7 @@ pub struct Material {
     pub source: mdl::material::Material,
     pub diffuse_texture: Option<String>,
     pub metallic_texture: Option<String>,
+    pub normal_texture: Option<String>,
     pub pbr: Option<mdl::material::PbrMaterial>,
 }
 
@@ -62,6 +63,7 @@ pub struct Lod {
 
 pub struct Mesh {
     pub vertices: Vec<mdl::geometry::Vertex>,
+    pub tangents: Option<Vec<mdl::geometry::Tangent>>,
     pub indices: Vec<u32>,
     pub node: usize,
     pub material: usize,
@@ -361,6 +363,7 @@ impl Model {
                         .map(|name| std::str::from_utf8(name).map(str::to_owned))
                         .transpose()?,
                     metallic_texture: None,
+                    normal_texture: None,
                     pbr: None,
                 })
             })
@@ -398,6 +401,7 @@ impl Model {
                 }
                 meshes.push(Mesh {
                     vertices: geometry.vertices.to_vec(),
+                    tangents: geometry.tangents.map(<[_]>::to_vec),
                     indices: geometry.indices.to_vec(),
                     node: part.scene_node as usize,
                     material: part.material as usize,

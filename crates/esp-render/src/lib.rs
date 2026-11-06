@@ -9,6 +9,7 @@ use winit::window::Window;
 
 pub mod camera;
 mod material;
+mod tangent;
 pub use camera::Camera;
 use material::{PipelineKey, texture_format};
 
@@ -18,6 +19,7 @@ struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+    tangent: [f32; 4],
 }
 
 #[repr(C)]
@@ -28,6 +30,7 @@ struct DrawUniform {
     diffuse: [f32; 4],
     settings: [f32; 4],
     pbr: [f32; 4],
+    normal_settings: [f32; 4],
 }
 
 struct Draw {
@@ -54,6 +57,7 @@ struct DrawData<'a> {
     node: Option<usize>,
     pipeline: usize,
     metallic_map: Option<&'a wgpu::TextureView>,
+    normal_map: Option<&'a wgpu::TextureView>,
 }
 
 pub struct Renderer {
@@ -135,6 +139,7 @@ fn apron_mesh(aprons: &[Apron]) -> (Vec<Vertex>, Vec<u32>) {
             position: [point.x as f32, 0.01, point.z as f32],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [0.0; 4],
         }));
         for triangle in apron.indices.as_chunks::<3>().0 {
             let [a, b, c] = triangle.map(|index| apron.vertices[usize::from(index)]);
@@ -174,6 +179,7 @@ fn taxiway_mesh(taxiways: &[Taxiway], markings: bool) -> (Vec<Vertex>, Vec<u32>)
                 position: [point.x, height, point.z],
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 0.0],
+                tangent: [0.0; 4],
             }),
         );
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -191,6 +197,7 @@ fn runway_mesh(markings: bool, length: f32, width: f32) -> (Vec<Vertex>, Vec<u32
                 position: [x, height, z],
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 0.0],
+                tangent: [0.0; 4],
             }),
         );
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -349,6 +356,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -367,7 +384,7 @@ impl Renderer {
                 module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout { array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2] })],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4] })],
             },
             primitive: wgpu::PrimitiveState { front_face: wgpu::FrontFace::Cw, cull_mode: if key.double_sided {None}else{Some(wgpu::Face::Back)}, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -412,7 +429,7 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let mut textures: HashMap<String, (wgpu::TextureView, bool)> = HashMap::new();
+        let mut textures: HashMap<String, (wgpu::TextureView, bool, bool)> = HashMap::new();
         let mut panels = HashMap::new();
         let mut upload = |model: &Model,
                           texture_root: Option<&std::path::Path>|
@@ -449,7 +466,7 @@ impl Renderer {
                         "{}|{name}",
                         texture_root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
                     );
-                    if let Some((view, flip)) = textures.get(&cache_key) {
+                    if let Some((view, flip, _)) = textures.get(&cache_key) {
                         flip_v = *flip;
                         view.clone()
                     } else {
@@ -492,7 +509,7 @@ impl Renderer {
                         if is_panel {
                             panels.insert(name.to_ascii_uppercase(), uploaded);
                         }
-                        textures.insert(cache_key, (view.clone(), flip_v));
+                        textures.insert(cache_key, (view.clone(), flip_v, false));
                         view
                     }
                 } else {
@@ -503,49 +520,34 @@ impl Renderer {
                     )?
                     .create_view(&Default::default())
                 };
-                let mut metallic_flip = false;
-                let metallic_view = if let Some(name) = &material.metallic_texture {
-                    let cache_key = format!(
-                        "linear|{}|{name}",
-                        texture_root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
-                    );
-                    if let Some((view, flip)) = textures.get(&cache_key) {
-                        metallic_flip = *flip;
-                        Some(view.clone())
-                    } else {
-                        let resolved = if let Some(root) = texture_root {
-                            esp_assets::resolve_path(root, name).map(Some)
-                        } else {
-                            aircraft.texture_path(name)
-                        };
-                        match resolved {
-                            Ok(Some(path)) => {
-                                let image = texture::Texture::load(&path, compressed)?;
-                                metallic_flip = image.flip_v;
-                                let view = upload_texture_with_color_space(
-                                    &device, &queue, &image, false,
-                                )?
-                                .create_view(&Default::default());
-                                textures.insert(cache_key, (view.clone(), metallic_flip));
-                                Some(view)
-                            }
-                            Ok(None) => None,
-                            Err(error) => {
-                                eprintln!("metallic texture: {error}");
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
+                let metallic = material::linear_texture(
+                    &device,
+                    &queue,
+                    aircraft,
+                    texture_root,
+                    compressed,
+                    &mut textures,
+                    material.metallic_texture.as_deref(),
+                )?;
+                let normal_map = material::linear_texture(
+                    &device,
+                    &queue,
+                    aircraft,
+                    texture_root,
+                    compressed,
+                    &mut textures,
+                    material.normal_texture.as_deref(),
+                )?;
+                let frames = normal_map.as_ref().map(|_| tangent::frames(mesh));
                 let vertices: Vec<_> = mesh
                     .vertices
                     .iter()
-                    .map(|v| Vertex {
+                    .enumerate()
+                    .map(|(i, v)| Vertex {
                         position: v.position,
                         normal: v.normal,
                         uv: v.uv,
+                        tangent: frames.as_ref().map_or([0.0; 4], |values| values[i]),
                     })
                     .collect();
                 let uniform = DrawUniform {
@@ -575,13 +577,24 @@ impl Renderer {
                             pbr.metallic.clamp(0.0, 1.0),
                             1.0 - pbr.smoothness.clamp(0.0, 1.0),
                             1.0,
-                            if metallic_view.is_some() {
-                                if metallic_flip == flip_v { 1.0 } else { 2.0 }
+                            if let Some((_, metallic_flip, _)) = &metallic {
+                                if *metallic_flip == flip_v { 1.0 } else { 2.0 }
                             } else {
                                 0.0
                             },
                         ]
                     }),
+                    normal_settings: normal_map.as_ref().map_or(
+                        [0.0; 4],
+                        |(_, normal_flip, alpha)| {
+                            [
+                                1.0,
+                                if *normal_flip == flip_v { 0.0 } else { 1.0 },
+                                if *alpha { 1.0 } else { 0.0 },
+                                0.0,
+                            ]
+                        },
+                    ),
                 };
                 draws.push(make_draw(
                     &device,
@@ -597,7 +610,8 @@ impl Renderer {
                             || material.source.destination_blend != 1,
                         node: Some(mesh.node),
                         pipeline: pipeline_index,
-                        metallic_map: metallic_view.as_ref(),
+                        metallic_map: metallic.as_ref().map(|(view, _, _)| view),
+                        normal_map: normal_map.as_ref().map(|(view, _, _)| view),
                     },
                 ));
             }
@@ -651,6 +665,7 @@ impl Renderer {
                     position: [x as f32, 0.0, z as f32],
                     normal: [0.0, 1.0, 0.0],
                     uv: [x as f32, z as f32],
+                    tangent: [0.0; 4],
                 });
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -706,11 +721,13 @@ impl Renderer {
                     diffuse: [0.32, 0.32, 0.32, 1.0],
                     settings: [0.0, 1.0, 0.0, 0.0],
                     pbr: [0.0; 4],
+                    normal_settings: [0.0; 4],
                 },
                 blended: false,
                 node: None,
                 pipeline: 0,
                 metallic_map: None,
+                normal_map: None,
             },
         );
         let photo_key = PipelineKey {
@@ -749,6 +766,7 @@ impl Renderer {
                 position: [photo.corners[i].x as f32, 0.001, photo.corners[i].z as f32],
                 normal: [0.0, 1.0, 0.0],
                 uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][i],
+                tangent: [0.0; 4],
             });
             let image =
                 texture::Texture::rgba(photo.width, photo.height, photo.rgba.clone(), false);
@@ -768,11 +786,13 @@ impl Renderer {
                         diffuse: [1.0; 4],
                         settings: [0.0, 2.0, 0.0, 0.0],
                         pbr: [0.0; 4],
+                        normal_settings: [0.0; 4],
                     },
                     blended: true,
                     node: None,
                     pipeline: photo_pipeline,
                     metallic_map: None,
+                    normal_map: None,
                 },
             ));
         }
@@ -805,11 +825,13 @@ impl Renderer {
                         diffuse: [0.23, 0.23, 0.23, 1.0],
                         settings: [0.0, 2.0, 0.0, 0.0],
                         pbr: [0.0; 4],
+                        normal_settings: [0.0; 4],
                     },
                     blended: false,
                     node: None,
                     pipeline: 0,
                     metallic_map: None,
+                    normal_map: None,
                 },
             ));
         }
@@ -843,11 +865,13 @@ impl Renderer {
                         diffuse: color,
                         settings: [0.0, 2.0, 0.0, 0.0],
                         pbr: [0.0; 4],
+                        normal_settings: [0.0; 4],
                     },
                     blended: false,
                     node: None,
                     pipeline: 0,
                     metallic_map: None,
+                    normal_map: None,
                 },
             ));
         }
@@ -887,11 +911,13 @@ impl Renderer {
                             diffuse: color,
                             settings: [0.0, 2.0, 0.0, 0.0],
                             pbr: [0.0; 4],
+                            normal_settings: [0.0; 4],
                         },
                         blended: false,
                         node: None,
                         pipeline: 0,
                         metallic_map: None,
+                        normal_map: None,
                     },
                 ));
             }
@@ -1324,6 +1350,7 @@ fn make_draw(
         node,
         pipeline,
         metallic_map,
+        normal_map,
     } = data;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("draw"),
@@ -1349,6 +1376,10 @@ fn make_draw(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::TextureView(metallic_map.unwrap_or(texture)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(normal_map.unwrap_or(texture)),
             },
         ],
     });

@@ -27,6 +27,7 @@ pub fn load(pbr: &PbrMaterial, textures: &[&[u8]]) -> Result<Material> {
         };
     let diffuse_texture = resolve_texture(pbr.albedo_texture, "albedo")?;
     let metallic_texture = resolve_texture(pbr.metallic_texture, "metallic")?;
+    let normal_texture = resolve_texture(pbr.normal_texture, "normal")?;
     let (source_blend, destination_blend, alpha_flag) = match pbr.render_mode {
         0 => (2, 1, false),
         1 => (2, 1, true),
@@ -65,6 +66,7 @@ pub fn load(pbr: &PbrMaterial, textures: &[&[u8]]) -> Result<Material> {
         source,
         diffuse_texture,
         metallic_texture,
+        normal_texture,
         pbr: Some(pbr.clone()),
     })
 }
@@ -85,15 +87,17 @@ mod tests {
             (10, 0.4f32.to_bits()),
             (11, 0),
             (12, 1),
+            (13, 2),
         ] {
             bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         let pbr = esp_formats::mdl::material::pbr_materials(&bytes)
             .unwrap()
             .remove(0);
-        let material = load(&pbr, &[b"albedo.dds", b"metallic.dds"]).unwrap();
+        let material = load(&pbr, &[b"albedo.dds", b"metallic.dds", b"normal.dds"]).unwrap();
         assert_eq!(material.diffuse_texture.as_deref(), Some("albedo.dds"));
         assert_eq!(material.metallic_texture.as_deref(), Some("metallic.dds"));
+        assert_eq!(material.normal_texture.as_deref(), Some("normal.dds"));
         assert_eq!(material.source.flags & 0x00400000, 0x00400000);
         assert_eq!(material.source.alpha_test_function, 5);
         assert!((material.source.alpha_test_threshold / 255.0 - 0.4).abs() < 1e-6);

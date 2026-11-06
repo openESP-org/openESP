@@ -21,6 +21,8 @@ pub struct Texture {
     pub format: Format,
     pub mips: Vec<Mip>,
     pub flip_v: bool,
+    /// DXT5 normal maps in the FSX/Prepar3D convention store X in alpha.
+    pub normal_x_in_alpha: bool,
 }
 
 pub fn gauge_bitmap(bytes: &[u8], alpha: bool, transparent: bool) -> Result<image::RgbaImage> {
@@ -75,6 +77,7 @@ impl Texture {
                     format,
                     mips,
                     flip_v: false,
+                    normal_x_in_alpha: format == Format::Bc3,
                 });
             }
             let mut decoder = dds_codec::Decoder::new(std::io::Cursor::new(bytes))?;
@@ -91,7 +94,9 @@ impl Texture {
                 dds_codec::ImageViewMut::new(&mut data, size, dds_codec::ColorFormat::RGBA_U8)
                     .context("invalid DDS output dimensions")?;
             decoder.read_surface(view)?;
-            return Ok(Self::rgba(size.width, size.height, data, false));
+            let mut image = Self::rgba(size.width, size.height, data, false);
+            image.normal_x_in_alpha = format == Some(Format::Bc3);
+            return Ok(image);
         }
         let bitmap = bmp::Bitmap::parse(bytes)?;
         if let Some(surface) = bitmap.compressed_surface()? {
@@ -112,6 +117,7 @@ impl Texture {
                     data: surface.data.to_vec(),
                 }],
                 flip_v: true,
+                normal_x_in_alpha: format == Format::Bc3,
             });
         }
         let image = bitmap.decode(image::Limits::default())?.into_rgba8();
@@ -132,6 +138,7 @@ impl Texture {
                 data,
             }],
             flip_v,
+            normal_x_in_alpha: false,
         }
     }
 }
@@ -213,8 +220,10 @@ mod tests {
         let bytes = bytes(&dds);
         let compressed = Texture::from_bytes(&bytes, true).unwrap();
         assert_eq!(compressed.format, Format::Bc1);
+        assert!(!compressed.normal_x_in_alpha);
         assert_eq!(compressed.mips[0].data, dds.data);
         let decoded = Texture::from_bytes(&bytes, false).unwrap();
+        assert!(!decoded.normal_x_in_alpha);
         assert!(
             decoded.mips[0]
                 .data
@@ -222,6 +231,17 @@ mod tests {
                 .0
                 .iter()
                 .all(|p| p == &[255, 0, 0, 255])
+        );
+    }
+
+    #[test]
+    fn retains_dxt5_normal_packing_after_cpu_decode() {
+        let bytes = bytes(&dds(D3DFormat::DXT5, 4, 4));
+        assert!(Texture::from_bytes(&bytes, true).unwrap().normal_x_in_alpha);
+        assert!(
+            Texture::from_bytes(&bytes, false)
+                .unwrap()
+                .normal_x_in_alpha
         );
     }
 }

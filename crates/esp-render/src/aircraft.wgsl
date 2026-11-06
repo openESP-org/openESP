@@ -5,23 +5,29 @@ struct Draw {
     diffuse: vec4<f32>,
     settings: vec4<f32>,
     pbr: vec4<f32>,
+    normal_settings: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(1) @binding(1) var diffuse_texture: texture_2d<f32>;
 @group(1) @binding(2) var texture_sampler: sampler;
 @group(1) @binding(3) var metallic_texture: texture_2d<f32>;
+@group(1) @binding(4) var normal_texture: texture_2d<f32>;
 struct Output {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) camera_relative_position: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
 }
-@vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> Output {
+@vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) tangent: vec4<f32>) -> Output {
     var output: Output;
     output.position = camera.view_projection * draw.model * vec4(position, 1.0);
     output.camera_relative_position = (draw.model * vec4(position, 1.0)).xyz;
     output.normal = (draw.normal * vec4(normal, 0.0)).xyz;
+    let model3 = mat3x3(draw.model[0].xyz, draw.model[1].xyz, draw.model[2].xyz);
+    let orientation = select(-1.0, 1.0, determinant(model3) >= 0.0);
+    output.tangent = vec4(model3 * tangent.xyz, tangent.w * orientation);
     output.uv = vec2(uv.x, select(uv.y, 1.0-uv.y, draw.settings.x > 0.0));
     return output;
 }
@@ -31,6 +37,11 @@ struct Output {
     if draw.pbr.w > 0.5 {
         let metal_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.pbr.w > 1.5));
         metal_sample = textureSample(metallic_texture, texture_sampler, metal_uv);
+    }
+    var normal_sample = vec4(0.5, 0.5, 1.0, 0.5);
+    if draw.normal_settings.x > 0.5 {
+        let normal_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.normal_settings.y > 0.5));
+        normal_sample = textureSample(normal_texture, texture_sampler, normal_uv);
     }
     let alpha = colour.a;
     let threshold = draw.settings.z;
@@ -55,7 +66,14 @@ struct Output {
         return colour;
     }
     if draw.pbr.z > 0.5 {
-        let n = normalize(input.normal);
+        var n = normalize(input.normal);
+        if draw.normal_settings.x > 0.5 {
+            let t = normalize(input.tangent.xyz - n * dot(n, input.tangent.xyz));
+            let b = cross(n, t) * input.tangent.w;
+            let xy = vec2(select(normal_sample.r, normal_sample.a, draw.normal_settings.z > 0.5), normal_sample.g) * 2.0 - vec2(1.0);
+            let z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
+            n = normalize(t * xy.x + b * xy.y + n * z);
+        }
         let l = normalize(vec3(-0.4, 0.8, 0.6));
         let v = normalize(-input.camera_relative_position);
         let h = normalize(l + v);

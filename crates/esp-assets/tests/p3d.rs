@@ -82,4 +82,11 @@ fn loads_mixed_legacy_and_pbr_aircraft_materials() {
             .iter()
             .any(|material| material.metallic_texture.is_some())
     );
+    assert!(model.lods.iter().flat_map(|lod| &lod.meshes).any(|mesh| {
+        model.materials[mesh.material].normal_texture.is_some()
+            && mesh
+                .tangents
+                .as_ref()
+                .is_some_and(|basis| basis.len() == mesh.vertices.len())
+    }));
 }

@@ -133,6 +133,7 @@ mod tests {
     fn model() -> Model {
         use esp_assets::{Lod, Mesh, Node};
         let mesh = |node, mouse_rectangle| Mesh {
+            tangents: None,
             vertices: [
                 ([-1.0, -1.0, 0.0], [0.0, 0.0]),
                 ([1.0, -1.0, 0.0], [1.0, 0.0]),
@@ -168,6 +169,7 @@ mod tests {
                     .remove(0),
                 diffuse_texture: None,
                 metallic_texture: None,
+                normal_texture: None,
                 pbr: None,
             }],
             lods: vec![Lod {
