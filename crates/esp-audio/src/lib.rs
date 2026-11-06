@@ -1,4 +1,4 @@
-//! Aircraft sound mixing, independent of the simulation and rendering layers.
+//! esp-audio owns audio device output and sound mixing.
 pub mod engine;
 use anyhow::{Context, Result, ensure};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

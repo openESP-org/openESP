@@ -1,3 +1,4 @@
+//! esp-script owns the gauge and panel script interpreter.
 use winnow::{
     ModalResult, Parser,
     ascii::multispace0,

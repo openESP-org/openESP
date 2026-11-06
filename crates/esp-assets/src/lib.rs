@@ -1,3 +1,4 @@
+//! esp-assets owns aircraft, gauge and model loading.
 use anyhow::{Context, Result, bail};
 use esp_formats::{cfg, mdl};
 use glam::{Mat4, Vec3};

@@ -1,3 +1,4 @@
+//! esp-render owns the wgpu renderer.
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use esp_assets::{Aircraft, Model, texture};

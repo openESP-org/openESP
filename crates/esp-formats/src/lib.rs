@@ -1,3 +1,4 @@
+//! esp-formats owns binary decoders for simulator content files.
 pub mod air;
 pub mod bgl;
 pub mod cabinet;

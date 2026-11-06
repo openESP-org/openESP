@@ -33,12 +33,17 @@ foundation layer
     esp-geo        coordinate frames and precision-critical math
 ```
 
-Two rules follow from this arrangement and are not negotiable:
+These rules follow from this arrangement and are not negotiable:
 
 - `esp-physics` and `esp-sim` never depend on `esp-render` or `esp-ui`.
 - `esp-ui` and `esp-launcher` never contain simulation logic.
 - The app layer is the only place that knows every crate. Everything below it
   can be built, tested and used on its own.
+
+The partition remains in progress: flight state and its integrator still live
+in `esp-physics`, and several solver constructors still read aircraft content.
+Those responsibilities must move behind session and content adapters before
+the physics crate is fully session-free and content-agnostic.
 
 Crates that do not exist yet are listed in their scheduled order below. When a
 domain earns its promotion, it moves out of its current module with no
@@ -90,12 +95,14 @@ from source therefore requires a C compiler alongside the Rust toolchain.
   move out of `openesp`; terrain arrives behind the same interface the flat
   ground already implements, so grid and terrain worlds are interchangeable.
 - `esp-nav` (engine, created). Adds the magnetic model and flight plan support.
+- `esp-input` (engine). Device axes, bindings and mapping data.
 - `esp-options`, `esp-content`, `esp-ui`, `esp-launcher` (app side). Settings
   model with persistence; a content manager that installs and enables add-ons
   without touching the base simulator directories; the launcher with install
   selection, controls setup and graphics options.
-- `esp-effects` (engine). Post-processing passes (tone mapping, bloom, glare,
-  weather) as an optional chain on top of `esp-render`.
+- `esp-weather` (engine). Weather state and data for physics and rendering.
+- Effects start as an `esp-render` module; promote them to `esp-effects` only
+  if the post-processing chain grows beyond the file cap.
 - `tools/esp-check`. A validation binary that loads aircraft and scenery
   packages and reports every decode failure, for content authors and debugging.
 
