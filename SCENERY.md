@@ -23,6 +23,7 @@ alternative to folder discovery.
 
 The current scene uses a flat ground plane. Discovering a BGL does not imply
 that every section renders: terrain elevation, photoreal terrain and CVX
-polygons still require the terrain pipeline; PBR models are reported as
+polygons still require the terrain pipeline; raster imagery and masks decode
+but are not yet drawn by that pipeline. PBR models are reported as
 unsupported. Supported MDL ground polygons load as placed library models.
 All content access is read-only.

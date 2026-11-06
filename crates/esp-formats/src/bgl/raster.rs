@@ -67,6 +67,11 @@ impl<'a> Raster<'a> {
         codec::decode_mask(self.mask_compression, self.mask, self.columns, self.rows).map(Some)
     }
     pub fn decode_data(&self) -> Result<Vec<u8>, codec::Error> {
+        if self.data_compression == Compression::Ptc
+            && (self.data_type != 1 || self.columns != 256 || self.rows != 256)
+        {
+            return Err(codec::Error::Unsupported(Compression::Ptc));
+        }
         let bytes_per_pixel = match self.data_type {
             1 | 2 | 9 | 10 => 2,
             3..=7 => 1,

@@ -31,7 +31,18 @@ fn reads_real_photoreal_tiles_and_masks() {
             assert_eq!(tile.data_type, 1);
             if tile.data_compression == esp_formats::bgl::raster::Compression::Ptc {
                 ptc += 1;
-            } else {
+                for end in [0, 4, 47, tile.data.len() / 2, tile.data.len() - 1] {
+                    assert!(
+                        esp_formats::bgl::raster::codec::decode(
+                            tile.data_compression,
+                            &tile.data[..end],
+                            256 * 256 * 2
+                        )
+                        .is_err()
+                    );
+                }
+            }
+            {
                 let pixels = tile.decode_data().unwrap_or_else(|error| {
                     panic!("tile {:?} {:?}: {error}", tile.qmid, tile.data_compression)
                 });
@@ -78,7 +89,8 @@ fn reads_real_photoreal_tiles_and_masks() {
     assert!(decoded > 0);
     assert!(masks > 0);
     eprintln!("decoded {masks} tile masks");
-    eprintln!("decoded {decoded} imagery tiles; {ptc} PTC tiles await codec support");
+    assert_eq!(decoded, imagery);
+    eprintln!("decoded {decoded} imagery tiles, including {ptc} PTC tiles");
     eprintln!(
         "{} raster records, {imagery} imagery tiles; first photo {:?}",
         tiles.len(),

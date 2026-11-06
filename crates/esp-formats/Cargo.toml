@@ -15,3 +15,6 @@ rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "adpcm"] }
 thiserror = "2.0.21"
 uuid = "1.29.0"
+
+[build-dependencies]
+cc = "1"

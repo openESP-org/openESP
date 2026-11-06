@@ -3,6 +3,7 @@
 //! Its license is retained in third_party/flightsimlib-LICENSE.
 use super::Compression;
 mod bitpack;
+mod ptc;
 
 const LIMIT: usize = 64 * 1024 * 1024;
 
@@ -25,6 +26,7 @@ pub fn decode(compression: Compression, input: &[u8], size: usize) -> Result<Vec
     match compression {
         Compression::None => Ok(input.get(..size).ok_or(Error::Truncated)?.to_vec()),
         Compression::Delta => delta(input, size),
+        Compression::Ptc => ptc::photo(input, size),
         Compression::Lz1 => lz1(input, size),
         Compression::Lz2 => lz(input, size, true),
         Compression::DeltaLz1 | Compression::DeltaLz2 => {

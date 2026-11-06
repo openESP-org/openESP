@@ -63,6 +63,12 @@ and object loaders before `app/spawn.rs` resolves the selected runway or parking
 stand. It reads content without modifying the add-on. Airport surface and
 object loading will move together into `esp-scenery` when terrain is introduced.
 
+`esp-formats` builds the MIT-licensed flightsimlib PTC decoder from vendored C
+sources under `native/ptc`. A fixed-size photo bridge validates container,
+frame and tile ranges before decoding 256x256 ARGB1555 images. Rust owns the
+input and output buffers. Other PTC formats are rejected explicitly. Building
+from source therefore requires a C compiler alongside the Rust toolchain.
+
 ## First steps
 
 1. Done: `main.rs` is a short bootstrap file. Its contents moved to `cli.rs`

@@ -803,6 +803,7 @@ name = "esp-formats"
 version = "0.1.0"
 dependencies = [
  "binrw",
+ "cc",
  "ddsfile",
  "encoding_rs",
  "image",
