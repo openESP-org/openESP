@@ -201,6 +201,23 @@ pub fn objects(
     let bytes = std::fs::read(placement_path)?;
     let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
     let origin = Origin::new(latitude, longitude)?;
+    // The airport scene uses a flat ground plane at the selected airport's
+    // elevation. Reuse that datum for MSL placements when the same BGL has
+    // a nearby airport; object-only libraries do not contain a terrain datum.
+    let airport_elevation = bgl.airports().ok().and_then(|airports| {
+        airports
+            .into_iter()
+            .filter_map(|airport| {
+                let (north, east) = origin
+                    .local_position(airport.latitude, airport.longitude)
+                    .ok()?;
+                let distance = north.hypot(east);
+                (distance <= 25_000.0 && airport.elevation_m.is_finite())
+                    .then_some((distance, airport.elevation_m))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, elevation)| elevation)
+    });
     let mut result = Vec::new();
     for section in bgl.sections.iter().filter(|section| section.kind == 0x25) {
         let esp_formats::bgl::Directory::Direct(subsections) = &section.directory else {
@@ -229,12 +246,7 @@ pub fn objects(
                 )?;
                 let [pitch, bank, heading] =
                     object.placement.orientation_degrees().map(f64::to_radians);
-                // Ground elevation is currently zero. Absolute MSL objects will require terrain elevation.
-                let height = if object.placement.flags & 1 != 0 {
-                    object.placement.altitude_meters()
-                } else {
-                    0.0
-                };
+                let height = placement_height(&object.placement, airport_elevation);
                 let transform = glam::Mat4::from_translation(glam::Vec3::new(
                     east as f32,
                     height as f32,
@@ -255,9 +267,41 @@ pub fn objects(
     Ok(result)
 }
 
+fn placement_height(
+    placement: &esp_formats::bgl::scenery::Placement,
+    ground_msl: Option<f64>,
+) -> f64 {
+    if placement.flags & 1 != 0 {
+        placement.altitude_meters()
+    } else {
+        ground_msl.map_or(0.0, |ground| placement.altitude_meters() - ground)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_agl_and_msl_objects_against_airport_ground() {
+        let mut placement = esp_formats::bgl::scenery::Placement {
+            longitude: 0,
+            latitude: 0,
+            altitude: 105_000,
+            flags: 0,
+            pitch: 0,
+            bank: 0,
+            heading: 0,
+            image_complexity: 0,
+            unknown: 0,
+            instance: Default::default(),
+        };
+        assert_eq!(placement_height(&placement, Some(100.0)), 5.0);
+        assert_eq!(placement_height(&placement, None), 0.0);
+        placement.flags = 1;
+        assert_eq!(placement_height(&placement, Some(100.0)), 105.0);
+        assert_eq!(placement_height(&placement, None), 105.0);
+    }
 
     #[test]
     fn builds_heliport_without_runways() {
