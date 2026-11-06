@@ -1,6 +1,6 @@
 use esp_assets::Aircraft;
+use esp_physics::animation::ModelState;
 use esp_script::{Error, Host, Reference, Value};
-use esp_sim::animation::ModelState;
 
 #[path = "../../../tests/support/content.rs"]
 mod content;
@@ -12,7 +12,7 @@ struct PoseHost {
 #[test]
 #[ignore = "requires original backup airspeed gauge and OPENESP_AIRCRAFT_PATHS"]
 fn original_nonlinear_airspeed_tape_moves_with_indicated_speed() {
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let mut aircraft = Aircraft::load(&path, 0).unwrap();
@@ -65,7 +65,7 @@ fn original_nonlinear_airspeed_tape_moves_with_indicated_speed() {
 #[ignore = "requires original MDL cockpit controls and OPENESP_AIRCRAFT_PATHS"]
 fn original_model_click_changes_switch_state_and_animation() {
     use esp_assets::gauge::MouseEvent;
-    use esp_sim::{interaction::model_mouse, picking::pick, variables::Variables};
+    use esp_physics::{interaction::model_mouse, picking::pick, variables::Variables};
     use glam::Vec3;
 
     let mut verified = std::collections::HashSet::new();
@@ -199,7 +199,7 @@ fn animates_external_aircraft_hierarchies() {
 #[test]
 #[ignore = "requires OPENESP_FSX_ROOT or OPENESP_AIRCRAFT_PATHS"]
 fn picks_external_cockpit_panel_surfaces() {
-    use esp_sim::picking::pick;
+    use esp_physics::picking::pick;
     use glam::Vec3;
     for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();
@@ -262,7 +262,7 @@ fn picks_external_cockpit_panel_surfaces() {
 #[test]
 #[ignore = "requires original XML flight director gauges and OPENESP_AIRCRAFT_PATHS"]
 fn xml_click_updates_flight_director_artwork_and_animation() {
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let mut aircraft = Aircraft::load(&path, 0).unwrap();
@@ -333,7 +333,7 @@ fn xml_click_updates_flight_director_artwork_and_animation() {
 #[ignore = "requires original XML clock gauges and OPENESP_AIRCRAFT_PATHS"]
 fn original_clock_button_responds_to_press_and_release() {
     use esp_assets::gauge::MouseEvent;
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let depressed = Reference::new('L', "Clock DAT Depressed", None);
     let function = Reference::new('L', "Clock DAT Function", None);
     let mut verified = 0;
@@ -383,7 +383,7 @@ fn original_clock_button_responds_to_press_and_release() {
 fn original_speed_brake_drag_uses_scaled_gauge_coordinates() {
     use esp_assets::{gauge::MouseEvent, panel::Panel};
     use esp_formats::gauge::Gauge;
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();
@@ -469,7 +469,7 @@ fn original_speed_brake_drag_uses_scaled_gauge_coordinates() {
 #[ignore = "requires original XML autopilot gauges and OPENESP_AIRCRAFT_PATHS"]
 fn original_heading_knob_repeats_its_script() {
     use esp_assets::gauge::MouseEvent;
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();
@@ -527,7 +527,7 @@ fn original_heading_knob_repeats_its_script() {
 #[test]
 #[ignore = "requires original XML EFIS gauges and OPENESP_AIRCRAFT_PATHS"]
 fn original_efis_update_initializes_once() {
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let mut aircraft = Aircraft::load(&path, 0).unwrap();
@@ -578,7 +578,7 @@ fn original_efis_update_initializes_once() {
 #[ignore = "requires original XML EFIS gauges and OPENESP_AIRCRAFT_PATHS"]
 fn original_efis_standard_pressure_click_emits_event() {
     use esp_assets::gauge::MouseEvent;
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let aircraft = Aircraft::load(&path, 0).unwrap();
@@ -630,7 +630,7 @@ fn original_efis_standard_pressure_click_emits_event() {
 #[test]
 #[ignore = "requires original XML flap indicators and OPENESP_AIRCRAFT_PATHS"]
 fn original_flap_indicator_rotates_with_surface_angles() {
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut verified = 0;
     for path in content::aircraft_paths() {
         let mut aircraft = Aircraft::load(&path, 0).unwrap();
@@ -683,7 +683,7 @@ fn original_flap_indicator_rotates_with_surface_angles() {
 #[test]
 #[ignore = "requires original aircraft flap definitions and OPENESP_AIRCRAFT_PATHS"]
 fn flap_commands_drive_configured_actuators_models_and_gauges() {
-    use esp_sim::variables::Variables;
+    use esp_physics::variables::Variables;
     let mut gauge_changes = 0;
     for path in content::aircraft_paths() {
         let mut aircraft = Aircraft::load(&path, 0).unwrap();
@@ -795,7 +795,7 @@ fn flap_commands_drive_configured_actuators_models_and_gauges() {
 #[test]
 #[ignore = "requires original aircraft flap definitions and OPENESP_AIRCRAFT_PATHS"]
 fn fixed_ticks_preserve_aircraft_motion_across_render_rates() {
-    use esp_sim::{
+    use esp_physics::{
         time::{Clock, STEP},
         variables::Variables,
     };

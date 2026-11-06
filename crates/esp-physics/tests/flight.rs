@@ -1,5 +1,5 @@
 use esp_assets::flight::FlightData;
-use esp_sim::{
+use esp_physics::{
     aerodynamics::{Aerodynamics, Controls},
     flight::State,
     loading::WeightBalance,

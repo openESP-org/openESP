@@ -1,7 +1,7 @@
 use esp_assets::flight::FlightData;
 use esp_formats::cfg::electrical::Electrical;
+use esp_physics::variables::Variables;
 use esp_script::{Host, Reference, Value};
-use esp_sim::variables::Variables;
 
 #[path = "../../../tests/support/content.rs"]
 mod content;

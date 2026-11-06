@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
-use esp_script::{Host, Reference};
-use esp_sim::{
+use esp_physics::{
     aerodynamics::{Aerodynamics, Controls},
     atmosphere::Atmosphere,
     autopilot::{Autopilot, Inputs as AutopilotInputs},
@@ -12,6 +11,7 @@ use esp_sim::{
     propulsion::{Command, Output as EngineOutput, Propulsion},
     variables::Variables,
 };
+use esp_script::{Host, Reference};
 use glam::{DMat3, DQuat, DVec3, EulerRot, Quat};
 
 #[cfg(test)]

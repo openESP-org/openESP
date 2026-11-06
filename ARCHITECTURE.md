@@ -18,7 +18,7 @@ app layer
 engine layer
     esp-render     wgpu renderer
     esp-audio      sound mixing and output
-    esp-sim        flight physics and aircraft systems
+    esp-physics    reusable solver models
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
     esp-terrain    elevation mesh, land class and photoreal ground
@@ -34,7 +34,7 @@ foundation layer
 
 Two rules follow from this arrangement and are not negotiable:
 
-- `esp-sim` never depends on `esp-render`. Physics runs headless; the app
+- `esp-physics` never depends on `esp-render`. Physics runs headless; the app
   connects the two.
 - The app layer is the only place that knows every crate. Everything below it
   can be built, tested and used on its own.
@@ -47,7 +47,7 @@ functional change, in its own commit.
 
 | crate       | files | lines |
 |-------------|------:|------:|
-| esp-sim     |    30 | 13005 |
+| esp-physics     |    30 | 13005 |
 | esp-formats |    57 |  9995 |
 | openesp     |     7 |  8600 |
 | esp-assets  |    13 |  6408 |

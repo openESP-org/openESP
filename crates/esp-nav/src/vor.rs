@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
+use esp_physics::variables::Variables;
 use esp_script::{Host, Reference};
-use esp_sim::variables::Variables;
 use std::f64::consts::{PI, TAU};
 
 const EARTH_RADIUS: f64 = 6_371_008.8;

@@ -1,5 +1,5 @@
 use esp_assets::flight::FlightData;
-use esp_sim::{
+use esp_physics::{
     atmosphere::Atmosphere,
     time::STEP,
     turbine::{Command, Turbines},

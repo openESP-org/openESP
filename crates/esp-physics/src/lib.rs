@@ -1,3 +1,4 @@
+//! esp-physics owns reusable solver models for aerodynamics, ground, propulsion, electrics, hydraulics, atmosphere and time.
 pub mod aerodynamics;
 pub mod animation;
 pub mod atmosphere;

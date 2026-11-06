@@ -1,6 +1,6 @@
 use esp_assets::flight::FlightData;
 use esp_formats::air::{self, table::Table};
-use esp_sim::{atmosphere::Atmosphere, propeller::Propeller};
+use esp_physics::{atmosphere::Atmosphere, propeller::Propeller};
 
 #[path = "../../../tests/support/content.rs"]
 mod content;

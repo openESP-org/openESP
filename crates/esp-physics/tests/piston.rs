@@ -1,6 +1,6 @@
 use esp_assets::flight::FlightData;
 use esp_formats::air;
-use esp_sim::{
+use esp_physics::{
     atmosphere::Atmosphere,
     piston::{Charge, Command, PistonCycle, Pistons},
     propeller::Propeller,
@@ -526,7 +526,7 @@ fn original_piston_crossflow_changes_yaw_and_honors_p_factor_scalar() {
 #[test]
 #[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
 fn original_piston_wake_improves_low_speed_tail_control() {
-    use esp_sim::aerodynamics::{Aerodynamics, Controls};
+    use esp_physics::aerodynamics::{Aerodynamics, Controls};
     use glam::DVec3;
     let air = Atmosphere::standard(0.0).unwrap();
     let mut verified = 0;
@@ -557,14 +557,14 @@ fn original_piston_wake_improves_low_speed_tail_control() {
         let mut engine = Pistons::from_data(&data).unwrap();
         let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
         let stopped = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
-        assert_eq!(stopped, esp_sim::propeller::TailWash::default());
+        assert_eq!(stopped, esp_physics::propeller::TailWash::default());
         engine.start_running(&air, DVec3::ZERO).unwrap();
         let wake = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
         assert!(wake.horizontal.x > 0.0 && wake.swirl.y < 0.0);
         let no_fuel = vec![0.0; power.len()];
         assert_eq!(
             engine.tail_wash(&air, DVec3::ZERO, &no_fuel).unwrap(),
-            esp_sim::propeller::TailWash::default()
+            esp_physics::propeller::TailWash::default()
         );
         let centered = aero
             .tail_wash_forces(
@@ -609,7 +609,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             forward.start_running(&air, DVec3::ZERO).unwrap();
             assert_eq!(
                 forward.tail_wash(&air, DVec3::ZERO, &power).unwrap(),
-                esp_sim::propeller::TailWash::default()
+                esp_physics::propeller::TailWash::default()
             );
         }
         if config.contains("[propeller]")
@@ -642,11 +642,11 @@ fn original_piston_wake_improves_low_speed_tail_control() {
             assert!(reversed_load.moment.z > 0.0);
             assert!((centered.moment.z + reversed_load.moment.z).abs() < 1e-8);
         }
-        let horizontal_only = esp_sim::propeller::TailWash {
+        let horizontal_only = esp_physics::propeller::TailWash {
             horizontal: wake.horizontal,
             ..Default::default()
         };
-        let vertical_only = esp_sim::propeller::TailWash {
+        let vertical_only = esp_physics::propeller::TailWash {
             vertical: wake.vertical,
             ..Default::default()
         };

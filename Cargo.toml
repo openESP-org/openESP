@@ -7,6 +7,6 @@ members = [
     "crates/esp-render",
     "crates/esp-nav",
     "crates/esp-script",
-    "crates/esp-sim",
+    "crates/esp-physics",
     "crates/openesp"
 ]

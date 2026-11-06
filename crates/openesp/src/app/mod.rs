@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use esp_assets::{Aircraft, gauge::MouseEvent};
-use esp_render::{Camera, Renderer};
-use esp_script::Value;
-use esp_sim::{
+use esp_physics::{
     animation::ModelState,
     interaction, picking,
     time::{Clock, STEP, SimTime},
     variables::Variables,
 };
+use esp_render::{Camera, Renderer};
+use esp_script::Value;
 use glam::{DVec3, Mat4, Vec3};
 use std::{
     collections::HashSet,
@@ -464,7 +464,7 @@ impl App {
             } else {
                 self.variables.advance(STEP)?;
             }
-            esp_sim::electrical::advance_battery(&mut self.variables, STEP)?;
+            esp_physics::electrical::advance_battery(&mut self.variables, STEP)?;
             self.apply_variable_overrides();
         }
         self.variables.update_electrical()?;

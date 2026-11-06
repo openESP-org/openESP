@@ -3,8 +3,8 @@ use esp_formats::{
     air::{self, table::Table},
     cfg::Config,
 };
+use esp_physics::{atmosphere::Atmosphere, flight::State, variables::Variables};
 use esp_script::{Host, Reference};
-use esp_sim::{atmosphere::Atmosphere, flight::State, variables::Variables};
 #[cfg(test)]
 use glam::DVec3;
 

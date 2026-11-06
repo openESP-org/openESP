@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 esp-script = { path = "../esp-script" }
-esp-sim = { path = "../esp-sim" }
+esp-physics = { path = "../esp-physics" }
 glam = "0.30"
