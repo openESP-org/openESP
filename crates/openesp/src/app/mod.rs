@@ -795,10 +795,12 @@ impl ApplicationHandler for App {
     }
 }
 
+mod scenery_folder;
 mod spawn;
 
 pub(crate) fn run() -> Result<()> {
     let mut arguments = Arguments::parse();
+    scenery_folder::configure(&mut arguments)?;
     spawn::configure(&mut arguments)?;
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;

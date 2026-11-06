@@ -8,11 +8,17 @@ pub(crate) struct Arguments {
     pub(crate) aircraft: PathBuf,
     #[arg(long)]
     pub(crate) fsx_root: Option<PathBuf>,
-    #[arg(long, help = "Load airport runways from an FSX or Prepar3D BGL file")]
-    pub(crate) scenery_bgl: Option<PathBuf>,
     #[arg(
         long,
-        requires = "scenery_bgl",
+        group = "scenery_source",
+        help = "Load airport runways from an FSX or Prepar3D BGL file"
+    )]
+    pub(crate) scenery_bgl: Option<PathBuf>,
+    #[arg(long, group = "scenery_source", conflicts_with_all = ["scenery_bgl", "scenery_objects", "scenery_library", "scenery_textures"], help = "Discover airport, placements and libraries in an add-on folder; centre the local world at the selected airport")]
+    pub(crate) scenery: Option<PathBuf>,
+    #[arg(
+        long,
+        requires = "scenery_source",
         help = "Select an airport by ICAO code from the BGL"
     )]
     pub(crate) airport: Option<String>,

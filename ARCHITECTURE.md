@@ -58,6 +58,11 @@ The app bootstrap, CLI and flight code are split into modules. Navigation and
 VOR calculations live in `esp-nav`; cross-system integration tests stay in
 the app because they exercise flight and weather together.
 
+`app/scenery_folder.rs` resolves a CLI add-on folder to the existing airport
+and object loaders before `app/spawn.rs` resolves the selected runway or parking
+stand. It reads content without modifying the add-on. Airport surface and
+object loading will move together into `esp-scenery` when terrain is introduced.
+
 ## First steps
 
 1. Done: `main.rs` is a short bootstrap file. Its contents moved to `cli.rs`
