@@ -171,11 +171,40 @@ pub fn objects(
     latitude: f64,
     longitude: f64,
 ) -> Result<Vec<esp_render::SceneryObject>> {
-    use std::{collections::HashMap, sync::Arc};
-    let mut models = HashMap::new();
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
     for path in std::iter::once(placement_path).chain(libraries.iter().map(|p| p.as_path())) {
+        let identity =
+            std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
+        if seen.insert(identity) {
+            paths.push(path);
+        }
+    }
+    let mut models = HashMap::new();
+    let origin = Origin::new(latitude, longitude)?;
+    let mut airport_elevation: Option<(f64, f64)> = None;
+    for path in &paths {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
+        if let Ok(airports) = bgl.airports() {
+            for airport in airports {
+                let Ok((north, east)) = origin.local_position(airport.latitude, airport.longitude)
+                else {
+                    continue;
+                };
+                let distance = north.hypot(east);
+                if distance <= 25_000.0
+                    && airport.elevation_m.is_finite()
+                    && airport_elevation.is_none_or(|(best, _)| distance < best)
+                {
+                    airport_elevation = Some((distance, airport.elevation_m));
+                }
+            }
+        }
         let parent = path.parent().unwrap_or(Path::new("."));
         let textures = texture_directory.map(Path::to_path_buf).unwrap_or_else(|| {
             parent
@@ -198,68 +227,56 @@ pub fn objects(
             }
         }
     }
-    let bytes = std::fs::read(placement_path)?;
-    let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
-    let origin = Origin::new(latitude, longitude)?;
     // The airport scene uses a flat ground plane at the selected airport's
-    // elevation. Reuse that datum for MSL placements when the same BGL has
-    // a nearby airport; object-only libraries do not contain a terrain datum.
-    let airport_elevation = bgl.airports().ok().and_then(|airports| {
-        airports
-            .into_iter()
-            .filter_map(|airport| {
-                let (north, east) = origin
-                    .local_position(airport.latitude, airport.longitude)
-                    .ok()?;
-                let distance = north.hypot(east);
-                (distance <= 25_000.0 && airport.elevation_m.is_finite())
-                    .then_some((distance, airport.elevation_m))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, elevation)| elevation)
-    });
+    // elevation. Object-only libraries do not contain a terrain datum.
+    let airport_elevation = airport_elevation.map(|(_, elevation)| elevation);
     let mut result = Vec::new();
-    for section in bgl.sections.iter().filter(|section| section.kind == 0x25) {
-        let esp_formats::bgl::Directory::Direct(subsections) = &section.directory else {
-            continue;
-        };
-        for subsection in subsections {
-            for record in esp_formats::bgl::scenery::parse(subsection.records.data)? {
-                let Some(object) = record.decode()? else {
-                    continue;
-                };
-                let esp_formats::bgl::scenery::Definition::Library { guid, scale } =
-                    object.definition
-                else {
-                    continue;
-                };
-                let Some((model, textures)) = models.get(guid.as_bytes()) else {
-                    continue;
-                };
-                ensure!(
-                    scale.is_finite() && scale > 0.0,
-                    "invalid scenery object scale"
-                );
-                let (north, east) = origin.local_position(
-                    object.placement.latitude_degrees(),
-                    object.placement.longitude_degrees(),
-                )?;
-                let [pitch, bank, heading] =
-                    object.placement.orientation_degrees().map(f64::to_radians);
-                let height = placement_height(&object.placement, airport_elevation);
-                let transform = glam::Mat4::from_translation(glam::Vec3::new(
-                    east as f32,
-                    height as f32,
-                    north as f32,
-                )) * glam::Mat4::from_rotation_y(heading as f32)
-                    * glam::Mat4::from_rotation_x(pitch as f32)
-                    * glam::Mat4::from_rotation_z(bank as f32)
-                    * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-                result.push(esp_render::SceneryObject {
-                    model: model.clone(),
-                    transform,
-                    textures: textures.clone(),
-                });
+    for path in paths {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let bgl = esp_formats::bgl::Bgl::parse(&bytes)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        for section in bgl.sections.iter().filter(|section| section.kind == 0x25) {
+            let esp_formats::bgl::Directory::Direct(subsections) = &section.directory else {
+                continue;
+            };
+            for subsection in subsections {
+                for record in esp_formats::bgl::scenery::parse(subsection.records.data)? {
+                    let Some(object) = record.decode()? else {
+                        continue;
+                    };
+                    let esp_formats::bgl::scenery::Definition::Library { guid, scale } =
+                        object.definition
+                    else {
+                        continue;
+                    };
+                    let Some((model, textures)) = models.get(guid.as_bytes()) else {
+                        continue;
+                    };
+                    ensure!(
+                        scale.is_finite() && scale > 0.0,
+                        "invalid scenery object scale"
+                    );
+                    let (north, east) = origin.local_position(
+                        object.placement.latitude_degrees(),
+                        object.placement.longitude_degrees(),
+                    )?;
+                    let [pitch, bank, heading] =
+                        object.placement.orientation_degrees().map(f64::to_radians);
+                    let height = placement_height(&object.placement, airport_elevation);
+                    let transform = glam::Mat4::from_translation(glam::Vec3::new(
+                        east as f32,
+                        height as f32,
+                        north as f32,
+                    )) * glam::Mat4::from_rotation_y(heading as f32)
+                        * glam::Mat4::from_rotation_x(pitch as f32)
+                        * glam::Mat4::from_rotation_z(bank as f32)
+                        * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+                    result.push(esp_render::SceneryObject {
+                        model: model.clone(),
+                        transform,
+                        textures: textures.clone(),
+                    });
+                }
             }
         }
     }
@@ -442,6 +459,16 @@ mod object_tests {
         let libraries: Vec<_> = std::env::split_paths(&libraries).collect();
         let objects = objects(Path::new(&placement), &libraries, None, 41.168, 40.835).unwrap();
         assert!(!objects.is_empty(), "no placed objects found");
+        let mut reversed = libraries.clone();
+        reversed.push(placement.clone().into());
+        reversed.push(placement.clone().into());
+        let objects_from_library =
+            super::objects(&libraries[0], &reversed, None, 41.168, 40.835).unwrap();
+        assert_eq!(
+            objects_from_library.len(),
+            objects.len(),
+            "placements in additional BGLs must load once"
+        );
         let distinct: std::collections::HashSet<_> = objects
             .iter()
             .map(|object| std::sync::Arc::as_ptr(&object.model))
