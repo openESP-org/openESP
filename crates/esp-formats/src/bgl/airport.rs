@@ -34,6 +34,7 @@ pub struct TaxiPoint {
 pub struct TaxiParking {
     pub latitude: f64,
     pub longitude: f64,
+    pub heading_deg: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +197,7 @@ fn taxi_parkings(data: &[u8], p3d_v5: bool) -> Result<Vec<TaxiParking>, Error> {
         parkings.push(TaxiParking {
             latitude,
             longitude,
+            heading_deg: f32_at(data, offset + 8)?,
         });
         offset += size;
     }

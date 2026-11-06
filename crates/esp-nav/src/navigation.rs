@@ -177,7 +177,7 @@ impl Origin {
         })
     }
 
-    fn position(&self, north: f64, east: f64) -> Result<(f64, f64)> {
+    pub fn position(&self, north: f64, east: f64) -> Result<(f64, f64)> {
         ensure!(
             north.is_finite() && east.is_finite(),
             "local position must be finite"

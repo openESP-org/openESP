@@ -16,6 +16,10 @@ pub(crate) struct Arguments {
         help = "Select an airport by ICAO code from the BGL"
     )]
     pub(crate) airport: Option<String>,
+    #[arg(long, requires_all = ["airport", "airspeed"], conflicts_with_all = ["parking", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a runway end, for example 06 or 24L")]
+    pub(crate) runway: Option<String>,
+    #[arg(long, requires_all = ["airport", "airspeed"], conflicts_with_all = ["runway", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a zero-based parking stand index from the airport BGL")]
+    pub(crate) parking: Option<usize>,
     #[arg(long, help = "Load placed library objects from a scenery BGL")]
     pub(crate) scenery_objects: Option<PathBuf>,
     #[arg(long, help = "Additional BGL model library; may be repeated")]

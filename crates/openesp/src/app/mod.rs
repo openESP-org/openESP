@@ -795,8 +795,11 @@ impl ApplicationHandler for App {
     }
 }
 
+mod spawn;
+
 pub(crate) fn run() -> Result<()> {
-    let arguments = Arguments::parse();
+    let mut arguments = Arguments::parse();
+    spawn::configure(&mut arguments)?;
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;
     let fsx_root = arguments.fsx_root.clone();
