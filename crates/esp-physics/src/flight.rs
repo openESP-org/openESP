@@ -39,6 +39,10 @@ impl MassProperties {
     pub fn kilograms(&self) -> f64 {
         self.kilograms
     }
+
+    pub fn inertia(&self) -> DMat3 {
+        self.inertia
+    }
 }
 
 // Body axes are forward, right, down. Position and velocity use a local NED frame.

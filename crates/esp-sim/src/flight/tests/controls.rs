@@ -45,7 +45,7 @@ fn spoilerons_follow_aileron_direction_and_add_roll_moment() {
             .join("\n");
         assert!(changed);
         gated_data.configuration = esp_formats::cfg::Config::parse(&source).unwrap();
-        let gated = Aerodynamics::from_data(&gated_data).unwrap();
+        let gated = crate::loading::aerodynamic_model(&gated_data).unwrap();
         assert_eq!(gated.spoiler_targets(0.0, 1.0, 0.0), [0.0; 2]);
         assert!(gated.spoiler_targets(0.0, 1.0, 0.5)[1] > 0.0);
         let mut vars = controls(&data);

@@ -9,7 +9,7 @@ use esp_formats::{
 };
 use glam::DVec3;
 
-use crate::{flight::Wrench, loading::WeightBalance, lookup::Curve};
+use crate::{flight::Wrench, lookup::Curve};
 
 const FOOT: f64 = 0.3048;
 
@@ -131,7 +131,11 @@ fn aerodynamic_coefficients(records: &[air::Record<'_>]) -> Result<LegacyParamet
 }
 
 impl Aerodynamics {
-    pub fn from_data(data: &FlightData) -> Result<Self> {
+    pub fn from_data(
+        data: &FlightData,
+        loaded_cg: impl FnOnce() -> Result<DVec3>,
+        empty_cg: impl FnOnce() -> Result<DVec3>,
+    ) -> Result<Self> {
         let config = &data.configuration;
         let records = air::parse(&data.air)?;
         ensure!(
@@ -192,7 +196,6 @@ impl Aerodynamics {
         ensure!(tip >= 0.0, "wing geometry implies a negative tip chord");
         let taper = tip / root;
         let chord = 2.0 * root * (1.0 + taper + taper * taper) / (3.0 * (1.0 + taper));
-        let weights = WeightBalance::from_config(config)?;
         let datum = esp_formats::cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing reference datum")?;
@@ -231,7 +234,7 @@ impl Aerodynamics {
                 lift.gradient().abs() > 1e-10,
                 "lift curve has no linear gradient"
             );
-            weights.load(0.0, true)?.cg.x - pitch.gradient() / lift.gradient() * chord
+            loaded_cg()?.x - pitch.gradient() / lift.gradient() * chord
         };
         ensure!(
             pitch_reference.is_finite(),
@@ -370,7 +373,7 @@ impl Aerodynamics {
             1.225,
             Controls::default(),
             &vec![0.0; result.flaps.len()],
-            weights.load(0.0, false)?.cg,
+            empty_cg()?,
         )?;
         Ok(result)
     }

@@ -2,8 +2,28 @@ use anyhow::{Context, Result, ensure};
 use esp_formats::cfg::{self, Config};
 use glam::{DMat3, DVec3};
 
-use crate::flight::MassProperties;
+use esp_physics::flight::MassProperties;
 
+/// Construct the aerodynamic solver using the authored payload reference.
+pub fn aerodynamic_model(
+    data: &esp_assets::flight::FlightData,
+) -> Result<esp_physics::aerodynamics::Aerodynamics> {
+    let weights = WeightBalance::from_config(&data.configuration)?;
+    esp_physics::aerodynamics::Aerodynamics::from_data(
+        data,
+        || Ok(weights.load(0.0, true)?.cg),
+        || Ok(weights.load(0.0, false)?.cg),
+    )
+}
+
+/// Construct suspension using the empty aircraft's mass and center of gravity.
+pub fn landing_gear(
+    data: &esp_assets::flight::FlightData,
+) -> Result<esp_physics::ground::LandingGear> {
+    let weights = WeightBalance::from_config(&data.configuration)?;
+    let empty = weights.load(0.0, false)?;
+    esp_physics::ground::LandingGear::from_data(data, empty.cg, empty.mass.kilograms())
+}
 const FOOT: f64 = 0.3048;
 const POUND: f64 = 0.45359237;
 
@@ -234,7 +254,7 @@ impl WeightBalance {
         let cg = (self.empty_cg * self.empty.kilograms()
             + points().map(|(mass, pos)| pos * mass).sum::<DVec3>())
             / mass;
-        let inertia = self.empty.inertia
+        let inertia = self.empty.inertia()
             + parallel_axis(self.empty.kilograms(), self.empty_cg - cg)
             + points()
                 .map(|(mass, pos)| parallel_axis(mass, pos - cg))
@@ -272,9 +292,10 @@ mod tests {
         let extra_pitch = 1000.0 * POUND * expected_cg.powi(2)
             + 200.0 * POUND * (10.0 * FOOT - expected_cg).powi(2);
         assert!(
-            (loaded.mass.inertia.y_axis.y - empty.mass.inertia.y_axis.y - extra_pitch).abs() < 1e-9
+            (loaded.mass.inertia().y_axis.y - empty.mass.inertia().y_axis.y - extra_pitch).abs()
+                < 1e-9
         );
-        assert!((loaded.mass.inertia.x_axis.x - empty.mass.inertia.x_axis.x).abs() < 1e-12);
+        assert!((loaded.mass.inertia().x_axis.x - empty.mass.inertia().x_axis.x).abs() < 1e-12);
     }
 
     #[test]
@@ -285,8 +306,8 @@ mod tests {
         assert!((full.mass.kilograms() - (1000.0 + 20.0 * 6.0) * POUND).abs() < 1e-10);
         assert_eq!(full.fuel_gallons, 20.0);
         assert!(full.cg.y.abs() < 1e-12 && full.cg.z < 0.0);
-        assert!(full.mass.inertia.x_axis.x > empty.mass.inertia.x_axis.x);
-        assert!(weights.load(1.0, true).unwrap().mass.inertia.x_axis.z < 0.0);
+        assert!(full.mass.inertia().x_axis.x > empty.mass.inertia().x_axis.x);
+        assert!(weights.load(1.0, true).unwrap().mass.inertia().x_axis.z < 0.0);
         assert!(weights.load(-0.1, false).is_err());
         assert!(weights.load(f64::NAN, false).is_err());
     }

@@ -526,7 +526,7 @@ fn original_piston_crossflow_changes_yaw_and_honors_p_factor_scalar() {
 #[test]
 #[ignore = "requires original fixed-pitch piston aircraft and AIR engine/propeller tables"]
 fn original_piston_wake_improves_low_speed_tail_control() {
-    use esp_physics::aerodynamics::{Aerodynamics, Controls};
+    use esp_physics::aerodynamics::Controls;
     use glam::DVec3;
     let air = Atmosphere::standard(0.0).unwrap();
     let mut verified = 0;
@@ -545,7 +545,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
         {
             continue;
         }
-        let aero = Aerodynamics::from_data(&data).unwrap();
+        let aero = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let flaps = vec![
             0.0;
             esp_formats::cfg::aircraft::flaps(&data.configuration)

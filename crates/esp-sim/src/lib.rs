@@ -6,6 +6,7 @@ pub mod electrical;
 pub mod flight;
 pub mod hydraulics;
 pub mod interaction;
+pub mod loading;
 pub mod picking;
 pub mod speed_limits;
 mod units;

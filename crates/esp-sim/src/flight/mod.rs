@@ -1,5 +1,6 @@
 use crate::autopilot::{Autopilot, Inputs as AutopilotInputs};
 use crate::hydraulics::Hydraulics;
+use crate::loading::{Loading, WeightBalance};
 use crate::variables::Variables;
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
@@ -8,7 +9,6 @@ use esp_physics::{
     atmosphere::Atmosphere,
     flight::State,
     ground::{Controls as GroundControls, LandingGear, Surface},
-    loading::{Loading, WeightBalance},
     propulsion::{Command, Output as EngineOutput, Propulsion},
 };
 use esp_script::{Host, Reference};
@@ -71,7 +71,7 @@ impl Flight {
                 && (height == 0.0 || knots > 0.0),
             "invalid flight starting state"
         );
-        let model = Aerodynamics::from_data(data)?;
+        let model = crate::loading::aerodynamic_model(data)?;
         let aileron_up_limit = data
             .configuration
             .number("airplane_geometry", "aileron_up_limit")?
@@ -140,7 +140,7 @@ impl Flight {
         let loading = weights.load(fuel_fraction, payload)?;
         let previous_cg = loading.cg;
         Atmosphere::standard(height)?;
-        let gear = LandingGear::from_data(data)?;
+        let gear = crate::loading::landing_gear(data)?;
         let mut current = State {
             position: DVec3::new(0.0, 0.0, -height),
             velocity: DVec3::X * (knots * 1852.0 / 3600.0),

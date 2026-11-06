@@ -19,7 +19,7 @@ engine layer
     esp-render     wgpu renderer
     esp-audio      sound mixing and output
     esp-physics    reusable, session-free solver models
-    esp-sim        flight session, systems, animation, picking and variables
+    esp-sim        flight session, loading, systems, animation, picking and variables
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
     esp-terrain    elevation mesh, land class and photoreal ground

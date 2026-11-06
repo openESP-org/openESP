@@ -2,9 +2,9 @@ use esp_assets::flight::FlightData;
 use esp_physics::{
     aerodynamics::{Aerodynamics, Controls},
     flight::State,
-    loading::WeightBalance,
     time::STEP,
 };
+use esp_sim::loading::WeightBalance;
 use glam::{DQuat, DVec3};
 
 #[path = "../../../tests/support/content.rs"]
@@ -39,7 +39,7 @@ fn mach_tables_respond_to_local_speed_of_sound() {
         }
     }
     data.air = air;
-    let model = Aerodynamics::from_data(&data).unwrap();
+    let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
     let loading = WeightBalance::from_config(&data.configuration)
         .unwrap()
         .load(0.0, false)
@@ -107,7 +107,7 @@ fn angle_of_attack_tables_change_roll_and_yaw_at_the_authored_angle() {
         }
     }
     data.air = base.clone();
-    let reference = Aerodynamics::from_data(&data).unwrap();
+    let reference = esp_sim::loading::aerodynamic_model(&data).unwrap();
     let loading = WeightBalance::from_config(&data.configuration)
         .unwrap()
         .load(0.0, false)
@@ -142,7 +142,7 @@ fn angle_of_attack_tables_change_roll_and_yaw_at_the_authored_angle() {
         for value in [0.0f64, 1.0, 10.0, 0.0] {
             data.air.extend(value.to_le_bytes());
         }
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let same = sample(&model, 0.0);
         let changed = sample(&model, 10.0);
         assert!(same.moment.abs_diff_eq(low.moment, 1e-8));
@@ -163,7 +163,7 @@ fn sdk_aerodynamic_blocks_drive_the_same_forces_as_legacy_coefficients() {
         .next()
         .expect("aircraft path");
     let mut data = FlightData::load(&path, 0).unwrap();
-    let legacy = Aerodynamics::from_data(&data).unwrap();
+    let legacy = esp_sim::loading::aerodynamic_model(&data).unwrap();
     let records = esp_formats::air::parse(&data.air).unwrap();
     let coefficients = records
         .iter()
@@ -263,7 +263,7 @@ fn sdk_aerodynamic_blocks_drive_the_same_forces_as_legacy_coefficients() {
         }
     }
     data.air = modern;
-    let model = Aerodynamics::from_data(&data).unwrap();
+    let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
     let loading = WeightBalance::from_config(&data.configuration)
         .unwrap()
         .load(0.0, false)
@@ -305,7 +305,7 @@ fn sdk_aerodynamic_blocks_drive_the_same_forces_as_legacy_coefficients() {
         .offset
         + 8;
     data.air[drag_offset..drag_offset + 8].copy_from_slice(&(c.drag.cd0 + 0.1).to_le_bytes());
-    let increased_drag = sample(&Aerodynamics::from_data(&data).unwrap());
+    let increased_drag = sample(&esp_sim::loading::aerodynamic_model(&data).unwrap());
     assert!(increased_drag.force.x < actual.force.x);
 }
 
@@ -347,7 +347,7 @@ fn authored_control_scaling_and_elasticity_change_control_response() {
                 data.air[offset..offset + 8].copy_from_slice(&scalar.to_le_bytes());
             }
         }
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let loading = WeightBalance::from_config(&data.configuration)
             .unwrap()
             .load(0.0, false)
@@ -388,7 +388,7 @@ fn authored_control_scaling_and_elasticity_change_control_response() {
                 data.air[offset..offset + 8].copy_from_slice(&scalar.to_le_bytes());
             }
         }
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let pressure =
             ranges.iter().find(|(id, _, _)| *id == 0x517).unwrap().2[1].input * 47.88025898033584;
         assert!(pressure > 0.0);
@@ -438,7 +438,7 @@ fn authored_control_scaling_and_elasticity_change_control_response() {
                 let offset = start + 4 + index * 16 + 8;
                 data.air[offset..offset + 8].copy_from_slice(&0.0f64.to_le_bytes());
             }
-            let disabled = Aerodynamics::from_data(&data)
+            let disabled = esp_sim::loading::aerodynamic_model(&data)
                 .unwrap()
                 .forces(
                     DVec3::X * speed,
@@ -469,7 +469,7 @@ fn authored_ground_effect_changes_lift_by_height_above_the_surface() {
         let Some(esp_formats::air::table::Table::Curve(curve)) = record.table().unwrap() else {
             panic!("invalid ground effect curve")
         };
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let loading = WeightBalance::from_config(&data.configuration)
             .unwrap()
             .load(0.0, false)
@@ -537,7 +537,7 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
     let mut count = 0;
     for path in content::aircraft_paths() {
         let data = FlightData::load(&path, 0).unwrap();
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let loading = WeightBalance::from_config(&data.configuration)
             .unwrap()
             .load(0.0, false)
@@ -697,7 +697,7 @@ fn original_aircraft_produce_aerodynamic_forces_and_control_moments() {
 fn unpowered_original_aircraft_integrate_flight_without_creating_energy() {
     for path in content::aircraft_paths() {
         let data = FlightData::load(&path, 0).unwrap();
-        let model = Aerodynamics::from_data(&data).unwrap();
+        let model = esp_sim::loading::aerodynamic_model(&data).unwrap();
         let loading = WeightBalance::from_config(&data.configuration)
             .unwrap()
             .load(0.0, false)

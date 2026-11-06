@@ -3,10 +3,7 @@ use esp_assets::flight::FlightData;
 use esp_formats::cfg::{self, contact::ContactPoints};
 use glam::{DMat3, DVec3};
 
-use crate::{
-    flight::{MassProperties, State, Wrench},
-    loading::WeightBalance,
-};
+use crate::flight::{MassProperties, State, Wrench};
 
 mod friction;
 
@@ -208,7 +205,7 @@ impl LandingGear {
         Ok(())
     }
 
-    pub fn from_data(data: &FlightData) -> Result<Self> {
+    pub fn from_data(data: &FlightData, empty_cg: DVec3, empty_mass_kg: f64) -> Result<Self> {
         let config = &data.configuration;
         let contacts = ContactPoints::from_config(config)?;
         for rejected in &contacts.rejected {
@@ -231,8 +228,6 @@ impl LandingGear {
             contacts.points.iter().all(|p| matches!(p.class, 0..=2)),
             "only wheel and scrape ground contacts are supported"
         );
-        let weights = WeightBalance::from_config(config)?;
-        let empty = weights.load(0.0, false)?;
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .unwrap_or([0.0; 3]);
@@ -265,7 +260,7 @@ impl LandingGear {
         let arms = definitions
             .iter()
             .map(|p| {
-                let r = position(p.position_feet) - empty.cg;
+                let r = position(p.position_feet) - empty_cg;
                 DVec3::new(1.0, r.x, r.y)
             })
             .collect::<Vec<_>>();
@@ -276,7 +271,7 @@ impl LandingGear {
             matrix.determinant().abs() > 1e-12,
             "wheel supports do not span the aircraft center of gravity"
         );
-        let multipliers = matrix.inverse() * DVec3::new(empty.mass.kilograms() * 9.80665, 0.0, 0.0);
+        let multipliers = matrix.inverse() * DVec3::new(empty_mass_kg * 9.80665, 0.0, 0.0);
         let support = arms.iter().map(|a| a.dot(multipliers));
         let mut wheels = Vec::new();
         for (point, load) in definitions.into_iter().zip(support) {

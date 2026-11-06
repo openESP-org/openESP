@@ -1,9 +1,9 @@
 use esp_assets::flight::FlightData;
 use esp_physics::{
     flight::State,
-    ground::{Controls, LandingGear, Surface},
-    loading::WeightBalance,
+    ground::{Controls, Surface},
 };
+use esp_sim::loading::WeightBalance;
 use glam::{DQuat, DVec3};
 
 #[path = "../../../tests/support/content.rs"]
@@ -14,7 +14,7 @@ mod content;
 fn original_aircraft_settle_on_their_configured_landing_gear() {
     for path in content::aircraft_paths() {
         let data = FlightData::load(&path, 0).unwrap();
-        let gear = LandingGear::from_data(&data).unwrap();
+        let gear = esp_sim::loading::landing_gear(&data).unwrap();
         assert!(gear.wheel_indices().count() >= 3);
         let weights = WeightBalance::from_config(&data.configuration).unwrap();
         for (fuel, payload) in [(0.0, false), (0.5, true)] {

@@ -4,7 +4,6 @@ pub mod atmosphere;
 pub mod flaps;
 pub mod flight;
 pub mod ground;
-pub mod loading;
 mod lookup;
 pub mod piston;
 pub mod propeller;
