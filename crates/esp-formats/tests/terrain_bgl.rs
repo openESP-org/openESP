@@ -12,7 +12,18 @@ fn reads_real_photoreal_tiles_and_masks() {
     let mut decoded = 0;
     let mut ptc = 0;
     let mut best_coverage = 0;
+    let mut masks = 0;
     for (kind, tile) in &tiles {
+        let mask = tile
+            .decode_mask()
+            .unwrap_or_else(|error| panic!("mask {:?}: {error}", tile.qmid));
+        if let Some(mask) = &mask {
+            masks += 1;
+            assert_eq!(
+                mask.len(),
+                usize::from(tile.columns) * usize::from(tile.rows)
+            );
+        }
         assert!(tile.columns > 0 && tile.rows > 0);
         assert!(!tile.data.is_empty());
         assert!(tile.trailing_data.is_empty());
@@ -47,7 +58,7 @@ fn reads_real_photoreal_tiles_and_masks() {
                                 expand((pixel >> 10) & 31),
                                 expand((pixel >> 5) & 31),
                                 expand(pixel & 31),
-                                255,
+                                mask.as_ref().map_or(255, |mask| mask[offset / 2]),
                             ])
                         },
                     );
@@ -65,6 +76,8 @@ fn reads_real_photoreal_tiles_and_masks() {
     }
     assert!(imagery > 0);
     assert!(decoded > 0);
+    assert!(masks > 0);
+    eprintln!("decoded {masks} tile masks");
     eprintln!("decoded {decoded} imagery tiles; {ptc} PTC tiles await codec support");
     eprintln!(
         "{} raster records, {imagery} imagery tiles; first photo {:?}",

@@ -60,6 +60,12 @@ pub struct Raster<'a> {
 }
 
 impl<'a> Raster<'a> {
+    pub fn decode_mask(&self) -> Result<Option<Vec<u8>>, codec::Error> {
+        if self.mask.is_empty() {
+            return Ok(None);
+        }
+        codec::decode_mask(self.mask_compression, self.mask, self.columns, self.rows).map(Some)
+    }
     pub fn decode_data(&self) -> Result<Vec<u8>, codec::Error> {
         let bytes_per_pixel = match self.data_type {
             1 | 2 | 9 | 10 => 2,

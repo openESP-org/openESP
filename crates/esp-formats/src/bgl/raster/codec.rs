@@ -2,6 +2,7 @@
 //! Algorithm reference: seanisom/flightsimlib, BglDecompressor.cpp (MIT).
 //! Its license is retained in third_party/flightsimlib-LICENSE.
 use super::Compression;
+mod bitpack;
 
 const LIMIT: usize = 64 * 1024 * 1024;
 
@@ -25,11 +26,16 @@ pub fn decode(compression: Compression, input: &[u8], size: usize) -> Result<Vec
         Compression::None => Ok(input.get(..size).ok_or(Error::Truncated)?.to_vec()),
         Compression::Delta => delta(input, size),
         Compression::Lz1 => lz1(input, size),
-        Compression::DeltaLz1 => {
+        Compression::Lz2 => lz(input, size, true),
+        Compression::DeltaLz1 | Compression::DeltaLz2 => {
             let intermediate_size =
                 u32::from_le_bytes(input.get(..4).ok_or(Error::Truncated)?.try_into().unwrap())
                     as usize;
-            let intermediate = lz1(&input[4..], intermediate_size)?;
+            let intermediate = lz(
+                &input[4..],
+                intermediate_size,
+                compression == Compression::DeltaLz2,
+            )?;
             delta(&intermediate, size)
         }
         other => Err(Error::Unsupported(other)),
@@ -42,6 +48,9 @@ struct Bits<'a> {
 }
 impl Bits<'_> {
     fn read(&mut self, count: usize) -> Result<usize, Error> {
+        if count > 32 {
+            return Err(Error::InvalidData);
+        }
         let mut value = 0;
         for shift in 0..count {
             let byte = self.input.get(self.position / 8).ok_or(Error::Truncated)?;
@@ -53,11 +62,15 @@ impl Bits<'_> {
 }
 
 fn lz1(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
+    lz(input, size, false)
+}
+
+fn lz(input: &[u8], size: usize, version2: bool) -> Result<Vec<u8>, Error> {
     if size > LIMIT {
         return Err(Error::Limit);
     }
     let header = input.get(..4).ok_or(Error::Truncated)?;
-    if &header[..2] != b"DS" {
+    if &header[..2] != if version2 { b"JM" } else { b"DS" } {
         return Err(Error::InvalidData);
     }
     let mut bits = Bits {
@@ -66,7 +79,19 @@ fn lz1(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
     };
     let mut output = Vec::with_capacity(size);
     while output.len() < size {
-        let kind = bits.read(2)?;
+        let kind = if version2 {
+            if bits.read(1)? == 0 {
+                2
+            } else if bits.read(1)? != 0 {
+                1
+            } else if bits.read(1)? != 0 {
+                3
+            } else {
+                0
+            }
+        } else {
+            bits.read(2)?
+        };
         if kind == 1 || kind == 2 {
             let byte = bits.read(7)? as u8;
             output.push(byte | if kind == 1 { 0x80 } else { 0 });
@@ -94,11 +119,12 @@ fn lz1(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
                 return Err(Error::InvalidData);
             }
         }
-        let length = if count == 0 {
-            2
-        } else {
-            (1 << count) + bits.read(count)? + 1
-        };
+        let length = usize::from(version2)
+            + if count == 0 {
+                2
+            } else {
+                (1 << count) + bits.read(count)? + 1
+            };
         if length > size - output.len() {
             return Err(Error::InvalidData);
         }
@@ -107,6 +133,33 @@ fn lz1(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(output)
+}
+
+pub fn decode_mask(
+    compression: Compression,
+    input: &[u8],
+    columns: u16,
+    rows: u16,
+) -> Result<Vec<u8>, Error> {
+    let size = usize::from(columns) * usize::from(rows);
+    if size > LIMIT {
+        return Err(Error::Limit);
+    }
+    match compression {
+        Compression::BitPack => bitpack::decode(input, columns, rows),
+        Compression::BitPackLz1 | Compression::BitPackLz2 => {
+            let intermediate_size =
+                u32::from_le_bytes(input.get(..4).ok_or(Error::Truncated)?.try_into().unwrap())
+                    as usize;
+            let intermediate = lz(
+                &input[4..],
+                intermediate_size,
+                compression == Compression::BitPackLz2,
+            )?;
+            bitpack::decode(&intermediate, columns, rows)
+        }
+        _ => decode(compression, input, size),
+    }
 }
 
 fn delta(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
@@ -143,6 +196,28 @@ fn delta(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lz2_reads_literals_and_overlapping_dictionary_runs() {
+        let mut bits = Vec::new();
+        for (value, count) in [(0usize, 1), (65, 7), (1, 1), (0, 1), (0, 1), (1, 6), (1, 1)] {
+            for shift in 0..count {
+                bits.push((value >> shift) & 1);
+            }
+        }
+        let mut input = b"JM\0\0".to_vec();
+        for chunk in bits.chunks(8) {
+            input.push(
+                chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |value, (index, bit)| value | ((*bit as u8) << index)),
+            );
+        }
+        assert_eq!(decode(Compression::Lz2, &input, 4).unwrap(), b"AAAA");
+        assert!(decode(Compression::Lz2, &input, 3).is_err());
+        assert!(decode(Compression::Lz2, &input[..input.len() - 1], 4).is_err());
+    }
 
     #[test]
     fn delta_handles_absolute_values_extended_deltas_and_overflow() {
