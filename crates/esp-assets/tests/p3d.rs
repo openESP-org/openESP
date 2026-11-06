@@ -16,7 +16,7 @@ fn loads_prepar3d_model() {
 
 #[test]
 #[ignore = "requires a PV44 scenery library in OPENESP_P3D_LIBRARY"]
-fn identifies_real_pbr_scenery_models() {
+fn loads_real_pbr_scenery_models() {
     let path = std::env::var_os("OPENESP_P3D_LIBRARY").expect("set OPENESP_P3D_LIBRARY");
     let bytes = std::fs::read(path).unwrap();
     let bgl = esp_formats::bgl::Bgl::parse(&bytes).unwrap();
@@ -35,19 +35,45 @@ fn identifies_real_pbr_scenery_models() {
                 .decode()
                 .unwrap();
             let exterior = decoded.exterior.unwrap();
-            assert!(
-                exterior
-                    .unknown
-                    .iter()
-                    .any(|section| &section.id == b"PBRM" && !section.data.is_empty())
-            );
+            assert!(!exterior.pbr_materials.is_empty());
             assert!(exterior.lods.iter().any(|lod| !lod.parts.is_empty()));
-            let error = Model::from_bytes(record.data)
-                .err()
-                .expect("PBR rendering must be identified as unsupported");
-            assert!(error.to_string().contains("PBR materials"));
+            let model = Model::from_bytes(record.data).expect("load PBR model");
+            assert!(
+                model
+                    .materials
+                    .iter()
+                    .any(|material| material.pbr.is_some())
+            );
+            assert!(
+                model
+                    .materials
+                    .iter()
+                    .any(|material| material.pbr.is_some() && material.diffuse_texture.is_some())
+            );
             found += 1;
         }
     }
     assert!(found > 0, "no PV44 models found");
+}
+
+#[test]
+#[ignore = "requires a mixed-material P3D aircraft model in OPENESP_P3D_PBR_AIRCRAFT"]
+fn loads_mixed_legacy_and_pbr_aircraft_materials() {
+    let path = std::env::var_os("OPENESP_P3D_PBR_AIRCRAFT").unwrap();
+    let model = Model::load(std::path::Path::new(&path)).unwrap();
+    assert!(
+        model
+            .materials
+            .iter()
+            .any(|material| material.pbr.is_none())
+    );
+    assert!(
+        model
+            .materials
+            .iter()
+            .any(|material| material.pbr.is_some())
+    );
+    assert!(model.lods.iter().flat_map(|lod| &lod.meshes).any(|mesh| {
+        mesh.vertices.len() > 1000 && model.materials[mesh.material].pbr.is_some()
+    }));
 }

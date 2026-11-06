@@ -167,6 +167,7 @@ mod tests {
                     .unwrap()
                     .remove(0),
                 diffuse_texture: None,
+                pbr: None,
             }],
             lods: vec![Lod {
                 level: 100,

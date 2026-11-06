@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 pub struct ModelData<'a> {
     pub textures: Vec<&'a [u8]>,
     pub materials: Vec<material::Material>,
+    pub pbr_materials: Vec<material::PbrMaterial>,
     pub material_extensions: Vec<u32>,
     pub indices: Vec<u32>,
     pub vertices: Vec<Vec<geometry::Vertex>>,
@@ -47,8 +48,14 @@ pub struct PartGeometry<'a> {
     pub skin_weights: Option<&'a [geometry::SkinWeight]>,
     pub bone_map: Option<&'a [i32]>,
     pub indices: &'a [u32],
-    pub material: &'a material::Material,
+    pub material: PartMaterial<'a>,
     pub scene_node: &'a scene::Node,
+}
+
+#[derive(Debug)]
+pub enum PartMaterial<'a> {
+    Legacy(&'a material::Material),
+    Pbr(&'a material::PbrMaterial),
 }
 
 #[derive(Debug)]
@@ -199,7 +206,22 @@ impl<'a> ModelData<'a> {
                 });
             }
         }
-        let material = reference(&self.materials, part.material, "material")?;
+        let index = usize::try_from(part.material).ok();
+        let material = index
+            .and_then(|index| {
+                if index < self.materials.len() {
+                    self.materials.get(index).map(PartMaterial::Legacy)
+                } else {
+                    self.pbr_materials
+                        .get(index - self.materials.len())
+                        .map(PartMaterial::Pbr)
+                }
+            })
+            .ok_or(Error::InvalidReference {
+                field: "material",
+                value: i64::from(part.material),
+                available: self.materials.len() + self.pbr_materials.len(),
+            })?;
         let scene_node = reference(&self.nodes, part.scene_node, "scene node")?;
         Ok(PartGeometry {
             vertices,
@@ -243,6 +265,7 @@ impl<'a> ModelData<'a> {
                     | b"ATTO"
                     | b"MREC"
                     | b"MREI"
+                    | b"PBRM"
             );
             let identity = match &child.id {
                 b"MAT3" => *b"MATE",
@@ -259,6 +282,7 @@ impl<'a> ModelData<'a> {
                     (result.materials, result.material_extensions) =
                         material::materials3(child.data)?;
                 }
+                b"PBRM" => result.pbr_materials = material::pbr_materials(child.data)?,
                 b"INDE" => result.indices = geometry::indices(child.data)?,
                 b"IND3" => result.indices = geometry::indices32(child.data)?,
                 b"TRAN" => result.transforms = geometry::transforms(child.data)?,
@@ -538,6 +562,11 @@ mod tests {
                 field: "material",
                 ..
             })
+        ));
+        data.pbr_materials = material::pbr_materials(&[0; 184]).unwrap();
+        assert!(matches!(
+            data.part_geometry(&part).unwrap().material,
+            PartMaterial::Pbr(_)
         ));
     }
 

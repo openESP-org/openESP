@@ -27,6 +27,7 @@ struct DrawUniform {
     normal: [[f32; 4]; 4],
     diffuse: [f32; 4],
     settings: [f32; 4],
+    pbr: [f32; 4],
 }
 
 struct Draw {
@@ -503,7 +504,7 @@ impl Renderer {
                 let uniform = DrawUniform {
                     model: Mat4::IDENTITY.to_cols_array_2d(),
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
-                    diffuse: if material.diffuse_texture.is_some() {
+                    diffuse: if material.diffuse_texture.is_some() && material.pbr.is_none() {
                         [1.0, 1.0, 1.0, material.source.diffuse[3]]
                     } else {
                         material.source.diffuse
@@ -522,6 +523,14 @@ impl Renderer {
                             8.0
                         },
                     ],
+                    pbr: material.pbr.as_ref().map_or([0.0; 4], |pbr| {
+                        [
+                            pbr.metallic.clamp(0.0, 1.0),
+                            1.0 - pbr.smoothness.clamp(0.0, 1.0),
+                            1.0,
+                            0.0,
+                        ]
+                    }),
                 };
                 draws.push(make_draw(
                     &device,
@@ -644,6 +653,7 @@ impl Renderer {
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
                     diffuse: [0.32, 0.32, 0.32, 1.0],
                     settings: [0.0, 1.0, 0.0, 0.0],
+                    pbr: [0.0; 4],
                 },
                 blended: false,
                 node: None,
@@ -704,6 +714,7 @@ impl Renderer {
                         normal: Mat4::IDENTITY.to_cols_array_2d(),
                         diffuse: [1.0; 4],
                         settings: [0.0, 2.0, 0.0, 0.0],
+                        pbr: [0.0; 4],
                     },
                     blended: true,
                     node: None,
@@ -739,6 +750,7 @@ impl Renderer {
                         normal: Mat4::IDENTITY.to_cols_array_2d(),
                         diffuse: [0.23, 0.23, 0.23, 1.0],
                         settings: [0.0, 2.0, 0.0, 0.0],
+                        pbr: [0.0; 4],
                     },
                     blended: false,
                     node: None,
@@ -775,6 +787,7 @@ impl Renderer {
                         normal: Mat4::IDENTITY.to_cols_array_2d(),
                         diffuse: color,
                         settings: [0.0, 2.0, 0.0, 0.0],
+                        pbr: [0.0; 4],
                     },
                     blended: false,
                     node: None,
@@ -817,6 +830,7 @@ impl Renderer {
                             normal: Mat4::IDENTITY.to_cols_array_2d(),
                             diffuse: color,
                             settings: [0.0, 2.0, 0.0, 0.0],
+                            pbr: [0.0; 4],
                         },
                         blended: false,
                         node: None,

@@ -30,6 +30,32 @@ pub struct Material {
     pub final_alpha_multiply: f32,
 }
 
+/// Prepar3D PV44 material. Unknown trailing words are retained for later use.
+#[derive(Debug, Clone, PartialEq, BinRead)]
+#[br(little)]
+pub struct PbrMaterial {
+    pub flags: u32,
+    pub albedo: [f32; 4],
+    pub metallic: f32,
+    pub smoothness: f32,
+    pub render_mode: u32,
+    pub unknown_blend: [u32; 2],
+    pub masked_threshold: f32,
+    pub albedo_texture: i32,
+    pub metallic_texture: i32,
+    pub normal_texture: i32,
+    pub emissive_texture: i32,
+    pub detail_texture: i32,
+    pub extra: [u32; 30],
+}
+
+pub fn pbr_materials(data: &[u8]) -> Result<Vec<PbrMaterial>, Error> {
+    if data == [0, 0, 0, 0] {
+        return Ok(Vec::new());
+    }
+    records(data, 184)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct TextureMaps<'a> {
     pub diffuse: Option<&'a [u8]>,
@@ -105,6 +131,31 @@ pub fn textures(data: &[u8]) -> Result<Vec<&[u8]>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_pbr_material_fields_and_rejects_truncation() {
+        let mut bytes = [0u8; 184];
+        for (index, word) in [
+            (1, 1.0f32.to_bits()),
+            (5, 0.6f32.to_bits()),
+            (6, 0.5f32.to_bits()),
+            (7, 1),
+            (10, 0.4f32.to_bits()),
+            (11, 3),
+            (12, u32::MAX),
+        ] {
+            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let material = pbr_materials(&bytes).unwrap().remove(0);
+        assert_eq!(material.albedo[0], 1.0);
+        assert_eq!((material.metallic, material.smoothness), (0.6, 0.5));
+        assert_eq!((material.render_mode, material.masked_threshold), (1, 0.4));
+        assert_eq!(
+            (material.albedo_texture, material.metallic_texture),
+            (3, -1)
+        );
+        assert_eq!(pbr_materials(&bytes[..183]), Err(Error::InvalidSize));
+    }
 
     #[test]
     fn reads_all_material_fields() {

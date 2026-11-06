@@ -11,6 +11,7 @@ pub mod animation;
 pub mod flight;
 pub mod gauge;
 pub mod panel;
+mod pbr;
 pub mod sound;
 pub mod texture;
 
@@ -50,6 +51,7 @@ pub struct Node {
 pub struct Material {
     pub source: mdl::material::Material,
     pub diffuse_texture: Option<String>,
+    pub pbr: Option<mdl::material::PbrMaterial>,
 }
 
 pub struct Lod {
@@ -293,11 +295,6 @@ impl Model {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let decoded = mdl::Model::parse(bytes)?.decode()?;
         let data = decoded.exterior.context("model has no MDLD data")?;
-        if data.unknown.iter().any(|section| {
-            &section.id == b"PBRM" && !section.data.is_empty() && section.data != [0, 0, 0, 0]
-        }) {
-            bail!("Prepar3D PBR materials are not yet supported");
-        }
         let parents = mdl::scene::parents(&data.nodes)?;
         let animations = animation::animations(&data)?;
         let visibility = animation::visibility(&data)?;
@@ -351,7 +348,7 @@ impl Model {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let materials = data
+        let mut materials = data
             .materials
             .iter()
             .map(|material| {
@@ -362,9 +359,13 @@ impl Model {
                         .diffuse
                         .map(|name| std::str::from_utf8(name).map(str::to_owned))
                         .transpose()?,
+                    pbr: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        for material in &data.pbr_materials {
+            materials.push(pbr::load(material, &data.textures)?);
+        }
         let mut lods = Vec::new();
         for lod in &data.lods {
             let mut meshes = Vec::new();
