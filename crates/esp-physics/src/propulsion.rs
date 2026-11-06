@@ -1,5 +1,4 @@
-use anyhow::{Result, bail};
-use esp_assets::flight::FlightData;
+use anyhow::Result;
 use glam::DVec3;
 
 use crate::{atmosphere::Atmosphere, flight::Wrench, piston, turbine};
@@ -48,28 +47,6 @@ impl Output {
 }
 
 impl Propulsion {
-    pub fn from_data(
-        data: &FlightData,
-        propeller: impl FnOnce() -> Result<crate::propeller::Propeller>,
-        cycle: impl FnOnce() -> Result<crate::piston::PistonCycle>,
-        turbines: impl FnOnce() -> Result<crate::turbine::Turbines>,
-    ) -> Result<Self> {
-        match data
-            .configuration
-            .number("GeneralEngineData", "engine_type")?
-        {
-            Some(0.0) => Ok(Self::Piston {
-                model: Box::new(piston::Pistons::from_data(data, propeller, cycle)?),
-                commands: Vec::new(),
-            }),
-            Some(1.0) => Ok(Self::Turbine {
-                model: Box::new(turbines()?),
-                commands: Vec::new(),
-            }),
-            kind => bail!("unsupported running engine type: {kind:?}"),
-        }
-    }
-
     pub fn is_piston(&self) -> bool {
         matches!(self, Self::Piston { .. })
     }
