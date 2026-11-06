@@ -71,8 +71,12 @@ pub fn flaps(config: &Config) -> Result<Vec<FlapSet>, ValueError> {
                 "unsupported system type",
             ));
         }
-        if extending_time.is_some_and(|time| time <= 0.0) {
-            return Err(flap_error(section, "extending-time", "must be positive"));
+        if extending_time.is_some_and(|time| time < 0.0 || (kind != 0 && time == 0.0)) {
+            return Err(flap_error(
+                section,
+                "extending-time",
+                "must be positive for active flaps",
+            ));
         }
         let mut positions = Vec::new();
         for (key, value) in properties {
@@ -242,6 +246,8 @@ mod tests {
         assert_eq!(limited[0].positions[1].speed_limit, Some(120.0));
         let powered = flaps(&Config::parse("[flaps.0]\ntype=1\nsystem_type=1").unwrap()).unwrap();
         assert_eq!(powered[0].system_type, Some(1));
+        let absent = flaps(&Config::parse("[flaps.0]\ntype=0\nextending-time=0").unwrap()).unwrap();
+        assert_eq!((absent[0].kind, absent[0].extending_time), (0, Some(0.0)));
     }
 
     #[test]
@@ -249,7 +255,8 @@ mod tests {
         for text in [
             "[flaps.0]\ntype=3",
             "[flaps.0]\ntype=1\nTYPE=2",
-            "[flaps.0]\nextending-time=0",
+            "[flaps.0]\ntype=1\nextending-time=0",
+            "[flaps.0]\ntype=0\nextending-time=-1",
             "[flaps.0]\nextending-time=NaN",
             "[flaps.0]\nsystem_type=5",
             "[flaps.0]\nsystem_type=-1",
