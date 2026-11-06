@@ -51,6 +51,7 @@ pub struct Node {
 pub struct Material {
     pub source: mdl::material::Material,
     pub diffuse_texture: Option<String>,
+    pub metallic_texture: Option<String>,
     pub pbr: Option<mdl::material::PbrMaterial>,
 }
 
@@ -359,6 +360,7 @@ impl Model {
                         .diffuse
                         .map(|name| std::str::from_utf8(name).map(str::to_owned))
                         .transpose()?,
+                    metallic_texture: None,
                     pbr: None,
                 })
             })

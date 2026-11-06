@@ -167,6 +167,7 @@ mod tests {
                     .unwrap()
                     .remove(0),
                 diffuse_texture: None,
+                metallic_texture: None,
                 pbr: None,
             }],
             lods: vec![Lod {

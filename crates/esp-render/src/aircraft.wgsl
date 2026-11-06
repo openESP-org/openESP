@@ -10,6 +10,7 @@ struct Draw {
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(1) @binding(1) var diffuse_texture: texture_2d<f32>;
 @group(1) @binding(2) var texture_sampler: sampler;
+@group(1) @binding(3) var metallic_texture: texture_2d<f32>;
 struct Output {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
@@ -26,6 +27,11 @@ struct Output {
 }
 @fragment fn fs_main(input: Output) -> @location(0) vec4<f32> {
     var colour = textureSample(diffuse_texture, texture_sampler, input.uv) * draw.diffuse;
+    var metal_sample = vec4(1.0);
+    if draw.pbr.w > 0.5 {
+        let metal_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.pbr.w > 1.5));
+        metal_sample = textureSample(metallic_texture, texture_sampler, metal_uv);
+    }
     let alpha = colour.a;
     let threshold = draw.settings.z;
     var passes = true;
@@ -57,8 +63,13 @@ struct Output {
         let nv = max(dot(n, v), 0.001);
         let nh = max(dot(n, h), 0.0);
         let vh = max(dot(v, h), 0.0);
-        let metal = draw.pbr.x;
-        let rough = max(draw.pbr.y, 0.045);
+        var metal = draw.pbr.x;
+        var roughness = draw.pbr.y;
+        if draw.pbr.w > 0.5 {
+            metal = metal_sample.r;
+            roughness = 1.0 - metal_sample.a;
+        }
+        let rough = max(roughness, 0.045);
         let a = rough * rough;
         let a2 = a * a;
         let d = a2 / max(3.14159265 * pow(nh * nh * (a2 - 1.0) + 1.0, 2.0), 0.000001);

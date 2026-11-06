@@ -12,18 +12,21 @@ pub fn load(pbr: &PbrMaterial, textures: &[&[u8]]) -> Result<Material> {
             && pbr.masked_threshold.is_finite(),
         "invalid PBR material values"
     );
-    let diffuse_texture = match pbr.albedo_texture {
-        -1 => None,
-        index if index >= 0 => Some(
-            std::str::from_utf8(
-                textures
-                    .get(index as usize)
-                    .ok_or_else(|| anyhow::anyhow!("invalid PBR albedo texture index {index}"))?,
-            )?
-            .to_owned(),
-        ),
-        index => bail!("invalid PBR albedo texture index {index}"),
-    };
+    let resolve_texture =
+        |index, kind| -> Result<Option<String>> {
+            Ok(match index {
+                -1 => None,
+                index if index >= 0 => Some(
+                    std::str::from_utf8(textures.get(index as usize).ok_or_else(|| {
+                        anyhow::anyhow!("invalid PBR {kind} texture index {index}")
+                    })?)?
+                    .to_owned(),
+                ),
+                index => bail!("invalid PBR {kind} texture index {index}"),
+            })
+        };
+    let diffuse_texture = resolve_texture(pbr.albedo_texture, "albedo")?;
+    let metallic_texture = resolve_texture(pbr.metallic_texture, "metallic")?;
     let (source_blend, destination_blend, alpha_flag) = match pbr.render_mode {
         0 => (2, 1, false),
         1 => (2, 1, true),
@@ -61,6 +64,7 @@ pub fn load(pbr: &PbrMaterial, textures: &[&[u8]]) -> Result<Material> {
     Ok(Material {
         source,
         diffuse_texture,
+        metallic_texture,
         pbr: Some(pbr.clone()),
     })
 }
@@ -80,18 +84,21 @@ mod tests {
             (7, 1),
             (10, 0.4f32.to_bits()),
             (11, 0),
+            (12, 1),
         ] {
             bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         let pbr = esp_formats::mdl::material::pbr_materials(&bytes)
             .unwrap()
             .remove(0);
-        let material = load(&pbr, &[b"albedo.dds"]).unwrap();
+        let material = load(&pbr, &[b"albedo.dds", b"metallic.dds"]).unwrap();
         assert_eq!(material.diffuse_texture.as_deref(), Some("albedo.dds"));
+        assert_eq!(material.metallic_texture.as_deref(), Some("metallic.dds"));
         assert_eq!(material.source.flags & 0x00400000, 0x00400000);
         assert_eq!(material.source.alpha_test_function, 5);
         assert!((material.source.alpha_test_threshold / 255.0 - 0.4).abs() < 1e-6);
         assert_eq!(material.pbr.unwrap().metallic, 0.6);
         assert!(load(&pbr, &[]).is_err());
+        assert!(load(&pbr, &[b"albedo.dds"]).is_err());
     }
 }

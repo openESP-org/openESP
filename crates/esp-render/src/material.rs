@@ -1,4 +1,18 @@
 use anyhow::{Result, bail};
+use esp_assets::texture;
+
+pub(super) fn texture_format(format: texture::Format, srgb: bool) -> wgpu::TextureFormat {
+    match (format, srgb) {
+        (texture::Format::Rgba8, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+        (texture::Format::Bc1, true) => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
+        (texture::Format::Bc2, true) => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
+        (texture::Format::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+        (texture::Format::Rgba8, false) => wgpu::TextureFormat::Rgba8Unorm,
+        (texture::Format::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
+        (texture::Format::Bc2, false) => wgpu::TextureFormat::Bc2RgbaUnorm,
+        (texture::Format::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PipelineKey {
@@ -52,6 +66,18 @@ impl PipelineKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn color_textures_and_material_data_use_different_transfer_functions() {
+        for format in [
+            texture::Format::Rgba8,
+            texture::Format::Bc1,
+            texture::Format::Bc2,
+            texture::Format::Bc3,
+        ] {
+            assert!(texture_format(format, true).is_srgb());
+            assert!(!texture_format(format, false).is_srgb());
+        }
+    }
     #[test]
     fn preserves_colour_blending_and_depth_flags() {
         let key = PipelineKey::new(5, 4, 0, 0);

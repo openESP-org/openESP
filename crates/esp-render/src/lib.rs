@@ -10,7 +10,7 @@ use winit::window::Window;
 pub mod camera;
 mod material;
 pub use camera::Camera;
-use material::PipelineKey;
+use material::{PipelineKey, texture_format};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -53,6 +53,7 @@ struct DrawData<'a> {
     blended: bool,
     node: Option<usize>,
     pipeline: usize,
+    metallic_map: Option<&'a wgpu::TextureView>,
 }
 
 pub struct Renderer {
@@ -338,6 +339,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -492,6 +503,42 @@ impl Renderer {
                     )?
                     .create_view(&Default::default())
                 };
+                let mut metallic_flip = false;
+                let metallic_view = if let Some(name) = &material.metallic_texture {
+                    let cache_key = format!(
+                        "linear|{}|{name}",
+                        texture_root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+                    );
+                    if let Some((view, flip)) = textures.get(&cache_key) {
+                        metallic_flip = *flip;
+                        Some(view.clone())
+                    } else {
+                        let resolved = if let Some(root) = texture_root {
+                            esp_assets::resolve_path(root, name).map(Some)
+                        } else {
+                            aircraft.texture_path(name)
+                        };
+                        match resolved {
+                            Ok(Some(path)) => {
+                                let image = texture::Texture::load(&path, compressed)?;
+                                metallic_flip = image.flip_v;
+                                let view = upload_texture_with_color_space(
+                                    &device, &queue, &image, false,
+                                )?
+                                .create_view(&Default::default());
+                                textures.insert(cache_key, (view.clone(), metallic_flip));
+                                Some(view)
+                            }
+                            Ok(None) => None,
+                            Err(error) => {
+                                eprintln!("metallic texture: {error}");
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
                 let vertices: Vec<_> = mesh
                     .vertices
                     .iter()
@@ -528,7 +575,11 @@ impl Renderer {
                             pbr.metallic.clamp(0.0, 1.0),
                             1.0 - pbr.smoothness.clamp(0.0, 1.0),
                             1.0,
-                            0.0,
+                            if metallic_view.is_some() {
+                                if metallic_flip == flip_v { 1.0 } else { 2.0 }
+                            } else {
+                                0.0
+                            },
                         ]
                     }),
                 };
@@ -546,6 +597,7 @@ impl Renderer {
                             || material.source.destination_blend != 1,
                         node: Some(mesh.node),
                         pipeline: pipeline_index,
+                        metallic_map: metallic_view.as_ref(),
                     },
                 ));
             }
@@ -658,6 +710,7 @@ impl Renderer {
                 blended: false,
                 node: None,
                 pipeline: 0,
+                metallic_map: None,
             },
         );
         let photo_key = PipelineKey {
@@ -719,6 +772,7 @@ impl Renderer {
                     blended: true,
                     node: None,
                     pipeline: photo_pipeline,
+                    metallic_map: None,
                 },
             ));
         }
@@ -755,6 +809,7 @@ impl Renderer {
                     blended: false,
                     node: None,
                     pipeline: 0,
+                    metallic_map: None,
                 },
             ));
         }
@@ -792,6 +847,7 @@ impl Renderer {
                     blended: false,
                     node: None,
                     pipeline: 0,
+                    metallic_map: None,
                 },
             ));
         }
@@ -835,6 +891,7 @@ impl Renderer {
                         blended: false,
                         node: None,
                         pipeline: 0,
+                        metallic_map: None,
                     },
                 ));
             }
@@ -1193,12 +1250,16 @@ fn upload_texture(
     queue: &wgpu::Queue,
     image: &texture::Texture,
 ) -> Result<wgpu::Texture> {
-    let format = match image.format {
-        texture::Format::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
-        texture::Format::Bc1 => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-        texture::Format::Bc2 => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
-        texture::Format::Bc3 => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
-    };
+    upload_texture_with_color_space(device, queue, image, true)
+}
+
+fn upload_texture_with_color_space(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &texture::Texture,
+    srgb: bool,
+) -> Result<wgpu::Texture> {
+    let format = texture_format(image.format, srgb);
     let base = image.mips.first().context("texture has no mips")?;
     anyhow::ensure!(
         base.width <= device.limits().max_texture_dimension_2d
@@ -1262,6 +1323,7 @@ fn make_draw(
         blended,
         node,
         pipeline,
+        metallic_map,
     } = data;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("draw"),
@@ -1283,6 +1345,10 @@ fn make_draw(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(metallic_map.unwrap_or(texture)),
             },
         ],
     });

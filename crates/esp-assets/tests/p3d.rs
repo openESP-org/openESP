@@ -76,4 +76,10 @@ fn loads_mixed_legacy_and_pbr_aircraft_materials() {
     assert!(model.lods.iter().flat_map(|lod| &lod.meshes).any(|mesh| {
         mesh.vertices.len() > 1000 && model.materials[mesh.material].pbr.is_some()
     }));
+    assert!(
+        model
+            .materials
+            .iter()
+            .any(|material| material.metallic_texture.is_some())
+    );
 }
