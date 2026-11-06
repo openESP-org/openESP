@@ -1,6 +1,6 @@
 use esp_assets::flight::FlightData;
 use esp_physics::{
-    flight::State,
+    flight::Motion as State,
     ground::{Controls, Surface},
 };
 use esp_sim::loading::WeightBalance;

@@ -637,7 +637,7 @@ impl Aerodynamics {
 
     pub fn wing_height(
         &self,
-        state: &crate::flight::State,
+        state: &crate::flight::Motion,
         cg: DVec3,
         ground_elevation: f64,
     ) -> f64 {

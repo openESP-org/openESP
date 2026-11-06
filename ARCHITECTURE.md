@@ -40,13 +40,14 @@ These rules follow from this arrangement and are not negotiable:
 - The app layer is the only place that knows every crate. Everything below it
   can be built, tested and used on its own.
 
-The partition remains in progress: flight state and its integrator still live
-in `esp-physics`, and several solver constructors still read aircraft content.
-Those responsibilities must move behind session and content adapters before
-the physics crate is fully session-free and content-agnostic.
+The partition remains in progress: several physics solver constructors still
+read aircraft content. Those constructors must move behind content adapters
+before the physics crate is fully content-agnostic.
 
-Rigid-body integration is exposed as a pure physics calculation; the session
-owns the decision to advance and commits the returned state only on success.
+The session owns its flight state. Physics and navigation consume `Motion`
+snapshots; rigid-body integration returns a new snapshot and the session
+commits it only on success. A mutable snapshot convenience method remains for
+existing solver tests and callers.
 
 Crates that do not exist yet are listed in their scheduled order below. When a
 domain earns its promotion, it moves out of its current module with no

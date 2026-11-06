@@ -1,3 +1,4 @@
+pub use self::state::SessionState;
 use crate::autopilot::{Autopilot, Inputs as AutopilotInputs};
 use crate::hydraulics::Hydraulics;
 use crate::loading::{Loading, WeightBalance};
@@ -7,7 +8,7 @@ use esp_assets::flight::FlightData;
 use esp_physics::{
     aerodynamics::{Aerodynamics, Controls},
     atmosphere::Atmosphere,
-    flight::State,
+    flight::Motion as State,
     ground::{Controls as GroundControls, LandingGear, Surface},
     propulsion::{Command, Output as EngineOutput, Propulsion},
 };
@@ -27,8 +28,8 @@ pub struct Flight {
     commands: Vec<Command>,
     fuel_selectors: u32,
     master_ignition_available: bool,
-    pub current: State,
-    previous: State,
+    pub current: SessionState,
+    previous: SessionState,
     previous_cg: DVec3,
     flaps: Vec<f64>,
     spoiler_surfaces: [f64; 2],
@@ -141,11 +142,12 @@ impl Flight {
         let previous_cg = loading.cg;
         Atmosphere::standard(height)?;
         let gear = crate::loading::landing_gear(data)?;
-        let mut current = State {
+        let mut current: SessionState = State {
             position: DVec3::new(0.0, 0.0, -height),
             velocity: DVec3::X * (knots * 1852.0 / 3600.0),
             ..State::default()
-        };
+        }
+        .into();
         if height == 0.0 {
             let pitch = data
                 .configuration
@@ -245,6 +247,7 @@ mod instruments;
 mod loading;
 mod pose;
 mod report;
+mod state;
 
 #[cfg(test)]
 mod tests;

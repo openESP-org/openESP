@@ -457,7 +457,8 @@ impl Flight {
                     loads.moment += ground.wrench.moment;
                     Ok(loads)
                 },
-            )?;
+            )?
+            .into();
             self.gear.solve_friction(
                 &mut next,
                 &self.loading.mass,

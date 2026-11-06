@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use esp_physics::{flight::State, variables::VariableStore};
+use esp_physics::{flight::Motion as State, variables::VariableStore};
 use esp_script::Reference;
 use glam::{DVec3, EulerRot};
 use std::f64::consts::{PI, TAU};

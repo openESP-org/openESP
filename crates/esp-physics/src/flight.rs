@@ -47,14 +47,14 @@ impl MassProperties {
 
 // Body axes are forward, right, down. Position and velocity use a local NED frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct State {
+pub struct Motion {
     pub position: DVec3,
     pub velocity: DVec3,
     pub orientation: DQuat,
     pub angular_velocity: DVec3,
 }
 
-impl Default for State {
+impl Default for Motion {
     fn default() -> Self {
         Self {
             position: DVec3::ZERO,
@@ -65,7 +65,7 @@ impl Default for State {
     }
 }
 
-impl State {
+impl Motion {
     pub fn rebase(&mut self, offset: DVec3) -> Result<()> {
         ensure!(offset.is_finite(), "invalid aircraft reference offset");
         self.position += self.orientation * offset;
@@ -117,12 +117,12 @@ struct Derivative {
 }
 
 pub fn integrate(
-    initial: &State,
+    initial: &Motion,
     mass: &MassProperties,
     dt: f64,
     gravity: DVec3,
-    loads: impl Fn(&State) -> Result<Wrench>,
-) -> Result<State> {
+    loads: impl Fn(&Motion) -> Result<Wrench>,
+) -> Result<Motion> {
     ensure!(
         dt.is_finite() && dt >= 0.0 && gravity.is_finite(),
         "invalid flight timestep or gravity"
@@ -131,7 +131,7 @@ pub fn integrate(
     if dt == 0.0 {
         return Ok(*initial);
     }
-    let derivative = |state: &State| -> Result<Derivative> {
+    let derivative = |state: &Motion| -> Result<Derivative> {
         let wrench = loads(state)?;
         ensure!(
             wrench.force.is_finite() && wrench.moment.is_finite(),
@@ -147,7 +147,7 @@ pub fn integrate(
                 * (wrench.moment - omega.cross(mass.inertia * omega)),
         })
     };
-    let at = |derivative: &Derivative, interval: f64| State {
+    let at = |derivative: &Derivative, interval: f64| Motion {
         position: initial.position + derivative.position * interval,
         velocity: initial.velocity + derivative.velocity * interval,
         orientation: (initial.orientation + derivative.orientation * interval).normalize(),
@@ -157,7 +157,7 @@ pub fn integrate(
     let b = derivative(&at(&a, dt * 0.5))?;
     let c = derivative(&at(&b, dt * 0.5))?;
     let d = derivative(&at(&c, dt))?;
-    let next = State {
+    let next = Motion {
         position: initial.position
             + (a.position + 2.0 * b.position + 2.0 * c.position + d.position) * (dt / 6.0),
         velocity: initial.velocity
@@ -177,7 +177,7 @@ pub fn integrate(
     Ok(next)
 }
 
-impl State {
+impl Motion {
     pub fn advance(
         &mut self,
         mass: &MassProperties,
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn rebasing_preserves_airframe_position_and_material_point_velocity() {
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::splat(1e6),
             velocity: DVec3::new(100.0, 2.0, -3.0),
             orientation: DQuat::from_rotation_y(0.3),
@@ -224,12 +224,12 @@ mod tests {
 
     #[test]
     fn integration_returns_next_snapshot_without_mutating_input() {
-        let initial = State::default();
+        let initial = Motion::default();
         let next = integrate(&initial, &mass(), 1.0, DVec3::Z * 10.0, |_| {
             Ok(Wrench::default())
         })
         .unwrap();
-        assert_eq!(initial, State::default());
+        assert_eq!(initial, Motion::default());
         assert!(next.position.abs_diff_eq(DVec3::Z * 5.0, 1e-12));
         assert!(
             integrate(&initial, &mass(), -1.0, DVec3::ZERO, |_| Ok(
@@ -237,16 +237,16 @@ mod tests {
             ))
             .is_err()
         );
-        assert_eq!(initial, State::default());
+        assert_eq!(initial, Motion::default());
     }
 
     #[test]
     fn follows_ballistic_trajectory_in_world_coordinates() {
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::new(100.0, 200.0, -1000.0),
             velocity: DVec3::new(50.0, -5.0, 0.0),
             orientation: DQuat::from_rotation_z(1.0),
-            ..State::default()
+            ..Motion::default()
         };
         for _ in 0..600 {
             state
@@ -272,9 +272,9 @@ mod tests {
 
     #[test]
     fn rotates_body_forces_and_integrates_applied_torque() {
-        let mut state = State {
+        let mut state = Motion {
             orientation: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
-            ..State::default()
+            ..Motion::default()
         };
         for _ in 0..60 {
             state
@@ -288,7 +288,7 @@ mod tests {
         }
         assert!(state.velocity.abs_diff_eq(DVec3::Y * 2.0, 1e-10));
         assert!(state.position.abs_diff_eq(DVec3::Y, 1e-10));
-        let mut state = State::default();
+        let mut state = Motion::default();
         for _ in 0..60 {
             state
                 .advance(&mass(), STEP, DVec3::ZERO, |_| {
@@ -306,9 +306,9 @@ mod tests {
     #[test]
     fn conserves_torque_free_angular_momentum_and_energy() {
         let mass = mass();
-        let mut state = State {
+        let mut state = Motion {
             angular_velocity: DVec3::new(0.3, -0.4, 0.7),
-            ..State::default()
+            ..Motion::default()
         };
         let momentum = mass.inertia * state.angular_velocity;
         let energy = 0.5 * state.angular_velocity.dot(momentum);
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn interpolation_does_not_change_physical_state() {
-        let before = State::default();
+        let before = Motion::default();
         let mut after = before;
         after
             .advance(&mass(), 1.0, DVec3::Z * 10.0, |_| Ok(Wrench::default()))
@@ -346,7 +346,7 @@ mod tests {
             assert!(MassProperties::new(1000.0, inertia).is_err());
         }
         assert!(MassProperties::new(f64::NAN, DMat3::IDENTITY).is_err());
-        let mut state = State::default();
+        let mut state = Motion::default();
         assert!(
             state
                 .advance(&mass(), -1.0, DVec3::ZERO, |_| Ok(Wrench::default()))
@@ -360,6 +360,6 @@ mod tests {
                 }))
                 .is_err()
         );
-        assert_eq!(state, State::default());
+        assert_eq!(state, Motion::default());
     }
 }

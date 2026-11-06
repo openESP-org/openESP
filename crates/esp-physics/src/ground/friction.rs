@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use glam::{DMat2, DQuat, DVec2, DVec3};
 
 use super::{Controls, LandingGear, Surface};
-use crate::flight::{MassProperties, State};
+use crate::flight::{MassProperties, Motion};
 
 struct Constraint {
     arm: DVec3,
@@ -15,7 +15,7 @@ struct Constraint {
 
 pub(super) fn solve(
     gear: &LandingGear,
-    state: &mut State,
+    state: &mut Motion,
     mass: &MassProperties,
     cg: DVec3,
     surface: Surface,

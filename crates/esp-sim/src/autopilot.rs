@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use esp_script::{Error, Reference};
 
-use esp_physics::{flight::State, variables::VariableStore};
+use esp_physics::{flight::Motion as State, variables::VariableStore};
 
 const FEET: f64 = 0.3048;
 const FEET_PER_MINUTE: f64 = 0.3048 / 60.0;

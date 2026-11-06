@@ -1,7 +1,7 @@
 use esp_assets::flight::FlightData;
 use esp_physics::{
     aerodynamics::{Aerodynamics, Controls},
-    flight::State,
+    flight::Motion as State,
     time::STEP,
 };
 use esp_sim::loading::WeightBalance;

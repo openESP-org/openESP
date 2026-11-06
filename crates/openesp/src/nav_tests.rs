@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod navigation {
     use esp_nav::navigation::*;
-    use esp_physics::flight::State;
+    use esp_physics::flight::Motion as State;
     use esp_script::{Host, Reference};
     use esp_sim::variables::Variables;
     use glam::EulerRot;
@@ -391,7 +391,7 @@ mod navigation {
 #[cfg(test)]
 mod vor {
     use esp_nav::vor::*;
-    use esp_physics::flight::State;
+    use esp_physics::flight::Motion as State;
     use esp_script::Value;
     use esp_script::{Host, Reference};
     use esp_sim::variables::Variables;

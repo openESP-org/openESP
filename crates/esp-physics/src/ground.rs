@@ -3,7 +3,7 @@ use esp_assets::flight::FlightData;
 use esp_formats::cfg::{self, contact::ContactPoints};
 use glam::{DMat3, DVec3};
 
-use crate::flight::{MassProperties, State, Wrench};
+use crate::flight::{MassProperties, Motion, Wrench};
 
 mod friction;
 
@@ -81,7 +81,7 @@ pub struct Output {
 impl LandingGear {
     pub fn animation_positions(
         &self,
-        state: &State,
+        state: &Motion,
         cg: DVec3,
         surface: Surface,
     ) -> impl Iterator<Item = (u32, f64)> + '_ {
@@ -128,7 +128,7 @@ impl LandingGear {
     /// inertia and tyre slip are not part of the contact solver yet.
     pub fn advance_wheel_motion(
         &mut self,
-        state: &State,
+        state: &Motion,
         cg: DVec3,
         surface: Surface,
         controls: Controls,
@@ -319,8 +319,8 @@ impl LandingGear {
 
     pub fn impact(
         &self,
-        before: &State,
-        after: &State,
+        before: &Motion,
+        after: &Motion,
         cg: DVec3,
         surface: Surface,
     ) -> Option<Impact> {
@@ -357,7 +357,7 @@ impl LandingGear {
 
     pub fn forces(
         &self,
-        state: &State,
+        state: &Motion,
         cg: DVec3,
         surface: Surface,
         controls: Controls,
@@ -425,7 +425,7 @@ impl LandingGear {
     /// the non-friction forces over `dt`.
     pub fn solve_friction(
         &self,
-        state: &mut State,
+        state: &mut Motion,
         mass: &MassProperties,
         cg: DVec3,
         surface: Surface,
@@ -435,7 +435,7 @@ impl LandingGear {
         friction::solve(self, state, mass, cg, surface, controls, dt)
     }
 
-    pub fn clearance(&self, state: &State, cg: DVec3, elevation: f64) -> f64 {
+    pub fn clearance(&self, state: &Motion, cg: DVec3, elevation: f64) -> f64 {
         self.wheels
             .iter()
             .map(|w| -(state.position + state.orientation * (w.position - cg)).z - elevation)
@@ -489,9 +489,9 @@ mod tests {
     #[test]
     fn retracted_wheels_do_not_apply_ground_forces_and_obey_extension_limits() {
         let mut gear = tripod();
-        let state = State {
+        let state = Motion {
             position: DVec3::new(0.0, 0.0, -0.9),
-            ..State::default()
+            ..Motion::default()
         };
         assert!(
             gear.forces(&state, DVec3::ZERO, SURFACE, Controls::default())
@@ -521,10 +521,10 @@ mod tests {
     #[test]
     fn wheel_animation_uses_contact_velocity_radius_steering_and_brakes() {
         let mut gear = tripod();
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::new(0.0, 0.0, -0.9),
             velocity: DVec3::X * 3.0,
-            ..State::default()
+            ..Motion::default()
         };
         gear.advance_wheel_motion(&state, DVec3::ZERO, SURFACE, Controls::default(), 0.1)
             .unwrap();
@@ -557,9 +557,9 @@ mod tests {
     #[test]
     fn suspension_balances_weight_and_never_pulls_the_aircraft_down() {
         let gear = tripod();
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::new(0.0, 0.0, -0.9),
-            ..State::default()
+            ..Motion::default()
         };
         let output = gear
             .forces(&state, DVec3::ZERO, SURFACE, Controls::default())
@@ -591,9 +591,9 @@ mod tests {
         let mass =
             MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
                 .unwrap();
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::new(0.0, 0.0, -1.5),
-            ..State::default()
+            ..Motion::default()
         };
         for _ in 0..2400 {
             state
@@ -615,10 +615,10 @@ mod tests {
         let mass =
             MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
                 .unwrap();
-        let mut state = State {
+        let mut state = Motion {
             position: DVec3::new(0.0, 0.0, -0.9),
             velocity: DVec3::new(15.0, 0.0, 0.0),
-            ..State::default()
+            ..Motion::default()
         };
         let mut coasting = state;
         let mut braking = state;
@@ -674,12 +674,12 @@ mod tests {
             damage_speed: 5.0,
             scrape: false,
         });
-        let before = State {
+        let before = Motion {
             position: -DVec3::Z * 1.01,
             velocity: DVec3::Z * 6.0,
-            ..State::default()
+            ..Motion::default()
         };
-        let after = State {
+        let after = Motion {
             position: -DVec3::Z * 0.99,
             velocity: DVec3::ZERO,
             ..before
@@ -692,7 +692,7 @@ mod tests {
         );
         assert!(
             gear.impact(
-                &State {
+                &Motion {
                     velocity: DVec3::Z,
                     ..before
                 },
@@ -716,17 +716,17 @@ mod tests {
         let mass =
             MassProperties::new(300.0, DMat3::from_diagonal(DVec3::new(400.0, 600.0, 600.0)))
                 .unwrap();
-        let energy = |s: &State| {
+        let energy = |s: &Motion| {
             0.5 * mass.kilograms() * s.velocity.length_squared()
                 + 0.5 * s.angular_velocity.dot(mass.inertia * s.angular_velocity)
         };
         for index in 0..24 {
             let i = f64::from(index);
-            let mut state = State {
+            let mut state = Motion {
                 position: -DVec3::Z * 0.9,
                 velocity: DVec3::new(5.0 * i - 40.0, 11.0 - i, 0.0),
                 angular_velocity: DVec3::new(0.17 * i - 2.0, 1.0 - 0.11 * i, 0.07 * i - 0.5),
-                ..State::default()
+                ..Motion::default()
             };
             let before = energy(&state);
             gear.solve_friction(
@@ -759,11 +759,11 @@ mod tests {
             parking_brake: true,
             ..Controls::default()
         };
-        let mut state = State {
+        let mut state = Motion {
             position: -DVec3::Z * 0.9,
-            ..State::default()
+            ..Motion::default()
         };
-        let step = |state: &mut State, push: f64| {
+        let step = |state: &mut Motion, push: f64| {
             state
                 .advance(&mass, 1.0 / 240.0, DVec3::Z * 9.80665, |s| {
                     let mut loads = gear.forces(s, DVec3::ZERO, SURFACE, controls)?.wrench;

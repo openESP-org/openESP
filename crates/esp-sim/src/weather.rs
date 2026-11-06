@@ -1,6 +1,6 @@
 use crate::variables::Variables;
 use anyhow::{Result, ensure};
-use esp_physics::{atmosphere::Atmosphere, flight::State};
+use esp_physics::{atmosphere::Atmosphere, flight::Motion as State};
 use esp_script::{Host, Reference};
 use glam::DVec3;
 

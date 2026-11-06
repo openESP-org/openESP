@@ -69,7 +69,7 @@ fn original_attitude_horizon_tracks_flight_orientation_within_its_mask() {
                     pitch.to_radians(),
                     bank.to_radians(),
                 ),
-                ..flight.current
+                ..*flight.current
             };
             Flight::publish(&state, &mut variables).unwrap();
             assert!(image.update(&mut variables));
