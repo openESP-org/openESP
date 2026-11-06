@@ -18,7 +18,9 @@ fn decodes_external_containers() {
                         assert_eq!(size as usize + 8, record.data.len());
                         if matches!(record.data.get(8..12), Some(b"MDLX" | b"PV20" | b"PV44")) {
                             let model = esp_formats::mdl::Model::parse(record.data).unwrap();
-                            let decoded = model.decode().unwrap();
+                            let decoded = model.decode().unwrap_or_else(|error| {
+                                panic!("{} model {}: {error:?}", path.display(), record.guid)
+                            });
                             assert_eq!(decoded.guid, Some(record.guid));
                         }
                     }

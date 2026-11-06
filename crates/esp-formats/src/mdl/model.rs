@@ -62,7 +62,10 @@ impl<'a> Model<'a> {
                 }
                 b"BBOX" => model.bounds = chunk.bounding_box()?,
                 b"RADI" => model.radius = chunk.radius()?,
-                b"CRAS" => model.crash = Some(CrashTree::parse(chunk.data)?),
+                b"CRAS" if !chunk.data.is_empty() => {
+                    model.crash = Some(CrashTree::parse(chunk.data)?)
+                }
+                b"CRAS" => {}
                 b"MDLD" => model.exterior = Some(ModelData::parse(chunk)?),
                 b"SHAM" => model.shadow = Some(ModelData::parse(chunk)?),
                 _ => model.unknown.push(Chunk {
@@ -78,6 +81,26 @@ impl<'a> Model<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_empty_crash_section_without_accepting_truncated_tree() {
+        let model = Model {
+            trailing_data: &[],
+            chunks: vec![Chunk {
+                id: *b"CRAS",
+                data: &[],
+            }],
+        };
+        assert!(model.decode().unwrap().crash.is_none());
+        let truncated = Model {
+            trailing_data: &[],
+            chunks: vec![Chunk {
+                id: *b"CRAS",
+                data: &[0],
+            }],
+        };
+        assert!(truncated.decode().is_err());
+    }
 
     #[test]
     fn decodes_mixed_endian_guid_and_model_metadata() {
