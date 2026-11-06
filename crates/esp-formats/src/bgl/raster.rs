@@ -1,5 +1,6 @@
 //! FSX/P3D TRQ1 terrain raster records, with borrowed compressed payloads.
 use super::{Bgl, Directory, Error, range};
+pub mod codec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -59,6 +60,20 @@ pub struct Raster<'a> {
 }
 
 impl<'a> Raster<'a> {
+    pub fn decode_data(&self) -> Result<Vec<u8>, codec::Error> {
+        let bytes_per_pixel = match self.data_type {
+            1 | 2 | 9 | 10 => 2,
+            3..=7 => 1,
+            11 => 4,
+            _ => return Err(codec::Error::InvalidData),
+        };
+        let size = usize::from(self.columns)
+            .checked_mul(usize::from(self.rows))
+            .and_then(|size| size.checked_mul(bytes_per_pixel))
+            .ok_or(codec::Error::Limit)?;
+        codec::decode(self.data_compression, self.data, size)
+    }
+
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         range(bytes, 0, 40)?;
         if &bytes[..4] != b"TRQ1" {
