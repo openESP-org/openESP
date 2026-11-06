@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use esp_formats::cfg::electrical::Electrical as Definition;
 use esp_script::Reference;
 
-use crate::variables::VariableStore;
+use esp_physics::variables::VariableStore;
 
 pub struct Electrical {
     definition: Definition,

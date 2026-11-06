@@ -1,7 +1,8 @@
+use crate::electrical::*;
 use crate::variables::Variables;
 use esp_formats::cfg::Config;
 use esp_formats::cfg::electrical::Electrical as Definition;
-use esp_physics::{electrical::*, variables::VariableStore};
+use esp_physics::variables::VariableStore;
 use esp_script::Reference;
 use esp_script::Value;
 
