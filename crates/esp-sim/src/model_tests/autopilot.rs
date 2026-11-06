@@ -1,5 +1,5 @@
+use crate::autopilot::*;
 use crate::variables::Variables;
-use esp_physics::autopilot::*;
 use esp_script::Host;
 use esp_script::Reference;
 
