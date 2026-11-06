@@ -5,6 +5,7 @@ members = [
     "crates/esp-assets",
     "crates/esp-audio",
     "crates/esp-render",
+    "crates/esp-nav",
     "crates/esp-script",
     "crates/esp-sim",
     "crates/openesp"

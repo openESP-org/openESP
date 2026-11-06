@@ -43,7 +43,7 @@ Crates that do not exist yet are listed in their scheduled order below. When a
 domain earns its promotion, it moves out of its current module with no
 functional change, in its own commit.
 
-## Current size
+## Size before the first split
 
 | crate       | files | lines |
 |-------------|------:|------:|
@@ -54,24 +54,20 @@ functional change, in its own commit.
 | esp-render  |     3 |  1434 |
 | esp-script  |     3 |   976 |
 
-`openesp` currently carries more than its share: about 1,500 lines of
-application bootstrap in `main.rs` and a 3,866 line `flight.rs` that covers
-loading, propulsion, electrics, gear and events in one file. Both are scheduled
-for the split described in "first steps" below.
+The app bootstrap, CLI and flight code are split into modules. Navigation and
+VOR calculations live in `esp-nav`; cross-system integration tests stay in
+the app because they exercise flight and weather together.
 
-## First steps (planned, no functional change)
+## First steps
 
-1. `main.rs` becomes a short bootstrap file. Its contents move to `cli.rs`
+1. Done: `main.rs` is a short bootstrap file. Its contents moved to `cli.rs`
    (argument definitions and parsers) and `app/` feature modules (spawn,
    input, camera).
-2. `flight.rs` becomes a `flight/` directory: one file per subsystem, with the
-   tests currently inside the file staying next to the code they cover.
-3. `navigation.rs` and `vor.rs` move to the `esp-nav` crate.
+2. Done: `flight.rs` became a `flight/` directory, with flight tests grouped
+   by subsystem.
+3. Done: `navigation.rs` and `vor.rs` moved to the `esp-nav` crate.
 4. `esp-render`'s `lib.rs` splits into `mesh.rs`, `pipeline.rs`, `ground.rs`,
    `runway.rs` and `objects.rs` as each area grows.
-
-These steps wait for a clean working tree; the tree currently carries
-unfinished work in `flight.rs`, `main.rs` and `esp-sim`.
 
 ## New crates, in build order
 
@@ -81,8 +77,7 @@ unfinished work in `flight.rs`, `main.rs` and `esp-sim`.
 - `esp-scenery` and `esp-terrain` (engine). Airport surfaces and placed objects
   move out of `openesp`; terrain arrives behind the same interface the flat
   ground already implements, so grid and terrain worlds are interchangeable.
-- `esp-nav` (engine). Absorbs navigation modules, adds the magnetic model and
-  flight plan support.
+- `esp-nav` (engine, created). Adds the magnetic model and flight plan support.
 - `esp-options`, `esp-content`, `esp-ui`, `esp-launcher` (app side). Settings
   model with persistence; a content manager that installs and enables add-ons
   without touching the base simulator directories; the launcher with install

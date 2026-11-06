@@ -1,316 +1,399 @@
-use anyhow::{Result, ensure};
-use esp_script::{Host, Reference};
-use esp_sim::variables::Variables;
-use std::f64::consts::{PI, TAU};
+#[cfg(test)]
+mod navigation {
+    use esp_nav::navigation::*;
+    use esp_script::{Host, Reference};
+    use esp_sim::{flight::State, variables::Variables};
+    use glam::EulerRot;
+    use std::f64::consts::PI;
+    const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
+    use esp_script::Value;
+    use glam::{DQuat, DVec3};
 
-const EARTH_RADIUS: f64 = 6_371_008.8;
-
-#[derive(Clone, Debug)]
-pub struct Station {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub frequency: f64,
-    pub range: f64,
-    pub elevation: f64,
-}
-
-impl std::str::FromStr for Station {
-    type Err = anyhow::Error;
-    fn from_str(text: &str) -> Result<Self> {
-        let fields = text.split(',').collect::<Vec<_>>();
-        ensure!(
-            (4..=5).contains(&fields.len()),
-            "expected LAT,LON,MHZ,RANGE_NM[,ELEVATION_M]"
-        );
-        let station = Self {
-            latitude: fields[0].trim().parse()?,
-            longitude: fields[1].trim().parse()?,
-            frequency: fields[2].trim().parse()?,
-            range: fields[3].trim().parse()?,
-            elevation: fields
-                .get(4)
-                .map(|v| v.trim().parse())
-                .transpose()?
-                .unwrap_or(0.0),
+    #[test]
+    fn approach_starts_on_course_and_glideslope_with_crosswind_correction() {
+        let wind = DVec3::new(-5.0, 0.0, 0.0);
+        let (placement, height) = approach_start(200.0, 300.0, 90.0, 3.0, 5.0, 80.0, wind).unwrap();
+        let speed = 80.0 * 1852.0 / 3600.0;
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -height),
+            velocity: DVec3::X * speed,
+            ..State::default()
         };
-        validate(
-            station.latitude,
-            station.longitude,
-            station.frequency,
-            station.range,
-        )?;
-        ensure!(
-            station.elevation.is_finite(),
-            "VOR elevation must be finite"
-        );
-        Ok(station)
+        placement.apply(&mut state);
+        state.velocity += wind;
+        assert!((state.position.x - 200.0).abs() < 1e-9);
+        assert!((state.position.y - (300.0 - 5.0 * 1852.0)).abs() < 1e-9);
+        assert!((height - 5.0 * 1852.0 * 3_f64.to_radians().tan()).abs() < 1e-9);
+        assert!(state.velocity.x.abs() < 1e-9 && state.velocity.y > 0.0);
+        assert!((state.velocity.z / state.velocity.y - 3_f64.to_radians().tan()).abs() < 1e-10);
+        assert!(((state.velocity - wind).length() - speed).abs() < 1e-9);
+        let (heading, _, _) = state.orientation.to_euler(EulerRot::ZYX);
+        assert!(heading.to_degrees() < 90.0);
+        assert!(approach_start(0.0, 0.0, 90.0, 3.0, 5.0, 80.0, DVec3::X * 100.0).is_err());
+        assert!(approach_start(0.0, 0.0, 0.0, 3.0, 0.0, 80.0, DVec3::ZERO).is_err());
     }
-}
 
-pub fn validate(latitude: f64, longitude: f64, frequency: f64, range: f64) -> Result<()> {
-    crate::navigation::Origin::new(latitude, longitude)?;
-    ensure!(
-        frequency.is_finite()
-            && (108.0..=117.95).contains(&frequency)
-            && (frequency * 20.0 - (frequency * 20.0).round()).abs() < 1e-6,
-        "VOR frequency must be a 50 kHz channel between 108.00 and 117.95 MHz"
-    );
-    ensure!(
-        range.is_finite() && range > 0.0,
-        "VOR range must be positive and finite"
-    );
-    Ok(())
-}
-
-pub fn validate_ils(course: f64, glideslope: f64, frequency: f64) -> Result<()> {
-    ensure!(course.is_finite(), "ILS course must be finite");
-    ensure!(
-        glideslope.is_finite() && (1.0..=6.0).contains(&glideslope),
-        "ILS glideslope must be between 1 and 6 degrees"
-    );
-    let tenths = (frequency * 10.0 + 1e-7).floor() as i64;
-    ensure!(
-        frequency.is_finite() && (108.1..=111.95).contains(&frequency) && tenths % 2 == 1,
-        "ILS frequency must use an odd-tenth channel from 108.10 to 111.95 MHz"
-    );
-    Ok(())
-}
-
-pub fn publish(
-    latitude: f64,
-    longitude: f64,
-    altitude: f64,
-    variation: f64,
-    variables: &mut Variables,
-) -> Result<()> {
-    for index in 1..=2 {
-        publish_receiver(index, latitude, longitude, altitude, variation, variables)?;
-    }
-    Ok(())
-}
-
-fn publish_receiver(
-    index: u32,
-    latitude: f64,
-    longitude: f64,
-    altitude: f64,
-    variation: f64,
-    variables: &mut Variables,
-) -> Result<()> {
-    let key = |name: &str| format!("{name}:{index}");
-    fn read(v: &mut Variables, name: &str, unit: &str) -> Result<f64> {
-        Ok(v.read(&Reference::new('A', name, Some(unit)))?.number()?)
-    }
-    let count = read(variables, "VOR STATION COUNT", "number")?;
-    ensure!(
-        count.is_finite() && count.fract() == 0.0 && (1.0..=64.0).contains(&count),
-        "invalid VOR station count"
-    );
-    let frequency_name = key("NAV ACTIVE FREQUENCY");
-    let obs_name = key("NAV OBS");
-    let tuned = read(variables, &frequency_name, "megahertz")?;
-    let obs = read(variables, &obs_name, "radians")?;
-    ensure!(
-        tuned.is_finite() && obs.is_finite(),
-        "invalid NAV radio setting"
-    );
-    let mut any_active = false;
-    let mut best: Option<(u32, Station, f64)> = None;
-    for station_index in 1..=count as u32 {
-        let station_key = |field: &str| {
-            if station_index == 1 {
-                format!("VOR STATION {field}")
-            } else {
-                format!("VOR STATION {field}:{station_index}")
-            }
+    #[test]
+    fn initial_placement_rotates_velocity_and_preserves_ground_pitch() {
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -2.0),
+            velocity: DVec3::X * 40.0,
+            orientation: DQuat::from_rotation_y(0.1),
+            ..State::default()
         };
-        if read(variables, &station_key("ACTIVE"), "bool")? == 0.0 {
-            continue;
-        }
-        any_active = true;
-        let station = Station {
-            latitude: read(variables, &station_key("LATITUDE"), "degrees")?,
-            longitude: read(variables, &station_key("LONGITUDE"), "degrees")?,
-            frequency: read(variables, &station_key("FREQUENCY"), "megahertz")?,
-            range: read(variables, &station_key("RANGE"), "nautical miles")?,
-            elevation: read(variables, &station_key("ELEVATION"), "meters").unwrap_or(0.0),
-        };
-        validate(
-            station.latitude,
-            station.longitude,
-            station.frequency,
-            station.range,
-        )?;
-        ensure!(
-            station.elevation.is_finite(),
-            "VOR elevation must be finite"
-        );
-        if (tuned - station.frequency).abs() >= 0.0005 {
-            continue;
-        }
-        let lat1 = latitude.to_radians();
-        let lat2 = station.latitude.to_radians();
-        let h = (((lat2 - lat1) / 2.0).sin().powi(2)
-            + lat1.cos()
-                * lat2.cos()
-                * ((station.longitude - longitude).to_radians() / 2.0)
-                    .sin()
-                    .powi(2))
-        .clamp(0.0, 1.0);
-        let distance = 2.0 * EARTH_RADIUS * h.sqrt().atan2((1.0 - h).sqrt());
-        if distance > station.range * 1852.0 {
-            continue;
-        }
-        if best
-            .as_ref()
-            .is_none_or(|(_, _, current)| distance < *current)
-        {
-            best = Some((station_index, station, distance));
-        }
+        InitialPlacement::new(-1000.0, 250.0, -90.0)
+            .unwrap()
+            .apply(&mut state);
+        assert_eq!(state.position, DVec3::new(-1000.0, 250.0, -2.0));
+        assert!(state.velocity.abs_diff_eq(-DVec3::Y * 40.0, 1e-10));
+        let (heading, pitch, _) = state.orientation.to_euler(EulerRot::ZYX);
+        assert!((heading + PI / 2.0).abs() < 1e-10);
+        assert!((pitch - 0.1).abs() < 1e-10);
+        assert!(InitialPlacement::new(f64::NAN, 0.0, 0.0).is_err());
+        assert!(InitialPlacement::new(0.0, 0.0, f64::INFINITY).is_err());
     }
-    variables.set_number(&key("NAV RADIO OWNED"), "bool", f64::from(any_active));
-    let Some((station_index, station, _)) = best else {
-        variables.set_number(&key("NAV HAS NAV"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS DME"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS LOCALIZER"), "bool", 0.0);
-        variables.set_number(&key("NAV HAS GLIDE SLOPE"), "bool", 0.0);
-        for (name, unit) in [
-            ("NAV RADIO CDI", "number"),
-            ("NAV GSI", "number"),
-            ("NAV DME", "meters"),
-            ("NAV VOR DISTANCE", "meters"),
-            ("NAV SIGNAL", "number"),
-            ("NAV TOFROM", "enum"),
+
+    #[test]
+    fn slip_ball_follows_specific_force_and_stays_centered_in_coordinated_bank() {
+        let mut variables = Variables::default();
+        let before = State::default();
+        let right_force = State {
+            velocity: DVec3::Y * 3.0,
+            ..before
+        };
+        publish_acceleration(&before, &right_force, 1.0, &mut variables).unwrap();
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let ball = read(&mut variables, "TURN COORDINATOR BALL", "position 128");
+        assert!(ball < -100.0 && ball > -127.0);
+        assert!(
+            (read(&mut variables, "TURN COORDINATOR BALL", "position") - ball / 127.0).abs()
+                < 1e-10
+        );
+        assert_eq!(
+            read(&mut variables, "TURN COORDINATOR BALL INV", "position 128"),
+            -ball
+        );
+        variables.set_number("TURN COORDINATOR BALL", "position 128", 0.0);
+        let orientation = DQuat::from_rotation_x(30_f64.to_radians());
+        let acceleration = orientation * DVec3::new(0.0, 0.0, -9.80665) + DVec3::Z * 9.80665;
+        let banked_before = State {
+            orientation,
+            ..before
+        };
+        let banked_after = State {
+            velocity: acceleration,
+            ..banked_before
+        };
+        publish_acceleration(&banked_before, &banked_after, 1.0, &mut variables).unwrap();
+        assert!(read(&mut variables, "TURN COORDINATOR BALL", "position 128").abs() < 1e-9);
+        assert!(publish_acceleration(&before, &right_force, f64::NAN, &mut variables).is_err());
+    }
+
+    #[test]
+    fn publishes_turn_rate_and_roll_response_in_supported_units() {
+        let mut variables = Variables::default();
+        let state = State {
+            angular_velocity: DVec3::new(6_f64.to_radians(), 0.0, 3_f64.to_radians()),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        assert!(
+            (read(
+                &mut variables,
+                "TURN INDICATOR RATE:1",
+                "degrees per second"
+            ) - 3.0)
+                .abs()
+                < 1e-10
+        );
+        assert!(
+            (read(
+                &mut variables,
+                "TURN COORDINATOR RATE",
+                "degrees per second"
+            ) - (3.0 + 6.0 * 30_f64.to_radians().tan()))
+            .abs()
+                < 1e-10
+        );
+    }
+
+    #[test]
+    fn hsi_follows_selected_gps_source_and_clears_when_switched_off() {
+        let mut variables = Variables::default();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", 1.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        state.position.x = 500.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI BEARING VALID", "bool"), 1.0);
+        assert_eq!(read(&mut variables, "HSI TF FLAGS", "enum"), 1.0);
+        let cdi = read(&mut variables, "GPS CDI NEEDLE", "number");
+        assert!(cdi > 0.0);
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE", "number"), cdi);
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), cdi);
+        assert_eq!(
+            read(&mut variables, "HSI DISTANCE", "meters"),
+            read(&mut variables, "GPS WP DISTANCE", "meters")
+        );
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), 0.0);
+        variables.set_number("NAV CDI:1", "number", 42.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "NAV CDI:1", "number"), 42.0);
+        variables
+            .dispatch_event("TOGGLE_GPS_DRIVES_NAV1", Value::Number(0.0))
+            .unwrap();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "HSI CDI NEEDLE VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "HSI BEARING VALID", "bool"), 0.0);
+    }
+
+    #[test]
+    fn direct_to_course_tracks_cross_track_and_recaptures_changed_destination() {
+        let mut variables = Variables::default();
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", 1.0);
+        variables.set_number("GPS CDI SCALING", "meters", 1000.0);
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |v: &mut Variables, name, unit| {
+            v.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP DESIRED TRACK", "degrees") - 90.0).abs() < 1e-8);
+        state.position = DVec3::new(500.0, 1000.0, 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP CROSS TRK", "meters") + 500.0).abs() < 0.01);
+        assert!((read(&mut variables, "GPS CDI NEEDLE", "number") - 63.5).abs() < 0.01);
+        state.position.x = -2000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS WP CROSS TRK", "meters") - 2000.0).abs() < 0.01);
+        assert_eq!(read(&mut variables, "GPS CDI NEEDLE", "number"), -127.0);
+        variables.set_number("GPS WP NEXT LAT", "degrees", 1.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!(read(&mut variables, "GPS WP CROSS TRK", "meters").abs() < 1e-6);
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "GPS WP PREV VALID", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "GPS CDI NEEDLE", "number"), 0.0);
+    }
+
+    #[test]
+    fn direct_to_updates_distance_bearing_and_time_as_aircraft_moves() {
+        let mut variables = Variables::default();
+        variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", 179.9);
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 1.0);
+        variables.set_number("GPS WP NEXT LAT", "degrees", 0.0);
+        variables.set_number("GPS WP NEXT LON", "degrees", -179.9);
+        let mut state = State {
+            velocity: DVec3::Y * 100.0,
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name, unit| {
+            vars.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let distance = read(&mut variables, "GPS WP DISTANCE", "meters");
+        assert!((distance - EARTH_RADIUS_METERS * 0.2_f64.to_radians()).abs() < 1e-6);
+        assert!((read(&mut variables, "GPS WP TRUE BEARING", "degrees") - 90.0).abs() < 1e-9);
+        assert!((read(&mut variables, "GPS WP BEARING", "degrees") - 80.0).abs() < 1e-9);
+        assert!((read(&mut variables, "GPS WP ETE", "seconds") - distance / 100.0).abs() < 1e-8);
+        state.position.y = 1000.0;
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!(
+            (read(&mut variables, "GPS WP DISTANCE", "meters") - (distance - 1000.0)).abs() < 1e-6
+        );
+        variables.set_number("GPS IS DIRECTTO FLIGHTPLAN", "bool", 0.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert_eq!(read(&mut variables, "GPS IS ACTIVE WAY POINT", "bool"), 0.0);
+        assert_eq!(read(&mut variables, "GPS WP DISTANCE", "meters"), 0.0);
+    }
+
+    #[test]
+    fn gyro_adjustment_moves_indicator_without_moving_compass_and_can_be_synchronized() {
+        let mut variables = Variables::default();
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        let state = State {
+            orientation: DQuat::from_rotation_z(5_f64.to_radians()),
+            ..State::default()
+        };
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("degrees")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        variables
+            .dispatch_event("GYRO_DRIFT_SET", Value::Number(8.0))
+            .unwrap();
+        variables
+            .dispatch_event("GYRO_DRIFT_DEC", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "MAGNETIC COMPASS") - 355.0).abs() < 1e-10);
+        assert!((read(&mut variables, "HEADING INDICATOR") - 2.0).abs() < 1e-10);
+        assert!((read(&mut variables, "GYRO DRIFT ERROR") - 7.0).abs() < 1e-10);
+        variables
+            .dispatch_event("HEADING_GYRO_SET", Value::Number(0.0))
+            .unwrap();
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "PLANE HEADING DEGREES GYRO") - 355.0).abs() < 1e-10);
+        assert!(
+            variables
+                .dispatch_event("GYRO_DRIFT_SET", Value::Number(f64::NAN))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn publishes_magnetic_heading_and_track_with_wraparound() {
+        let mut variables = Variables::default();
+        variables.set_number("MAGVAR", "degrees", -10.0);
+        let state = State {
+            orientation: DQuat::from_rotation_z(5_f64.to_radians()),
+            velocity: DVec3::new(100.0, 0.0, 0.0),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("degrees")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        for name in [
+            "PLANE HEADING DEGREES MAGNETIC",
+            "MAGNETIC COMPASS",
+            "HEADING INDICATOR",
+            "PLANE HEADING DEGREES GYRO",
         ] {
-            variables.set_number(&key(name), unit, 0.0);
+            assert!((read(&mut variables, name) - 355.0).abs() < 1e-10);
         }
-        if any_active && (index != 1 || read(variables, "GPS DRIVES NAV1", "bool")? == 0.0) {
-            variables.set_number(&key("NAV CDI"), "number", 0.0);
-        }
-        return Ok(());
-    };
-    let station_latitude = station.latitude.to_radians();
-    let station_longitude = station.longitude;
-    let station_frequency = station.frequency;
-    let range = station.range;
-    let latitude = latitude.to_radians();
-    let delta_lon = (longitude - station_longitude).to_radians();
-    let haversine = (((latitude - station_latitude) / 2.0).sin().powi(2)
-        + station_latitude.cos() * latitude.cos() * (delta_lon / 2.0).sin().powi(2))
-    .clamp(0.0, 1.0);
-    let ground_distance = 2.0 * EARTH_RADIUS * haversine.sqrt().atan2((1.0 - haversine).sqrt());
-    let relative_altitude = altitude - station.elevation;
-    let distance = ground_distance.hypot(relative_altitude);
-    // Model every configured station as collocated with a DME transponder.
-    // DME range does not depend on directional localizer or VOR reception.
-    let dme_signal =
-        (tuned - station_frequency).abs() < 0.0005 && ground_distance <= range * 1852.0;
-    let mut signal = dme_signal && ground_distance > 1.0;
-    let mut radial = 0.0;
-    let mut error = 0.0;
-    let mut needle = 0.0;
-    let mut flag = 0.0;
-    let localizer = if station_index == 1 {
-        read(variables, "VOR STATION LOCALIZER", "bool")? != 0.0
-    } else {
-        read(
-            variables,
-            &format!("VOR STATION LOCALIZER:{station_index}"),
-            "bool",
-        )? != 0.0
-    };
-    let mut glideslope_signal = false;
-    let mut glideslope_needle = 0.0;
-    if signal {
-        let true_radial = (delta_lon.sin() * latitude.cos()).atan2(
-            station_latitude.cos() * latitude.sin()
-                - station_latitude.sin() * latitude.cos() * delta_lon.cos(),
+        assert!((read(&mut variables, "GPS GROUND MAGNETIC TRACK") - 350.0).abs() < 1e-10);
+        assert!((read(&mut variables, "GPS MAGVAR") + 10.0).abs() < 1e-10);
+        assert!(validate_declination(f64::NAN).is_err());
+        assert!(validate_declination(181.0).is_err());
+    }
+
+    #[test]
+    fn publishes_geographic_position_to_cockpit_variables() {
+        let mut variables = Variables::default();
+        variables.set_number("WORLD ORIGIN LATITUDE", "degrees", 51.5);
+        variables.set_number("WORLD ORIGIN LONGITUDE", "degrees", -0.1);
+        let state = State {
+            position: DVec3::new(1000.0, 500.0, -2000.0),
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |vars: &mut Variables, name| {
+            vars.read(&Reference::new('A', name, Some("degrees")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let lat = read(&mut variables, "GPS POSITION LAT");
+        let lon = read(&mut variables, "GPS POSITION LON");
+        assert!(lat > 51.5 && lon > -0.1);
+        assert_eq!(lat, read(&mut variables, "PLANE LATITUDE"));
+        assert_eq!(lon, read(&mut variables, "PLANE LONGITUDE"));
+    }
+
+    #[test]
+    fn crosswind_separates_heading_from_ground_track() {
+        let mut variables = Variables::default();
+        variables.set_number("AMBIENT WIND DIRECTION", "degrees", 90.0);
+        variables.set_number("AMBIENT WIND VELOCITY", "knots", 30.0);
+        let wind = crate::weather::wind(&mut variables).unwrap();
+        let mut state = State {
+            position: DVec3::new(0.0, 0.0, -2000.0),
+            velocity: DVec3::X * 100.0 + wind + DVec3::Z * -5.0,
+            orientation: DQuat::IDENTITY,
+            ..State::default()
+        };
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        let read = |vars: &mut Variables, name, unit| {
+            vars.read(&Reference::new('A', name, Some(unit)))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let track = read(&mut variables, "GPS GROUND TRUE TRACK", "degrees");
+        assert!(track > 350.0 && track < 360.0);
+        assert_eq!(
+            read(&mut variables, "GPS GROUND TRUE HEADING", "degrees"),
+            0.0
         );
-        radial = (true_radial + variation).rem_euclid(TAU);
-        if localizer {
-            let course = read(variables, "ILS LOCALIZER COURSE", "degrees")?;
-            let slope = read(variables, "ILS GLIDESLOPE ANGLE", "degrees")?;
-            validate_ils(course, slope, station_frequency)?;
-            let course = course.to_radians().rem_euclid(TAU);
-            error = (radial - course).rem_euclid(TAU) - PI;
-            let sector = if ground_distance <= 10.0 * 1852.0 {
-                35_f64.to_radians()
-            } else {
-                10_f64.to_radians()
-            };
-            signal = ground_distance <= 25.0 * 1852.0 && error.abs() <= sector;
-            if signal {
-                needle = (error / 2.5_f64.to_radians() * 127.0).clamp(-127.0, 127.0);
-                flag = 1.0;
-                let elevation = relative_altitude.atan2(ground_distance);
-                let glide_angle = slope.to_radians();
-                glideslope_signal = ground_distance <= 10.0 * 1852.0
-                    && error.abs() <= 8_f64.to_radians()
-                    && elevation >= 0.45 * glide_angle
-                    && elevation <= 1.75 * glide_angle;
-                if glideslope_signal {
-                    glideslope_needle = ((glide_angle - elevation) / 0.7_f64.to_radians() * 127.0)
-                        .clamp(-127.0, 127.0);
-                }
-            }
-        } else {
-            let difference = (radial - obs + PI).rem_euclid(TAU) - PI;
-            let from = difference.abs() <= PI / 2.0;
-            error = if from {
-                difference
-            } else {
-                (difference + TAU).rem_euclid(TAU) - PI
-            };
-            needle = ((if from { -error } else { error }) / 10_f64.to_radians() * 127.0)
-                .clamp(-127.0, 127.0);
-            flag = if from { 2.0 } else { 1.0 };
-        }
+        assert!(
+            (read(&mut variables, "GPS GROUND SPEED", "meters per second")
+                - state.velocity.truncate().length())
+            .abs()
+                < 1e-10
+        );
+        assert!(
+            (read(&mut variables, "VELOCITY WORLD X", "meters per second") - wind.y).abs() < 1e-10
+        );
+        assert_eq!(
+            read(&mut variables, "VELOCITY WORLD Y", "meters per second"),
+            5.0
+        );
+        assert_eq!(read(&mut variables, "GPS POSITION ALT", "meters"), 2000.0);
+        assert!(
+            (read(&mut variables, "AIRSPEED TRUE", "meters per second") - 100.125).abs() < 0.001
+        );
+        state.velocity = DVec3::ZERO;
+        state.orientation = DQuat::from_rotation_z(1.0);
+        crate::flight::Flight::publish(&state, &mut variables).unwrap();
+        assert!((read(&mut variables, "GPS GROUND TRUE TRACK", "degrees") - track).abs() < 1e-10);
+        assert!((read(&mut variables, "GPS GROUND TRUE HEADING", "radians") - 1.0).abs() < 1e-10);
     }
-    variables.set_number(&key("NAV HAS NAV"), "bool", f64::from(signal));
-    variables.set_number(&key("NAV HAS DME"), "bool", f64::from(dme_signal));
-    variables.set_number(
-        &key("NAV HAS LOCALIZER"),
-        "bool",
-        f64::from(signal && localizer),
-    );
-    variables.set_number(
-        &key("NAV HAS GLIDE SLOPE"),
-        "bool",
-        f64::from(glideslope_signal),
-    );
-    let localizer_course = if localizer {
-        read(variables, "ILS LOCALIZER COURSE", "degrees")?
-    } else {
-        0.0
-    };
-    variables.set_number(&key("NAV LOCALIZER"), "degrees", localizer_course);
-    variables.set_number(&key("NAV GSI"), "number", glideslope_needle);
-    variables.set_number(&key("NAV RADIAL"), "radians", radial);
-    variables.set_number(&key("NAV RADIAL ERROR"), "radians", error);
-    variables.set_number(
-        &key("NAV VOR DISTANCE"),
-        "meters",
-        if signal { ground_distance } else { 0.0 },
-    );
-    variables.set_number(
-        &key("NAV DME"),
-        "meters",
-        if dme_signal { distance } else { 0.0 },
-    );
-    variables.set_number(&key("NAV SIGNAL"), "number", if signal { 1.0 } else { 0.0 });
-    variables.set_number(&key("NAV TOFROM"), "enum", flag);
-    variables.set_number(&key("NAV RADIO CDI"), "number", needle);
-    if index != 1 || read(variables, "GPS DRIVES NAV1", "bool")? == 0.0 {
-        variables.set_number(&key("NAV CDI"), "number", needle);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod vor {
+    use esp_nav::vor::*;
     use esp_script::Value;
+    use esp_script::{Host, Reference};
     use esp_sim::flight::State;
+    use esp_sim::variables::Variables;
     use glam::DVec3;
 
     #[test]

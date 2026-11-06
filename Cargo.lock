@@ -816,6 +816,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-nav"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "esp-script",
+ "esp-sim",
+ "glam 0.30.10",
+]
+
+[[package]]
 name = "esp-render"
 version = "0.1.0"
 dependencies = [
@@ -2018,6 +2028,7 @@ dependencies = [
  "clap",
  "esp-assets",
  "esp-formats",
+ "esp-nav",
  "esp-render",
  "esp-script",
  "esp-sim",
