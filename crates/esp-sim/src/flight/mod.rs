@@ -1,4 +1,5 @@
 use crate::autopilot::{Autopilot, Inputs as AutopilotInputs};
+use crate::hydraulics::Hydraulics;
 use crate::variables::Variables;
 use anyhow::{Context, Result, ensure};
 use esp_assets::flight::FlightData;
@@ -7,7 +8,6 @@ use esp_physics::{
     atmosphere::Atmosphere,
     flight::State,
     ground::{Controls as GroundControls, LandingGear, Surface},
-    hydraulics::Hydraulics,
     loading::{Loading, WeightBalance},
     propulsion::{Command, Output as EngineOutput, Propulsion},
 };
