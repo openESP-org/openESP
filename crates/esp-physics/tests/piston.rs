@@ -2,8 +2,7 @@ use esp_assets::flight::FlightData;
 use esp_formats::air;
 use esp_physics::{
     atmosphere::Atmosphere,
-    piston::{Charge, Command, PistonCycle, Pistons},
-    propeller::Propeller,
+    piston::{Charge, Command, PistonCycle},
 };
 
 #[path = "../../../tests/support/content.rs"]
@@ -76,7 +75,7 @@ fn original_piston_tables_drive_cycle_torque_and_propeller_equilibrium() {
             .unwrap();
         assert_eq!(friction.friction_torque, reference.friction_torque * 2.0);
         assert_eq!(friction.gross_torque, reference.gross_torque);
-        let propeller = Propeller::from_data(&data).unwrap();
+        let propeller = esp_sim::content::propeller(&data).unwrap();
         let mut lo = rated_rpm * 0.1;
         let mut hi = rated_rpm * 1.5;
         for _ in 0..50 {
@@ -130,7 +129,7 @@ fn original_piston_shaft_responds_to_controls_load_inertia_and_altitude() {
         {
             continue;
         }
-        let mut engine = Pistons::from_data(&data).unwrap();
+        let mut engine = esp_sim::content::pistons(&data).unwrap();
         engine.start_running(&sea, DVec3::ZERO).unwrap();
         let idle = engine.output(0, &sea, DVec3::ZERO).unwrap();
         assert!(idle.combustion && idle.rpm > 300.0 && idle.rpm < 1500.0);
@@ -168,7 +167,7 @@ fn original_piston_shaft_responds_to_controls_load_inertia_and_altitude() {
             .collect::<Vec<_>>()
             .join("\n");
         heavy_data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
-        let mut heavy = Pistons::from_data(&heavy_data).unwrap();
+        let mut heavy = esp_sim::content::pistons(&heavy_data).unwrap();
         heavy.start_running(&sea, DVec3::ZERO).unwrap();
         engine
             .advance(0.1, &sea, DVec3::ZERO, &commands, true)
@@ -263,7 +262,7 @@ fn original_piston_oil_indications_follow_engine_state() {
         {
             continue;
         }
-        let mut engine = Pistons::from_data(&data).unwrap();
+        let mut engine = esp_sim::content::pistons(&data).unwrap();
         let cold = engine.output(0, &air, DVec3::ZERO).unwrap();
         assert_eq!(cold.oil_pressure_psi, 0.0);
         assert!((cold.exhaust_temperature_c - (air.temperature - 273.15)).abs() < 1e-9);
@@ -400,7 +399,7 @@ fn original_piston_reaction_torque_follows_rotation_and_tuning() {
                     &format!("[flight_tuning]\ntorque_on_roll={scale}"),
                 );
             data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
-            let mut engine = Pistons::from_data(&data).unwrap();
+            let mut engine = esp_sim::content::pistons(&data).unwrap();
             engine.start_running(&air, DVec3::ZERO).unwrap();
             let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
             let wrench = engine
@@ -479,7 +478,7 @@ fn original_piston_crossflow_changes_yaw_and_honors_p_factor_scalar() {
                 &format!("[flight_tuning]\np_factor_on_yaw={scale}"),
             );
             data.configuration = esp_formats::cfg::Config::parse(&config).unwrap();
-            let mut engine = Pistons::from_data(&data).unwrap();
+            let mut engine = esp_sim::content::pistons(&data).unwrap();
             engine.start_running(&air, DVec3::ZERO).unwrap();
             let commands = engine
                 .indices()
@@ -554,7 +553,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
                 .filter(|f| f.kind != 0)
                 .count()
         ];
-        let mut engine = Pistons::from_data(&data).unwrap();
+        let mut engine = esp_sim::content::pistons(&data).unwrap();
         let power = engine.indices().map(|_| 1.0).collect::<Vec<_>>();
         let stopped = engine.tail_wash(&air, DVec3::ZERO, &power).unwrap();
         assert_eq!(stopped, esp_physics::propeller::TailWash::default());
@@ -605,7 +604,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
                 .join("\n");
             let mut forward_data = FlightData::load(&path, 0).unwrap();
             forward_data.configuration = esp_formats::cfg::Config::parse(&modified).unwrap();
-            let mut forward = Pistons::from_data(&forward_data).unwrap();
+            let mut forward = esp_sim::content::pistons(&forward_data).unwrap();
             forward.start_running(&air, DVec3::ZERO).unwrap();
             assert_eq!(
                 forward.tail_wash(&air, DVec3::ZERO, &power).unwrap(),
@@ -624,7 +623,7 @@ fn original_piston_wake_improves_low_speed_tail_control() {
                 &config.replace("[propeller]", "[propeller]\nrotation=-1"),
             )
             .unwrap();
-            let mut reversed = Pistons::from_data(&reversed_data).unwrap();
+            let mut reversed = esp_sim::content::pistons(&reversed_data).unwrap();
             reversed.start_running(&air, DVec3::ZERO).unwrap();
             let reverse_wake = reversed.tail_wash(&air, DVec3::ZERO, &power).unwrap();
             assert!((wake.horizontal - reverse_wake.horizontal).length() < 1e-10);

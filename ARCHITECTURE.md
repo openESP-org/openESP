@@ -43,6 +43,8 @@ These rules follow from this arrangement and are not negotiable:
 The partition remains in progress: several physics solver constructors still
 read aircraft content. Those constructors must move behind content adapters
 before the physics crate is fully content-agnostic.
+The propeller content adapter lives in `esp-sim::content`; it decodes AIR and
+configuration data into the numerical parameters accepted by `esp-physics`.
 
 The session owns its flight state. Physics and navigation consume `Motion`
 snapshots; rigid-body integration returns a new snapshot and the session

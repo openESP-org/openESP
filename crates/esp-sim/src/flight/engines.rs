@@ -15,7 +15,7 @@ impl Flight {
             self.loading.usable_fuel_gallons > 0.0,
             "cannot start running engines without fuel"
         );
-        let mut engines = Propulsion::from_data(data)?;
+        let mut engines = crate::content::propulsion(data)?;
         engines.start_running(
             &weather.at(-self.current.position.z)?,
             self.current.air_velocity(DVec3::ZERO),
@@ -30,7 +30,7 @@ impl Flight {
                 .number("GeneralEngineData", "engine_type")?,
             Some(0.0 | 1.0)
         ) {
-            self.engines = Some(Propulsion::from_data(data)?);
+            self.engines = Some(crate::content::propulsion(data)?);
         }
         Ok(())
     }

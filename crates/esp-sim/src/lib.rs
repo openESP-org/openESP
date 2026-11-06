@@ -2,6 +2,7 @@
 use esp_nav::navigation;
 pub mod animation;
 pub mod autopilot;
+pub mod content;
 pub mod electrical;
 pub mod flight;
 pub mod hydraulics;

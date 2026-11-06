@@ -230,7 +230,10 @@ fn curve(config: &cfg::Config, key: &str, defaults: &[(f64, f64)]) -> Result<Cur
 }
 
 impl Pistons {
-    pub fn from_data(data: &FlightData) -> Result<Self> {
+    pub fn from_data(
+        data: &FlightData,
+        propeller: impl FnOnce() -> Result<Propeller>,
+    ) -> Result<Self> {
         let config = &data.configuration;
         ensure!(
             config
@@ -347,7 +350,7 @@ impl Pistons {
         let datum = cfg::aircraft::ReferencePoints::from_config(config)?
             .datum_feet
             .context("missing engine reference datum")?;
-        let propeller = Propeller::from_data(data)?;
+        let propeller = propeller()?;
         let horizontal_tail = tail_surface(config, datum, false)?;
         let vertical_tail = tail_surface(config, datum, true)?;
         let engines = cfg::engine::engines(config)?

@@ -1,10 +1,10 @@
-use anyhow::{Context, Result, ensure};
-use esp_assets::flight::FlightData;
-use esp_formats::air;
+use anyhow::{Result, ensure};
 use glam::DVec3;
 use std::f64::consts::{PI, TAU};
 
 use crate::{atmosphere::Atmosphere, lookup::Grid};
+#[cfg(test)]
+use esp_formats::air;
 
 /// Approximate flow increments reaching each tail surface, in body axes.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -12,6 +12,16 @@ pub struct TailWash {
     pub horizontal: DVec3,
     pub vertical: DVec3,
     pub swirl: DVec3,
+}
+pub struct PropellerParameters {
+    pub efficiency: Grid,
+    pub power: Grid,
+    pub diameter: f64,
+    pub inertia: f64,
+    pub reduction: f64,
+    pub beta: f64,
+    pub low_speed_limit: f64,
+    pub thrust_scalar: f64,
 }
 pub struct Propeller {
     efficiency: Grid,
@@ -36,40 +46,17 @@ pub struct Output {
 }
 
 impl Propeller {
-    pub fn from_data(data: &FlightData) -> Result<Self> {
-        let config = &data.configuration;
-        ensure!(
-            config.number("propeller", "propeller_type")? == Some(1.0),
-            "only fixed-pitch propellers are supported yet"
-        );
-        let records = air::parse(&data.air)?;
-        let grid = |id| -> Result<Grid> {
-            let mut matches = records.iter().filter(|r| r.id == id);
-            let record = matches
-                .next()
-                .with_context(|| format!("missing propeller AIR record {id:#x}"))?;
-            ensure!(
-                matches.next().is_none(),
-                "duplicate propeller AIR record {id:#x}"
-            );
-            Grid::from_record(record)
-        };
-        let required = |key| -> Result<f64> {
-            config
-                .number("propeller", key)?
-                .with_context(|| format!("missing [propeller] {key}"))
-        };
-        let diameter = required("propeller_diameter")? * 0.3048;
-        let inertia = required("propeller_moi")? * 1.3558179483314;
-        let reduction = config
-            .number("propeller", "gear_reduction_ratio")?
-            .unwrap_or(1.0);
-        let beta = required("fixed_pitch_beta")?;
-        let low_speed_limit = config
-            .number("propeller", "low_speed_theory_limit")?
-            .unwrap_or(80.0)
-            * 0.3048;
-        let thrust_scalar = config.number("propeller", "thrust_scalar")?.unwrap_or(1.0);
+    pub fn new(parameters: PropellerParameters) -> Result<Self> {
+        let PropellerParameters {
+            efficiency,
+            power,
+            diameter,
+            inertia,
+            reduction,
+            beta,
+            low_speed_limit,
+            thrust_scalar,
+        } = parameters;
         ensure!(
             diameter > 0.0
                 && inertia > 0.0
@@ -79,8 +66,8 @@ impl Propeller {
             "invalid propeller dimensions, inertia or tuning"
         );
         Ok(Self {
-            efficiency: grid(0x511)?,
-            power: grid(0x512)?,
+            efficiency,
+            power,
             diameter,
             inertia,
             reduction,
@@ -89,7 +76,6 @@ impl Propeller {
             thrust_scalar,
         })
     }
-
     pub fn radius(&self) -> f64 {
         self.diameter * 0.5
     }

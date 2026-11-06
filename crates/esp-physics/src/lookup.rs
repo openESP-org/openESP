@@ -51,7 +51,7 @@ impl Curve {
     }
 }
 
-pub(crate) struct Grid {
+pub struct Grid {
     pub corner: f64,
     rows: Vec<f64>,
     columns: Vec<f64>,
@@ -63,16 +63,19 @@ impl Grid {
         let Some(Table::Surface(table)) = record.table()? else {
             anyhow::bail!("AIR record {:#x} is not a surface", record.id);
         };
-        let rows = table.rows as usize;
-        let columns = table.columns as usize;
+        Self::from_values(table.rows as usize, table.columns as usize, &table.values)
+    }
+
+    pub fn from_values(rows: usize, columns: usize, values: &[f64]) -> Result<Self> {
         ensure!(
-            rows >= 3 && columns >= 3 && table.values.iter().all(|v| v.is_finite()),
+            rows >= 3
+                && columns >= 3
+                && rows.checked_mul(columns) == Some(values.len())
+                && values.iter().all(|v| v.is_finite()),
             "invalid AIR surface dimensions or values"
         );
-        let row_inputs = (1..rows)
-            .map(|r| table.values[r * columns])
-            .collect::<Vec<_>>();
-        let column_inputs = table.values[1..columns].to_vec();
+        let row_inputs = (1..rows).map(|r| values[r * columns]).collect::<Vec<_>>();
+        let column_inputs = values[1..columns].to_vec();
         ensure!(
             [&row_inputs, &column_inputs]
                 .iter()
@@ -80,15 +83,11 @@ impl Grid {
             "invalid AIR surface axes"
         );
         Ok(Self {
-            corner: table.values[0],
+            corner: values[0],
             rows: row_inputs,
             columns: column_inputs,
             values: (1..rows)
-                .flat_map(|r| {
-                    table.values[r * columns + 1..(r + 1) * columns]
-                        .iter()
-                        .copied()
-                })
+                .flat_map(|r| values[r * columns + 1..(r + 1) * columns].iter().copied())
                 .collect(),
         })
     }

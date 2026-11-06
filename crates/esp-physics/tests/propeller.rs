@@ -1,6 +1,6 @@
 use esp_assets::flight::FlightData;
 use esp_formats::air::{self, table::Table};
-use esp_physics::{atmosphere::Atmosphere, propeller::Propeller};
+use esp_physics::atmosphere::Atmosphere;
 
 #[path = "../../../tests/support/content.rs"]
 mod content;
@@ -42,13 +42,13 @@ fn original_propeller_power_and_efficiency_tables_drive_thrust_and_shaft_load() 
         {
             continue;
         }
-        let propeller = Propeller::from_data(&data).unwrap();
+        let propeller = esp_sim::content::propeller(&data).unwrap();
         let atmosphere = Atmosphere::standard(0.0).unwrap();
         let original = propeller.sample(&atmosphere, 2700.0, 50.0).unwrap();
         assert!(original.thrust > 0.0 && original.absorbed_power > 0.0);
         let mut power = FlightData::load(&path, 0).unwrap();
         scale_table(&mut power, 0x512, 0.5);
-        let reduced = Propeller::from_data(&power)
+        let reduced = esp_sim::content::propeller(&power)
             .unwrap()
             .sample(&atmosphere, 2700.0, 50.0)
             .unwrap();
@@ -57,7 +57,7 @@ fn original_propeller_power_and_efficiency_tables_drive_thrust_and_shaft_load() 
         assert!((reduced.thrust / original.thrust - 0.5).abs() < 1e-12);
         let mut efficiency = FlightData::load(&path, 0).unwrap();
         scale_table(&mut efficiency, 0x511, 0.5);
-        let reduced = Propeller::from_data(&efficiency)
+        let reduced = esp_sim::content::propeller(&efficiency)
             .unwrap()
             .sample(&atmosphere, 2700.0, 50.0)
             .unwrap();
