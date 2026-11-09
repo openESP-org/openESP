@@ -2,6 +2,23 @@ use super::*;
 use wgpu::util::DeviceExt;
 
 #[test]
+fn camera_samples_clouds_relative_to_advected_world() {
+    let camera = crate::Camera::looking_at(
+        glam::DVec3::new(120.0, 100.0, -40.0),
+        glam::DVec3::new(120.0, 100.0, 0.0),
+    );
+    let weather = Weather {
+        visibility_m: 10_000.0,
+        origin_msl: 300.0,
+        clouds: [None; 3],
+        cloud_offset: [70.0, -60.0],
+    };
+    let uniforms = uniform(&camera, glam::Mat4::IDENTITY, glam::Vec3::Y, false, weather);
+    assert_eq!(uniforms.world[..2], [50.0, 20.0]);
+    assert_eq!(uniforms.sun[3], 400.0);
+}
+
+#[test]
 fn sky_shader_is_valid_wgsl() {
     let shader = naga::front::wgsl::parse_str(crate::SKY_SHADER).unwrap();
     naga::valid::Validator::new(
@@ -99,9 +116,12 @@ fn renders_reported_cloud_layer_offscreen() {
             mapped_at_creation: false,
         });
         let mut images = Vec::new();
-        for cloudy in [false, true] {
-            if cloudy {
+        for phase in 0..3 {
+            if phase > 0 {
                 uniform.clouds[0] = [660.0, 600.0, 0.75, 0.0];
+            }
+            if phase == 2 {
+                uniform.world[0] = -2000.0;
             }
             queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -170,10 +190,30 @@ fn renders_reported_cloud_layer_offscreen() {
             changed > 1000,
             "reported cloud layer did not change the sky: {changed} pixels"
         );
+        let moved = images[1]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(images[2].as_chunks::<4>().0.iter())
+            .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 10))
+            .count();
+        assert!(
+            moved > 1000,
+            "cloud advection did not change the sky: {moved} pixels"
+        );
         image::save_buffer(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/metar-clouds-headless.png"),
             &images[1],
+            256,
+            128,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        image::save_buffer(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/metar-clouds-moved-headless.png"),
+            &images[2],
             256,
             128,
             image::ColorType::Rgba8,

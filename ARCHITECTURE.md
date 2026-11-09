@@ -118,8 +118,9 @@ uses the selected `--airport` station and refreshes every ten minutes; wind,
 pressure, temperature and visibility are applied. Up to three METAR cloud
 layers drive procedural ray-marched sky volumes at station-relative heights;
 the same volumes obscure scene geometry up to each fragment's distance. This
-forward-rendered approach has not yet been performance tuned; cloud shadows,
-cloud motion are not yet implemented. METAR gust peaks drive a bounded,
+forward-rendered approach has not yet been performance tuned; cloud shadows
+are not yet implemented. Cloud volumes advect with mean wind on fixed simulation
+steps and keep their position through wind changes. METAR gust peaks drive a bounded,
 deterministic approximation of wind variation in the flight model.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven

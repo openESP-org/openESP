@@ -2,7 +2,10 @@
 use esp_script::{Host, Reference};
 use esp_sim::{variables::Variables, weather};
 
-pub(super) fn render_state(variables: &mut Variables) -> esp_render::Weather {
+pub(super) fn render_state(
+    variables: &mut Variables,
+    drift: &esp_weather::CloudDrift,
+) -> esp_render::Weather {
     let read = |variables: &mut Variables, name: &str, unit: &str| {
         variables
             .read(&Reference::new('A', name, Some(unit)))
@@ -30,7 +33,27 @@ pub(super) fn render_state(variables: &mut Variables) -> esp_render::Weather {
         visibility_m: read(variables, "AMBIENT VISIBILITY", "meters").unwrap_or(100_000.0),
         origin_msl: weather::origin_elevation(variables),
         clouds,
+        cloud_offset: [drift.east, drift.north],
     }
+}
+
+pub(super) fn advance_clouds(
+    variables: &mut Variables,
+    drift: &mut esp_weather::CloudDrift,
+    dt: f64,
+) -> anyhow::Result<()> {
+    let direction = variables
+        .read(&Reference::new(
+            'A',
+            "AMBIENT WIND DIRECTION",
+            Some("degrees"),
+        ))?
+        .number()?;
+    let speed = variables
+        .read(&Reference::new('A', "AMBIENT WIND VELOCITY", Some("knots")))?
+        .number()?;
+    let wind = weather::vector(direction, speed)?;
+    drift.advance(dt, wind.y, wind.x)
 }
 
 pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation) {
@@ -79,6 +102,24 @@ pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cloud_motion_uses_reported_wind_direction_and_remains_continuous() {
+        let mut variables = Variables::default();
+        let mut drift = esp_weather::CloudDrift::default();
+        variables.set_number("AMBIENT WIND DIRECTION", "degrees", 270.0);
+        variables.set_number("AMBIENT WIND VELOCITY", "knots", 20.0);
+        advance_clouds(&mut variables, &mut drift, 10.0).unwrap();
+        assert!((drift.east - 20.0 * 1852.0 / 3600.0 * 10.0).abs() < 1e-8);
+        let east = drift.east;
+        variables.set_number("AMBIENT WIND DIRECTION", "degrees", 0.0);
+        advance_clouds(&mut variables, &mut drift, 5.0).unwrap();
+        assert!((drift.east - east).abs() < 1e-8);
+        assert!(drift.north < -50.0);
+        assert_eq!(
+            render_state(&mut variables, &drift).cloud_offset,
+            [drift.east, drift.north]
+        );
+    }
     #[test]
     fn observation_drives_flight_wind_atmosphere_and_visibility() {
         let mut variables = Variables::default();
@@ -129,7 +170,7 @@ mod tests {
             0.0
         );
         assert!(
-            render_state(&mut variables)
+            render_state(&mut variables, &esp_weather::CloudDrift::default())
                 .clouds
                 .iter()
                 .all(Option::is_none)

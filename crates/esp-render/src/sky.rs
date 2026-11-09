@@ -25,6 +25,8 @@ pub struct Weather {
     pub visibility_m: f64,
     pub origin_msl: f64,
     pub clouds: [Option<CloudLayer>; 3],
+    /// Displacement of cloud patterns in local east/north metres.
+    pub cloud_offset: [f64; 2],
 }
 
 pub(super) fn uniform(
@@ -65,7 +67,12 @@ pub(super) fn uniform(
                     ]
                 })
         }),
-        world: [camera.position.x as f32, camera.position.z as f32, 0.0, 0.0],
+        world: [
+            (camera.position.x - weather.cloud_offset[0]) as f32,
+            (camera.position.z - weather.cloud_offset[1]) as f32,
+            0.0,
+            0.0,
+        ],
     }
 }
 

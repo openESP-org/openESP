@@ -21,6 +21,30 @@ pub struct CloudLayer {
     pub coverage: f64,
 }
 
+/// Accumulated cloud displacement in local east/north metres.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CloudDrift {
+    pub east: f64,
+    pub north: f64,
+}
+
+impl CloudDrift {
+    pub fn advance(&mut self, dt: f64, wind_east: f64, wind_north: f64) -> Result<()> {
+        ensure!(
+            dt.is_finite() && dt >= 0.0 && wind_east.is_finite() && wind_north.is_finite(),
+            "invalid cloud advection"
+        );
+        let east = self.east + wind_east * dt;
+        let north = self.north + wind_north * dt;
+        ensure!(
+            east.is_finite() && north.is_finite(),
+            "invalid cloud displacement"
+        );
+        *self = Self { east, north };
+        Ok(())
+    }
+}
+
 /// Parse the primary fields of a raw METAR, leaving missing values unset.
 pub fn parse(raw: &str, station: &str) -> Result<Observation> {
     let mut words = raw.split_whitespace().peekable();
@@ -172,6 +196,34 @@ pub fn fetch(station: &str) -> Result<Observation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn advection_is_continuous_when_wind_changes() {
+        let mut drift = CloudDrift::default();
+        drift.advance(10.0, 5.0, 0.0).unwrap();
+        assert_eq!(
+            drift,
+            CloudDrift {
+                east: 50.0,
+                north: 0.0
+            }
+        );
+        drift.advance(5.0, 0.0, -4.0).unwrap();
+        assert_eq!(
+            drift,
+            CloudDrift {
+                east: 50.0,
+                north: -20.0
+            }
+        );
+        assert!(drift.advance(f64::NAN, 1.0, 1.0).is_err());
+        assert_eq!(
+            drift,
+            CloudDrift {
+                east: 50.0,
+                north: -20.0
+            }
+        );
+    }
     #[test]
     fn parses_us_and_international_reports_without_using_remarks() {
         let us = parse(

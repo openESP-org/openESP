@@ -45,6 +45,7 @@ struct App {
     interior_state: Option<ModelState>,
     variables: Variables,
     live_weather: Option<mpsc::Receiver<anyhow::Result<esp_weather::Observation>>>,
+    cloud_drift: esp_weather::CloudDrift,
     clock: Clock,
     sim_time: SimTime,
     door_open: bool,
@@ -523,6 +524,7 @@ impl App {
         for _ in 0..frame.steps {
             self.sim_time.advance(STEP)?;
             self.sim_time.publish(&mut self.variables);
+            live_weather::advance_clouds(&mut self.variables, &mut self.cloud_drift, STEP)?;
             if let Some(aircraft) = &mut self.aircraft {
                 for panel in aircraft.panel_images.values_mut() {
                     panel.update_scripts(STEP, &mut self.variables)?;
@@ -655,7 +657,7 @@ impl App {
                 .ok()
                 .and_then(|value| value.number().ok())
                 .is_some_and(|value| value != 0.0);
-            let weather = live_weather::render_state(&mut self.variables);
+            let weather = live_weather::render_state(&mut self.variables, &self.cloud_drift);
             if renderer.render(
                 &self.camera,
                 self.arguments.cockpit,
@@ -1169,6 +1171,7 @@ pub(crate) fn run() -> Result<()> {
         interior_state: None,
         variables,
         live_weather,
+        cloud_drift: esp_weather::CloudDrift::default(),
         clock: Clock::default(),
         sim_time,
         door_open: false,
@@ -1433,6 +1436,7 @@ mod tests {
             interior_state: None,
             variables,
             live_weather: None,
+            cloud_drift: esp_weather::CloudDrift::default(),
             clock: Clock::default(),
             sim_time: SimTime::new(0.0).unwrap(),
             door_open: false,
