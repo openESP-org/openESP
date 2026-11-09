@@ -46,7 +46,7 @@ struct Output {
     }
     var normal_sample = vec4(0.5, 0.5, 1.0, 0.5);
     if draw.normal_settings.x > 0.5 {
-        let normal_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.normal_settings.y > 0.5));
+        let normal_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.normal_settings.y > 0.0)) * abs(draw.normal_settings.y);
         normal_sample = textureSample(normal_texture, texture_sampler, normal_uv);
     }
     let alpha = colour.a;
@@ -91,15 +91,15 @@ struct Output {
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);
     var lit = vec3(0.0);
+    var n = normalize(input.normal);
+    if draw.normal_settings.x > 0.5 {
+        let t = normalize(input.tangent.xyz - n * dot(n, input.tangent.xyz));
+        let b = cross(n, t) * input.tangent.w;
+        let xy = vec2(select(normal_sample.r, normal_sample.a, draw.normal_settings.z > 0.5), normal_sample.g) * 2.0 - vec2(1.0);
+        let z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
+        n = normalize(t * xy.x + b * xy.y + n * z);
+    }
     if draw.pbr.z > 0.5 {
-        var n = normalize(input.normal);
-        if draw.normal_settings.x > 0.5 {
-            let t = normalize(input.tangent.xyz - n * dot(n, input.tangent.xyz));
-            let b = cross(n, t) * input.tangent.w;
-            let xy = vec2(select(normal_sample.r, normal_sample.a, draw.normal_settings.z > 0.5), normal_sample.g) * 2.0 - vec2(1.0);
-            let z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
-            n = normalize(t * xy.x + b * xy.y + n * z);
-        }
         let l = normalize(camera.sun.xyz);
         let v = normalize(-input.camera_relative_position);
         let h = normalize(l + v);
@@ -125,7 +125,7 @@ struct Output {
         let diffuse = (vec3(1.0) - f) * (1.0 - metal) * colour.rgb / 3.14159265;
         lit = colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight;
     } else {
-        let diffuse_light = 0.65 * max(dot(normalize(input.normal), normalize(camera.sun.xyz)),0.0) * daylight;
+        let diffuse_light = 0.65 * max(dot(n, normalize(camera.sun.xyz)),0.0) * daylight;
         lit = colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance);
     }
     if emission_enabled {

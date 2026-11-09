@@ -11,6 +11,12 @@ fn loads_real_aircraft_emissive_material() {
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case("b737_800_1_lm.dds"))
     }));
+    assert!(model.materials.iter().any(|material| {
+        material
+            .normal_texture
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("b737_800_1_t_bump.dds"))
+    }));
 }
 
 #[test]

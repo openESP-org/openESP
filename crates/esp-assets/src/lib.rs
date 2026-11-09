@@ -378,7 +378,10 @@ impl Model {
                         .map(|name| std::str::from_utf8(name).map(str::to_owned))
                         .transpose()?,
                     metallic_texture: None,
-                    normal_texture: None,
+                    normal_texture: maps
+                        .bump
+                        .map(|name| std::str::from_utf8(name).map(str::to_owned))
+                        .transpose()?,
                     emissive_texture: maps
                         .emissive
                         .map(|name| std::str::from_utf8(name).map(str::to_owned))

@@ -639,9 +639,21 @@ impl Renderer {
                             normal_map
                                 .as_ref()
                                 .map_or([0.0; 4], |(_, normal_flip, alpha)| {
+                                    let scale = if material.pbr.is_none()
+                                        && material.source.bump_scale.is_finite()
+                                        && material.source.bump_scale > 0.0
+                                    {
+                                        material.source.bump_scale
+                                    } else {
+                                        1.0
+                                    };
                                     [
                                         1.0,
-                                        if *normal_flip == flip_v { 0.0 } else { 1.0 },
+                                        if *normal_flip == flip_v {
+                                            -scale
+                                        } else {
+                                            scale
+                                        },
                                         if *alpha { 1.0 } else { 0.0 },
                                         0.0,
                                     ]

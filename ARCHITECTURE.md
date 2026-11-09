@@ -107,6 +107,8 @@ uses it for surface lighting and atmospheric sky scattering.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.
+Legacy bump maps and PBR normal maps use tangent-space lighting; legacy bump
+texture tiling follows the material's bump scale.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the

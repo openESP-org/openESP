@@ -378,6 +378,7 @@ mod tests {
                 }), multiview_mask: None, cache: None,
             });
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
+            let normal_path = std::env::var_os("OPENESP_NORMAL_TEXTURE");
             let emissive_day = std::env::var_os("OPENESP_EMISSIVE_DAY").is_some();
             let panel_on = std::env::var_os("OPENESP_PANEL_LIGHT_ON").is_some();
             let encoded_mode = std::env::var("OPENESP_EMISSIVE_MODE")
@@ -393,7 +394,9 @@ mod tests {
                 ])
                 .to_cols_array_2d(),
                 inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
-                sun: if emissive_path.is_some() && !emissive_day {
+                sun: if normal_path.is_some() {
+                    [0.6, 0.8, 0.0, 0.0]
+                } else if emissive_path.is_some() && !emissive_day {
                     [0.0, -1.0, 0.0, 0.0]
                 } else {
                     [0.0, 1.0, 0.0, 0.0]
@@ -462,6 +465,66 @@ mod tests {
                 0,
             )
             .unwrap();
+            if let Some(path) = &normal_path {
+                let image =
+                    esp_assets::texture::Texture::load(std::path::Path::new(path), !bc.is_empty())
+                        .unwrap();
+                let normal = crate::upload_texture_with_color_space(&device, &queue, &image, false)
+                    .unwrap()
+                    .create_view(&Default::default());
+                let white = crate::upload_texture(
+                    &device,
+                    &queue,
+                    &esp_assets::texture::Texture::rgba(1, 1, vec![255; 4], false),
+                )
+                .unwrap()
+                .create_view(&Default::default());
+                let vertices = [
+                    Vertex {
+                        position: [-600.0, 0.0, 600.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [0.0, 0.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [1800.0, 0.0, 600.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [2.0, 0.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [-600.0, 0.0, -1800.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [0.0, 2.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                ];
+                draws = vec![make_draw(
+                    &device,
+                    &pipeline.get_bind_group_layout(1),
+                    &sampler,
+                    &white,
+                    DrawData {
+                        vertices: &vertices,
+                        indices: &[0, 1, 2],
+                        transform: Mat4::IDENTITY,
+                        uniform: DrawUniform {
+                            model: Mat4::IDENTITY.to_cols_array_2d(),
+                            normal: Mat4::IDENTITY.to_cols_array_2d(),
+                            diffuse: [1.0; 4],
+                            settings: [0.0; 4],
+                            pbr: [0.0; 4],
+                            normal_settings: [1.0, -1.0, f32::from(image.normal_x_in_alpha), 0.0],
+                        },
+                        blended: false,
+                        node: None,
+                        pipeline: 0,
+                        metallic_map: None,
+                        normal_map: Some(&normal),
+                        emissive_map: None,
+                    },
+                )];
+            }
             if let Some(path) = &emissive_path {
                 let image =
                     esp_assets::texture::Texture::load(std::path::Path::new(path), !bc.is_empty())
@@ -511,7 +574,16 @@ mod tests {
                     });
                 }
             }
-            assert_eq!(draws.len(), if two_textures { 2 } else { 1 });
+            assert_eq!(
+                draws.len(),
+                if normal_path.is_some() {
+                    1
+                } else if two_textures {
+                    2
+                } else {
+                    1
+                }
+            );
             let target = device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
                 size: wgpu::Extent3d {
@@ -587,7 +659,15 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if emissive_path.is_some() {
+            if normal_path.is_some() {
+                let pixels = pixels.as_chunks::<4>().0;
+                let minimum = pixels.iter().map(|pixel| pixel[0]).min().unwrap();
+                let maximum = pixels.iter().map(|pixel| pixel[0]).max().unwrap();
+                assert!(
+                    maximum.saturating_sub(minimum) > 5,
+                    "normal map did not change lighting"
+                );
+            } else if emissive_path.is_some() {
                 let lit = pixels
                     .as_chunks::<4>()
                     .0
@@ -612,7 +692,9 @@ mod tests {
                 );
             }
             let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if emissive_path.is_some() {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if normal_path.is_some() {
+                    "../../target/legacy-bump-headless.png"
+                } else if emissive_path.is_some() {
                     "../../target/emissive-headless.png"
                 } else if external.is_some() {
                     "../../target/terrain-texture-headless.png"
