@@ -196,8 +196,28 @@ fn classify(
     lat: f64,
     lon: f64,
 ) {
-    let result = esp_terrain::landclass::LandClass::load(root, lat, lon, 45_000.0)
-        .and_then(|land| mesh.classify(&land, origin_lat, origin_lon));
+    let result = (|| -> Result<()> {
+        let land = esp_terrain::landclass::LandClass::load(root, lat, lon, 45_000.0)?;
+        let textures = (|| -> Result<_> {
+            let regions = esp_terrain::landclass::LandClass::regions(root, lat, lon, 45_000.0)?;
+            let data = std::fs::read(root.join("Scenery/BASE/Scenery/lclookup.bgl"))?;
+            let bgl = esp_formats::bgl::Bgl::parse(&data)?;
+            let lookup = esp_formats::bgl::land_lookup::Lookup::from_bgl(&bgl)?;
+            Ok((regions, lookup))
+        })();
+        if let Err(error) = &textures {
+            eprintln!("terrain texture lookup: {error:#}");
+        }
+        mesh.classify(
+            &land,
+            textures
+                .as_ref()
+                .ok()
+                .map(|(regions, lookup)| (regions, lookup)),
+            origin_lat,
+            origin_lon,
+        )
+    })();
     if let Err(error) = result {
         eprintln!("terrain land class: {error:#}");
     }
@@ -334,6 +354,7 @@ mod tests {
         };
         assert!(mesh.height(40_000.0, 0.0).is_some());
         assert!(mesh.land_classes.iter().any(Option::is_some));
+        assert!(mesh.texture_sets.iter().any(Option::is_some));
         assert!(initial.height(40_000.0, 0.0).is_none());
         for point in [[1000.0, 2000.0], [15_000.0, -5000.0], [20_000.0, 1000.0]] {
             let before = initial.height(point[0], point[1]).unwrap();

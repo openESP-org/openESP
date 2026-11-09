@@ -23,6 +23,23 @@ pub struct LandClass {
 
 impl LandClass {
     pub fn load(root: &Path, latitude: f64, longitude: f64, radius: f64) -> Result<Self> {
+        Self::load_layer(root, latitude, longitude, radius, "worldlc.bgl", 0x68, 3)
+    }
+
+    /// Load the simulator's geographic texture-region raster.
+    pub fn regions(root: &Path, latitude: f64, longitude: f64, radius: f64) -> Result<Self> {
+        Self::load_layer(root, latitude, longitude, radius, "regions.bgl", 0x6a, 5)
+    }
+
+    fn load_layer(
+        root: &Path,
+        latitude: f64,
+        longitude: f64,
+        radius: f64,
+        file: &str,
+        kind: u32,
+        data_type: u16,
+    ) -> Result<Self> {
         ensure!(
             latitude.is_finite()
                 && (-90.0..=90.0).contains(&latitude)
@@ -32,11 +49,11 @@ impl LandClass {
                 && (0.0..=100_000.0).contains(&radius),
             "invalid land-class coverage"
         );
-        let path = root.join("Scenery/BASE/Scenery/worldlc.bgl");
+        let path = root.join("Scenery/BASE/Scenery").join(file);
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         let bgl = Bgl::parse(&bytes)?;
         let mut tiles = Vec::new();
-        for section in bgl.sections.iter().filter(|section| section.kind == 0x68) {
+        for section in bgl.sections.iter().filter(|section| section.kind == kind) {
             let Directory::Direct(subsections) = &section.directory else {
                 continue;
             };
@@ -50,8 +67,8 @@ impl LandClass {
                 }
                 let raster = Raster::parse(subsection.records.data)?;
                 ensure!(
-                    raster.data_type == 3,
-                    "unexpected land-class raster type {}",
+                    raster.data_type == data_type,
+                    "unexpected terrain classification raster type {}",
                     raster.data_type
                 );
                 tiles.push(Tile {
@@ -126,18 +143,46 @@ mod tests {
     fn reads_real_land_classes() {
         let root = std::env::var_os("OPENESP_P3D_ROOT").unwrap();
         let data = LandClass::load(Path::new(&root), 41.17574, 40.84646, 45_000.0).unwrap();
+        let regions = LandClass::regions(Path::new(&root), 41.17574, 40.84646, 45_000.0).unwrap();
+        let bytes =
+            std::fs::read(Path::new(&root).join("Scenery/BASE/Scenery/lclookup.bgl")).unwrap();
+        let bgl = Bgl::parse(&bytes).unwrap();
+        let lookup = esp_formats::bgl::land_lookup::Lookup::from_bgl(&bgl).unwrap();
         let mut classes = std::collections::HashSet::new();
+        let mut textures = std::collections::HashSet::new();
         for i in 0..20 {
             for j in 0..20 {
-                classes.insert(
-                    data.class(41.0 + f64::from(i) * 0.01, 40.7 + f64::from(j) * 0.01)
-                        .unwrap(),
-                );
+                let latitude = 41.0 + f64::from(i) * 0.01;
+                let longitude = 40.7 + f64::from(j) * 0.01;
+                let class = data.class(latitude, longitude).unwrap();
+                let region = regions.class(latitude, longitude).unwrap();
+                classes.insert(class);
+                if let Some(texture) = lookup.texture_set(region, class) {
+                    textures.insert(texture);
+                }
             }
         }
         assert!(
             classes.len() > 1,
             "expected varied terrain, got {classes:?}"
+        );
+        assert!(!textures.is_empty());
+        let folder = Path::new(&root).join("Scenery/World/texture");
+        let found = textures
+            .iter()
+            .filter(|texture| {
+                let name = format!(
+                    "{:03}{}2su1.bmp",
+                    texture.number,
+                    char::from(b'a' + texture.region)
+                );
+                folder.join(name).exists()
+            })
+            .count();
+        assert_eq!(
+            found,
+            textures.len(),
+            "missing regional textures for {textures:?}"
         );
     }
 }

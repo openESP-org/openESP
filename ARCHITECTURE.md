@@ -86,8 +86,10 @@ area around the starting position; photo tiles are subdivided onto that mesh.
 Terrain elevation is rebuilt on a worker as the aircraft travels and swapped
 into both the renderer and flight runtime in the same frame. This uses a moving
 local mesh rather than a full worldwide tile cache. Base land-class rasters
-are sampled into the mesh and given approximate colours; region/season texture
-lookup and streaming of airport scenery and photos remain unfinished. The flight runtime
+are sampled into the mesh and given approximate colours. The terrain engine
+also resolves region and land class to base texture sets for streamed meshes;
+rendering those textures, season selection, and streaming airport scenery and
+photos remain unfinished. The flight runtime
 uses runway, taxiway and apron footprints for flat airport surfaces.
 `esp-render::ground` validates and uploads either the terrain geometry or the
 fallback grid.

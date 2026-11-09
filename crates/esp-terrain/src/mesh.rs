@@ -9,6 +9,7 @@ pub struct Mesh {
     pub normals: Vec<[f64; 3]>,
     pub indices: Vec<u32>,
     pub land_classes: Vec<Option<u8>>,
+    pub texture_sets: Vec<Option<esp_formats::bgl::land_lookup::TextureSet>>,
     valid: Vec<bool>,
     side: usize,
     radius: f64,
@@ -108,6 +109,7 @@ impl Mesh {
         }
         Ok(Self {
             land_classes: vec![None; vertices.len()],
+            texture_sets: vec![None; vertices.len()],
             vertices,
             normals,
             indices,
@@ -121,13 +123,25 @@ impl Mesh {
     pub fn classify(
         &mut self,
         land: &crate::landclass::LandClass,
+        textures: Option<(
+            &crate::landclass::LandClass,
+            &esp_formats::bgl::land_lookup::Lookup,
+        )>,
         latitude: f64,
         longitude: f64,
     ) -> Result<()> {
         let origin = Origin::new(latitude, longitude)?;
-        for (vertex, class) in self.vertices.iter().zip(&mut self.land_classes) {
+        for ((vertex, class), texture) in self
+            .vertices
+            .iter()
+            .zip(&mut self.land_classes)
+            .zip(&mut self.texture_sets)
+        {
             let (lat, lon) = origin.position(vertex[2], vertex[0])?;
             *class = land.class(lat, lon);
+            *texture = textures.and_then(|(regions, lookup)| {
+                lookup.texture_set(regions.class(lat, lon)?, (*class)?)
+            });
         }
         Ok(())
     }
@@ -187,6 +201,7 @@ mod tests {
             normals: vec![],
             indices: vec![0, 2, 3, 0, 3, 1],
             land_classes: vec![None; 4],
+            texture_sets: vec![None; 4],
             valid: vec![true; 4],
             side: 2,
             radius: 1.0,
