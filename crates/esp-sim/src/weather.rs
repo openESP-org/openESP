@@ -46,6 +46,18 @@ pub fn conditions(variables: &mut Variables) -> Result<Conditions> {
     Conditions::new(pressure, temperature)
 }
 
+pub fn origin_elevation(variables: &mut Variables) -> f64 {
+    variables
+        .read(&Reference::new(
+            'A',
+            "WORLD ORIGIN ALTITUDE",
+            Some("meters"),
+        ))
+        .ok()
+        .and_then(|value| value.number().ok())
+        .unwrap_or(0.0)
+}
+
 pub fn vector(direction_degrees: f64, speed_knots: f64) -> Result<DVec3> {
     ensure!(
         direction_degrees.is_finite() && speed_knots.is_finite() && speed_knots >= 0.0,

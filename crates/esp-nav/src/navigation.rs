@@ -306,8 +306,18 @@ pub fn publish(state: &State, variables: &mut dyn VariableStore) -> Result<()> {
     for name in ["HEADING INDICATOR", "PLANE HEADING DEGREES GYRO"] {
         variables.set_number(name, "radians", gyro_heading);
     }
-    variables.set_number("GPS POSITION ALT", "meters", -state.position.z);
-    crate::vor::publish(latitude, longitude, -state.position.z, variation, variables)?;
+    let origin_elevation = variables
+        .read(&Reference::new(
+            'A',
+            "WORLD ORIGIN ALTITUDE",
+            Some("meters"),
+        ))
+        .ok()
+        .and_then(|value| value.number().ok())
+        .unwrap_or(0.0);
+    let altitude = origin_elevation - state.position.z;
+    variables.set_number("GPS POSITION ALT", "meters", altitude);
+    crate::vor::publish(latitude, longitude, altitude, variation, variables)?;
     publish_direct_to(
         latitude,
         longitude,

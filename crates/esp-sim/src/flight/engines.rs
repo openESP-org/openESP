@@ -17,7 +17,7 @@ impl Flight {
         );
         let mut engines = crate::content::propulsion(data)?;
         engines.start_running(
-            &weather.at(-self.current.position.z)?,
+            &weather.at(self.msl_altitude(&self.current))?,
             self.current.air_velocity(DVec3::ZERO),
         )?;
         self.engines = Some(engines);
@@ -52,7 +52,7 @@ impl Flight {
                 variables.set_number(&format!("GENERAL ENG STARTER ACTIVE:{id}"), "bool", 0.0);
             }
             if engines.is_piston() {
-                let air = weather.at(-self.current.position.z)?;
+                let air = weather.at(self.msl_altitude(&self.current))?;
                 for (index, id) in engines.indices().enumerate() {
                     let running = engines
                         .output(index, &air, self.current.air_velocity(wind))?
@@ -85,7 +85,7 @@ impl Flight {
         let Some(engines) = &self.engines else {
             return Ok(());
         };
-        let air = crate::weather::conditions(variables)?.at(-self.current.position.z)?;
+        let air = crate::weather::conditions(variables)?.at(self.msl_altitude(&self.current))?;
         let wind = crate::weather::wind(variables)?;
         let mut suction: Option<f64> = None;
         for (index, id) in engines.indices().enumerate() {

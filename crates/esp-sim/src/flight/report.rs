@@ -5,7 +5,7 @@ impl Flight {
         eprintln!("flight ground: on_ground={}", self.on_ground);
         eprintln!("flight fuel: {} gallons", self.loading.fuel_gallons);
         if let Some(engines) = &self.engines {
-            let air = weather.at(-self.current.position.z)?;
+            let air = weather.at(self.msl_altitude(&self.current))?;
             for (index, id) in engines.indices().enumerate() {
                 let output = engines.output(index, &air, self.current.air_velocity(wind))?;
                 match output {

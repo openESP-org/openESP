@@ -15,11 +15,15 @@ pub struct Mesh {
     side: usize,
     radius: f64,
     centre: [f64; 2],
+    reference_msl: f64,
 }
 
 impl Mesh {
     pub fn cell_size(&self) -> f64 {
         2.0 * self.radius / (self.side - 1) as f64
+    }
+    pub fn reference_msl(&self) -> f64 {
+        self.reference_msl
     }
     pub fn build(
         terrain: &Terrain,
@@ -119,6 +123,7 @@ impl Mesh {
             side,
             radius,
             centre,
+            reference_msl,
         })
     }
 
@@ -212,6 +217,7 @@ mod tests {
             side: 2,
             radius: 1.0,
             centre: [0.0, 0.0],
+            reference_msl: 0.0,
         };
         assert_eq!(mesh.height(-0.5, 0.5), Some(35.0));
         assert_eq!(mesh.height(0.5, -0.5), Some(30.0));

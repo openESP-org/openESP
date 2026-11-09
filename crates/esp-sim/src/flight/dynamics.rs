@@ -96,9 +96,9 @@ impl Flight {
                 .all(|value| value.is_finite() && (-1.0..=1.0).contains(value)),
             "invalid flight control input"
         );
-        let autopilot =
-            self.autopilot
-                .update(dt, AutopilotInputs::from_state(&self.current)?, variables)?;
+        let mut autopilot_inputs = AutopilotInputs::from_state(&self.current)?;
+        autopilot_inputs.altitude = self.msl_altitude(&self.current);
+        let autopilot = self.autopilot.update(dt, autopilot_inputs, variables)?;
         let elevator_input = autopilot.elevator.unwrap_or(elevator_input);
         let aileron_input = autopilot.aileron.unwrap_or(aileron_input);
         let right_input = autopilot.aileron.map_or(right_input, |aileron| -aileron);
@@ -109,7 +109,7 @@ impl Flight {
         };
         let spoiler_handle = control("SPOILERS HANDLE POSITION")?;
         let gear_handle = control("GEAR HANDLE POSITION")? != 0.0;
-        let air = weather.at(-self.current.position.z)?;
+        let air = weather.at(self.msl_altitude(&self.current))?;
         let ias =
             air.calibrated_airspeed(self.current.air_velocity(wind).length())? * 3600.0 / 1852.0;
         let gear_power = match self.gear.system_type() {
@@ -337,7 +337,7 @@ impl Flight {
             if !engines.is_piston() {
                 variables.set_number("TURB ENG IGNITION ON", "bool", f64::from(any_ignition));
             }
-            let air = weather.at(-self.current.position.z)?;
+            let air = weather.at(self.origin_elevation - self.current.position.z)?;
             let velocity = self.current.air_velocity(wind);
             engines.advance(
                 dt,
@@ -413,7 +413,7 @@ impl Flight {
                 DVec3::Z * 9.80665,
                 |state| {
                     let surface = self.surface_at(state);
-                    let air = weather.at(-state.position.z)?;
+                    let air = weather.at(self.msl_altitude(state))?;
                     let mut controls = controls;
                     controls.sound_speed = Some(air.sound_speed);
                     controls.ground_height = Some(self.model.wing_height(
@@ -512,7 +512,7 @@ impl Flight {
             if exhausted && let Some(engines) = &mut self.engines {
                 engines.advance(
                     0.0,
-                    &weather.at(-next.position.z)?,
+                    &weather.at(self.origin_elevation - next.position.z)?,
                     next.air_velocity(wind),
                     &self.commands,
                     self.loading.usable_fuel_gallons > 0.0,

@@ -1,13 +1,31 @@
 use super::*;
 
 impl Flight {
+    /// Publish using this flight's local terrain and mean-sea-level datum.
+    pub fn publish_at(&self, state: &State, variables: &mut Variables) -> Result<()> {
+        variables.set_number("WORLD ORIGIN ALTITUDE", "meters", self.origin_elevation);
+        variables.set_number(
+            "GROUND ALTITUDE",
+            "meters",
+            self.origin_elevation + self.surface_at(state).elevation,
+        );
+        Self::publish(state, variables)
+    }
+
     pub fn publish(state: &State, variables: &mut Variables) -> Result<()> {
         let wind = crate::weather::wind(variables)?;
         crate::weather::publish(state, wind, variables);
         crate::navigation::publish(state, variables)?;
         let air = state.air_velocity(wind);
         let speed = air.length();
-        let atmosphere = crate::weather::conditions(variables)?.at(-state.position.z)?;
+        let origin = crate::weather::origin_elevation(variables);
+        let altitude = origin - state.position.z;
+        let ground = variables
+            .read(&Reference::new('A', "GROUND ALTITUDE", Some("meters")))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .unwrap_or(origin);
+        let atmosphere = crate::weather::conditions(variables)?.at(altitude)?;
         let (heading, pitch, bank) = state.orientation.to_euler(EulerRot::ZYX);
         variables.set_number("AIRSPEED TRUE", "meters per second", speed);
         let blocked = |variables: &mut Variables, name| -> Result<bool> {
@@ -61,9 +79,8 @@ impl Flight {
             atmosphere.temperature * (1.0 + 0.2 * (speed / atmosphere.sound_speed).powi(2))
                 - 273.15,
         );
-        for name in ["PLANE ALTITUDE", "PLANE ALT ABOVE GROUND"] {
-            variables.set_number(name, "meters", -state.position.z);
-        }
+        variables.set_number("PLANE ALTITUDE", "meters", altitude);
+        variables.set_number("PLANE ALT ABOVE GROUND", "meters", altitude - ground);
         for index in 1..=4 {
             let setting = variables
                 .read(&Reference::new(

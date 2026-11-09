@@ -47,6 +47,7 @@ pub struct Flight {
     autopilot: Autopilot,
     on_ground: bool,
     ground: Option<ground::Ground>,
+    origin_elevation: f64,
 }
 
 pub mod ground;
@@ -61,7 +62,18 @@ const TEST_SURFACE: Surface = Surface {
 
 impl Flight {
     pub fn set_ground(&mut self, ground: ground::Ground) {
+        self.origin_elevation = ground.reference_msl();
         self.ground = Some(ground);
+    }
+
+    pub fn set_origin_elevation(&mut self, elevation: f64) -> Result<()> {
+        ensure!(elevation.is_finite(), "invalid world origin elevation");
+        self.origin_elevation = elevation;
+        Ok(())
+    }
+
+    fn msl_altitude(&self, state: &State) -> f64 {
+        self.origin_elevation - state.position.z
     }
 
     pub fn set_terrain(&mut self, mesh: std::sync::Arc<esp_terrain::mesh::Mesh>) {
@@ -217,6 +229,7 @@ impl Flight {
             autopilot: Autopilot::default(),
             on_ground,
             ground: None,
+            origin_elevation: 0.0,
         })
     }
 
@@ -246,7 +259,7 @@ impl Flight {
     }
 
     pub fn configure_controls(&self, variables: &mut Variables) -> Result<()> {
-        Autopilot::configure(variables, -self.current.position.z)?;
+        Autopilot::configure(variables, self.msl_altitude(&self.current))?;
         variables.configure_aileron_travel(self.aileron_up_limit)
     }
 

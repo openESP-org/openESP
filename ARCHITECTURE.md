@@ -93,6 +93,9 @@ classes. Monthly geographic season rasters select the matching seasonal
 texture variant, with summer as a fallback; streaming airport scenery and
 photos remains unfinished. The flight runtime
 uses runway, taxiway and apron footprints for flat airport surfaces.
+Flight positions remain local to the scene datum; instruments, navigation,
+autopilot and atmospheric calculations add that datum to obtain mean-sea-level
+altitude, while ground clearance is measured against the terrain mesh.
 `esp-render::ground` validates and uploads either the terrain geometry or the
 fallback grid.
 

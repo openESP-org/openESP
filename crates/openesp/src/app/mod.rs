@@ -332,8 +332,11 @@ impl App {
                         .as_deref()
                         .zip(self.terrain_stream.as_ref())
                         .map(|(mesh, stream)| stream.render_mesh(mesh));
-                    if let (Some(flight), Some(mesh)) = (&mut self.flight, &terrain) {
-                        flight.set_ground(terrain::ground(mesh.clone(), &scene));
+                    if let Some(flight) = &mut self.flight {
+                        flight.set_origin_elevation(scene.elevation_m)?;
+                        if let Some(mesh) = &terrain {
+                            flight.set_ground(terrain::ground(mesh.clone(), &scene));
+                        }
                     }
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
@@ -363,7 +366,7 @@ impl App {
                     if let Some(flight) = &self.flight {
                         Flight::configure_ground(&mut self.variables);
                         flight.configure_controls(&mut self.variables)?;
-                        Flight::publish(&flight.current, &mut self.variables)?;
+                        flight.publish_at(&flight.current, &mut self.variables)?;
                         if let Some(limits) = &self.speed_limits {
                             limits.publish(&flight.current, &mut self.variables)?;
                         }
@@ -457,7 +460,7 @@ impl App {
             if self.door_open { 100.0 } else { 0.0 },
         );
         if let Some(flight) = &self.flight {
-            Flight::publish(&flight.current, &mut self.variables)?;
+            flight.publish_at(&flight.current, &mut self.variables)?;
             if let Some(limits) = &self.speed_limits {
                 limits.publish(&flight.current, &mut self.variables)?;
             }
@@ -478,7 +481,7 @@ impl App {
             if let Some(flight) = &mut self.flight {
                 self.variables.update_electrical()?;
                 flight.advance(STEP, &mut self.variables)?;
-                Flight::publish(&flight.current, &mut self.variables)?;
+                flight.publish_at(&flight.current, &mut self.variables)?;
                 if let Some(limits) = &self.speed_limits {
                     limits.publish(&flight.current, &mut self.variables)?;
                 }
@@ -492,7 +495,7 @@ impl App {
         self.variables.interpolate(frame.alpha)?;
         if let Some(flight) = &self.flight {
             let state = flight.sample(frame.alpha)?;
-            Flight::publish(&state, &mut self.variables)?;
+            flight.publish_at(&state, &mut self.variables)?;
             if let Some(limits) = &self.speed_limits {
                 limits.publish(&state, &mut self.variables)?;
             }

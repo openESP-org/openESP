@@ -32,6 +32,10 @@ impl Ground {
         self.terrain = terrain;
     }
 
+    pub fn reference_msl(&self) -> f64 {
+        self.terrain.reference_msl()
+    }
+
     pub fn add_segment(&mut self, start: [f64; 2], end: [f64; 2], width: f64) {
         if start.iter().chain(&end).all(|value| value.is_finite())
             && width.is_finite()

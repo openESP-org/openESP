@@ -45,5 +45,51 @@ fn aircraft_contact_tracks_real_elevated_terrain() {
         );
         let surface = flight.surface_at(&flight.current).elevation;
         assert!(surface > 50.0 && -flight.current.position.z > surface);
+        flight.publish_at(&flight.current, &mut variables).unwrap();
+        let read = |variables: &mut Variables, name| {
+            variables
+                .read(&Reference::new('A', name, Some("meters")))
+                .unwrap()
+                .number()
+                .unwrap()
+        };
+        let msl = reference - flight.current.position.z;
+        assert!((read(&mut variables, "PLANE ALTITUDE") - msl).abs() < 1e-6);
+        assert!((read(&mut variables, "GPS POSITION ALT") - msl).abs() < 1e-6);
+        flight.configure_controls(&mut variables).unwrap();
+        assert!((read(&mut variables, "AUTOPILOT ALTITUDE LOCK VAR") - msl).abs() < 1e-6);
+        assert!((read(&mut variables, "GROUND ALTITUDE") - (reference + surface)).abs() < 1e-6);
+        assert!(
+            (read(&mut variables, "PLANE ALT ABOVE GROUND")
+                - (-flight.current.position.z - surface))
+                .abs()
+                < 1e-6
+        );
+    }
+}
+
+#[test]
+fn instruments_and_navigation_use_msl_and_terrain_clearance() {
+    let state = State {
+        position: DVec3::new(0.0, 0.0, -200.0),
+        velocity: DVec3::X * 50.0,
+        ..State::default()
+    };
+    let mut variables = Variables::default();
+    variables.set_number("WORLD ORIGIN ALTITUDE", "meters", 1000.0);
+    variables.set_number("GROUND ALTITUDE", "meters", 1150.0);
+    Flight::publish(&state, &mut variables).unwrap();
+    for (name, expected) in [
+        ("PLANE ALTITUDE", 1200.0),
+        ("GPS POSITION ALT", 1200.0),
+        ("PLANE ALT ABOVE GROUND", 50.0),
+        ("INDICATED ALTITUDE", 1200.0),
+    ] {
+        let actual = variables
+            .read(&Reference::new('A', name, Some("meters")))
+            .unwrap()
+            .number()
+            .unwrap();
+        assert!((actual - expected).abs() < 1e-6, "{name}: {actual}");
     }
 }
