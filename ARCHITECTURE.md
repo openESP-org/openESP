@@ -115,8 +115,9 @@ uses it for surface lighting and atmospheric sky scattering.
 applies observations to the flight session and renderer asynchronously, retaining
 manual weather when the network or station data is unavailable. `--live-weather`
 uses the selected `--airport` station and refreshes every ten minutes; wind,
-pressure, temperature and visibility are applied. Cloud rendering and gust
-physics are not yet implemented.
+pressure, temperature and visibility are applied. Up to three METAR cloud
+layers drive procedural ray-marched sky volumes at station-relative heights;
+cloud shadows, cloud motion and gust physics are not yet implemented.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.

@@ -16,6 +16,7 @@ mod tangent;
 pub use camera::Camera;
 use draw::make_draw;
 use material::{PipelineKey, texture_format};
+pub use sky::{CloudLayer, Weather};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -450,6 +451,8 @@ impl Renderer {
                 inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
                 sun: [0.0, 1.0, 0.0, 0.0],
                 lighting: [0.0; 4],
+                clouds: [[0.0; 4]; 3],
+                world: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1085,7 +1088,7 @@ impl Renderer {
         cockpit: bool,
         sun: Vec3,
         panel_lights: bool,
-        visibility_m: f64,
+        weather: Weather,
         screenshot: Option<&Path>,
     ) -> Result<bool> {
         let frame = match self.surface.get_current_texture() {
@@ -1106,21 +1109,7 @@ impl Renderer {
             "invalid sun direction"
         );
         let sun = sun.normalize();
-        let camera_uniform = sky::CameraUniform {
-            view_projection: matrix.to_cols_array_2d(),
-            inverse_view_projection: matrix.inverse().to_cols_array_2d(),
-            sun: [sun.x, sun.y, sun.z, camera.position.y.max(0.0) as f32],
-            lighting: [
-                f32::from(panel_lights),
-                if visibility_m.is_finite() {
-                    visibility_m.clamp(1.0, 1_000_000.0) as f32
-                } else {
-                    100_000.0
-                },
-                0.0,
-                0.0,
-            ],
-        };
+        let camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         let draws = if cockpit {

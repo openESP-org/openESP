@@ -3,6 +3,8 @@ struct Camera {
     inverse_view_projection: mat4x4<f32>,
     sun: vec4<f32>,
     lighting: vec4<f32>,
+    clouds: array<vec4<f32>, 3>,
+    world: vec4<f32>,
 }
 struct Draw {
     model: mat4x4<f32>,
@@ -97,6 +99,13 @@ fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
     }
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);
+    var cloud_light = 1.0;
+    for (var i = 0; i < 3; i += 1) {
+        let layer = camera.clouds[i];
+        if layer.z > 0.0 && camera.sun.w < layer.x + layer.y {
+            cloud_light *= 1.0 - 0.55 * layer.z;
+        }
+    }
     var lit = vec3(0.0);
     var n = normalize(input.normal);
     if draw.normal_settings.x > 0.5 {
@@ -130,9 +139,9 @@ fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
         let f = f0 + (vec3(1.0) - f0) * pow(1.0 - vh, 5.0);
         let specular = d * g * f / max(4.0 * nl * nv, 0.001);
         let diffuse = (vec3(1.0) - f) * (1.0 - metal) * colour.rgb / 3.14159265;
-        lit = colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight;
+        lit = colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight * cloud_light;
     } else {
-        let diffuse_light = 0.65 * max(dot(n, normalize(camera.sun.xyz)),0.0) * daylight;
+        let diffuse_light = 0.65 * max(dot(n, normalize(camera.sun.xyz)),0.0) * daylight * cloud_light;
         lit = colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance);
     }
     if emission_enabled {

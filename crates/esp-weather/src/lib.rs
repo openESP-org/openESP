@@ -11,6 +11,14 @@ pub struct Observation {
     pub temperature_c: Option<f64>,
     pub pressure_hpa: Option<f64>,
     pub visibility_m: Option<f64>,
+    /// None means the report did not specify sky conditions; an empty list is clear sky.
+    pub clouds: Option<Vec<CloudLayer>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CloudLayer {
+    pub base_agl_m: f64,
+    pub coverage: f64,
 }
 
 /// Parse the primary fields of a raw METAR, leaving missing values unset.
@@ -32,6 +40,7 @@ pub fn parse(raw: &str, station: &str) -> Result<Observation> {
         temperature_c: None,
         pressure_hpa: None,
         visibility_m: None,
+        clouds: None,
     };
     let words: Vec<_> = words.collect();
     for (index, &word) in words.iter().enumerate() {
@@ -40,6 +49,25 @@ pub fn parse(raw: &str, station: &str) -> Result<Observation> {
         }
         if !word.is_ascii() {
             continue;
+        }
+        if matches!(word, "CLR" | "SKC" | "NSC" | "NCD" | "CAVOK") {
+            result.clouds = Some(Vec::new());
+        } else if word.len() >= 6 {
+            let coverage = match &word[..3] {
+                "FEW" => Some(0.19),
+                "SCT" => Some(0.44),
+                "BKN" => Some(0.75),
+                "OVC" => Some(1.0),
+                _ => None,
+            };
+            if let Some(coverage) = coverage
+                && let Ok(height) = word[3..6].parse::<u32>()
+            {
+                result.clouds.get_or_insert_with(Vec::new).push(CloudLayer {
+                    base_agl_m: f64::from(height) * 30.48,
+                    coverage,
+                });
+            }
         }
         if let Some(wind) = word.strip_suffix("KT").or_else(|| word.strip_suffix("MPS")) {
             if wind.len() >= 5 && wind.is_ascii() {
@@ -162,10 +190,29 @@ mod tests {
         assert_eq!(european.temperature_c, Some(-2.0));
         assert_eq!(european.pressure_hpa, Some(1008.0));
         assert_eq!(european.visibility_m, Some(9999.0));
+        assert_eq!(
+            european.clouds,
+            Some(vec![CloudLayer {
+                base_agl_m: 609.6,
+                coverage: 0.75
+            }])
+        );
+        assert_eq!(us.clouds, Some(vec![]));
         assert!((european.wind_knots.unwrap() - 9.719).abs() < 0.01);
         let mixed = parse("KJFK 081020Z 00000KT 1 1/2SM -RA 05/04 A2992", "KJFK").unwrap();
         assert!((mixed.visibility_m.unwrap() - 1.5 * 1609.344).abs() < 0.1);
         assert_eq!(mixed.temperature_c, Some(5.0));
+        let layers = parse(
+            "METAR LQBK 220600Z 33007KT 9999 SCT012 BKN027 12/10 Q1015",
+            "LQBK",
+        )
+        .unwrap()
+        .clouds
+        .unwrap();
+        assert_eq!(layers.len(), 2);
+        assert!((layers[0].base_agl_m - 365.76).abs() < 0.01);
+        assert!((layers[1].base_agl_m - 822.96).abs() < 0.01);
+        assert_eq!((layers[0].coverage, layers[1].coverage), (0.44, 0.75));
         assert!(parse("METAR KLAX 080753Z 05006KT", "EGLL").is_err());
     }
     #[test]

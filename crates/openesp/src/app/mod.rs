@@ -655,18 +655,13 @@ impl App {
                 .ok()
                 .and_then(|value| value.number().ok())
                 .is_some_and(|value| value != 0.0);
-            let visibility = self
-                .variables
-                .read(&Reference::new('A', "AMBIENT VISIBILITY", Some("meters")))
-                .ok()
-                .and_then(|value| value.number().ok())
-                .unwrap_or(100_000.0);
+            let weather = live_weather::render_state(&mut self.variables);
             if renderer.render(
                 &self.camera,
                 self.arguments.cockpit,
                 Vec3::new(sun.y as f32, sun.z as f32, sun.x as f32),
                 panel_lights,
-                visibility,
+                weather,
                 screenshot,
             )? {
                 self.frames += 1;

@@ -406,6 +406,8 @@ mod tests {
                     [0.0, 1.0, 0.0, 0.0]
                 },
                 lighting: [f32::from(panel_on), visibility, 0.0, 0.0],
+                clouds: [[0.0; 4]; 3],
+                world: [0.0; 4],
             };
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,

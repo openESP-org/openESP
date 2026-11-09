@@ -1,5 +1,37 @@
 //! Apply observed weather to simulation variables.
+use esp_script::{Host, Reference};
 use esp_sim::{variables::Variables, weather};
+
+pub(super) fn render_state(variables: &mut Variables) -> esp_render::Weather {
+    let read = |variables: &mut Variables, name: &str, unit: &str| {
+        variables
+            .read(&Reference::new('A', name, Some(unit)))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite())
+    };
+    let clouds = std::array::from_fn(|index| {
+        let base = read(
+            variables,
+            &format!("OPENESP CLOUD BASE:{}", index + 1),
+            "meters",
+        )?;
+        let coverage = read(
+            variables,
+            &format!("OPENESP CLOUD COVER:{}", index + 1),
+            "number",
+        )?;
+        (coverage > 0.0).then_some(esp_render::CloudLayer {
+            base_msl: base,
+            coverage,
+        })
+    });
+    esp_render::Weather {
+        visibility_m: read(variables, "AMBIENT VISIBILITY", "meters").unwrap_or(100_000.0),
+        origin_msl: weather::origin_elevation(variables),
+        clouds,
+    }
+}
 
 pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation) {
     let altitude = weather::origin_elevation(variables);
@@ -22,12 +54,26 @@ pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation
     if let Some(visibility) = report.visibility_m {
         variables.set_number("AMBIENT VISIBILITY", "meters", visibility);
     }
+    if let Some(clouds) = &report.clouds {
+        for index in 0..3 {
+            let layer = clouds.get(index);
+            variables.set_number(
+                &format!("OPENESP CLOUD BASE:{}", index + 1),
+                "meters",
+                layer.map_or(0.0, |layer| altitude + layer.base_agl_m),
+            );
+            variables.set_number(
+                &format!("OPENESP CLOUD COVER:{}", index + 1),
+                "number",
+                layer.map_or(0.0, |layer| layer.coverage),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use esp_script::{Host, Reference};
     #[test]
     fn observation_drives_flight_wind_atmosphere_and_visibility() {
         let mut variables = Variables::default();
@@ -49,5 +95,21 @@ mod tests {
             .number()
             .unwrap();
         assert_eq!(visibility, 4000.0);
+        assert_eq!(
+            variables
+                .read(&Reference::new('A', "OPENESP CLOUD BASE:1", Some("meters")))
+                .unwrap()
+                .number()
+                .unwrap(),
+            1609.6
+        );
+        let clear = esp_weather::parse("TEST 081030Z 00000KT CAVOK 12/05 Q1000", "TEST").unwrap();
+        apply(&mut variables, &clear);
+        assert!(
+            render_state(&mut variables)
+                .clouds
+                .iter()
+                .all(Option::is_none)
+        );
     }
 }

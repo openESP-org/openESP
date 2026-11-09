@@ -1,5 +1,8 @@
 use wgpu::{Device, RenderPipeline, TextureFormat};
 
+#[cfg(test)]
+mod tests;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct CameraUniform {
@@ -7,6 +10,63 @@ pub(super) struct CameraUniform {
     pub inverse_view_projection: [[f32; 4]; 4],
     pub sun: [f32; 4],
     pub lighting: [f32; 4],
+    pub clouds: [[f32; 4]; 3],
+    pub world: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CloudLayer {
+    pub base_msl: f64,
+    pub coverage: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Weather {
+    pub visibility_m: f64,
+    pub origin_msl: f64,
+    pub clouds: [Option<CloudLayer>; 3],
+}
+
+pub(super) fn uniform(
+    camera: &crate::Camera,
+    matrix: glam::Mat4,
+    sun: glam::Vec3,
+    panel_lights: bool,
+    weather: Weather,
+) -> CameraUniform {
+    CameraUniform {
+        view_projection: matrix.to_cols_array_2d(),
+        inverse_view_projection: matrix.inverse().to_cols_array_2d(),
+        sun: [
+            sun.x,
+            sun.y,
+            sun.z,
+            (camera.position.y + weather.origin_msl).max(0.0) as f32,
+        ],
+        lighting: [
+            f32::from(panel_lights),
+            if weather.visibility_m.is_finite() {
+                weather.visibility_m.clamp(1.0, 1_000_000.0) as f32
+            } else {
+                100_000.0
+            },
+            0.0,
+            0.0,
+        ],
+        clouds: weather.clouds.map(|layer| {
+            layer
+                .filter(|layer| layer.base_msl.is_finite() && layer.coverage.is_finite())
+                .map_or([0.0; 4], |layer| {
+                    [
+                        layer.base_msl as f32,
+                        600.0,
+                        layer.coverage.clamp(0.0, 1.0) as f32,
+                        0.0,
+                    ]
+                })
+        }),
+        world: [camera.position.x as f32, camera.position.z as f32, 0.0, 0.0],
+    }
 }
 
 pub(super) fn pipeline(
