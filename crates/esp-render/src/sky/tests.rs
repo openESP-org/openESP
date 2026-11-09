@@ -12,8 +12,17 @@ fn camera_samples_clouds_relative_to_advected_world() {
         origin_msl: 300.0,
         clouds: [None; 3],
         cloud_offset: [70.0, -60.0],
+        precipitation: [0.0; 2],
+        simulation_seconds: 0.0,
     };
-    let uniforms = uniform(&camera, glam::Mat4::IDENTITY, glam::Vec3::Y, false, weather);
+    let uniforms = uniform(
+        &camera,
+        glam::Mat4::IDENTITY,
+        glam::Vec3::Y,
+        false,
+        weather,
+        false,
+    );
     assert_eq!(uniforms.world[..2], [50.0, 20.0]);
     assert_eq!(uniforms.sun[3], 400.0);
 }
@@ -116,12 +125,19 @@ fn renders_reported_cloud_layer_offscreen() {
             mapped_at_creation: false,
         });
         let mut images = Vec::new();
-        for phase in 0..3 {
+        for phase in 0..5 {
             if phase > 0 {
                 uniform.clouds[0] = [660.0, 600.0, 0.75, 0.0];
             }
-            if phase == 2 {
+            if phase >= 2 {
                 uniform.world[0] = -2000.0;
+            }
+            if phase == 3 {
+                uniform.lighting[2] = 1.0;
+            }
+            if phase == 4 {
+                uniform.lighting[2] = 0.0;
+                uniform.lighting[3] = 1.0;
             }
             queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -201,6 +217,28 @@ fn renders_reported_cloud_layer_offscreen() {
             moved > 1000,
             "cloud advection did not change the sky: {moved} pixels"
         );
+        for (index, name) in [(3, "rain"), (4, "snow")] {
+            let changed = images[2]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(images[index].as_chunks::<4>().0.iter())
+                .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 4))
+                .count();
+            assert!(
+                changed > 20,
+                "{name} did not affect rendered pixels: {changed}"
+            );
+            image::save_buffer(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../target/metar-{name}-headless.png")),
+                &images[index],
+                256,
+                128,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
         image::save_buffer(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/metar-clouds-headless.png"),

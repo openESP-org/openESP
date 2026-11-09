@@ -8,6 +8,13 @@ impl Flight {
         );
         let wind = crate::weather::wind(variables)?;
         let weather = crate::weather::conditions(variables)?;
+        let [rain, snow] = crate::weather::precipitation(variables);
+        let surface_condition = self.surface_condition.advance(
+            dt,
+            rain,
+            snow,
+            weather.at(self.origin_elevation)?.temperature - 273.15,
+        )?;
         let hydraulic_fraction = self
             .hydraulics
             .as_ref()
@@ -520,6 +527,7 @@ impl Flight {
             }
         }
         self.current = next;
+        self.surface_condition = surface_condition;
         self.on_ground = self
             .gear
             .forces(

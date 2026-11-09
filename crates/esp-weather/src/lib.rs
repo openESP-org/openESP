@@ -11,6 +11,8 @@ pub struct Observation {
     pub temperature_c: Option<f64>,
     pub pressure_hpa: Option<f64>,
     pub visibility_m: Option<f64>,
+    /// Normalized observed rainfall and snowfall intensities.
+    pub precipitation: [f64; 2],
     /// None means the report did not specify sky conditions; an empty list is clear sky.
     pub clouds: Option<Vec<CloudLayer>>,
 }
@@ -64,15 +66,35 @@ pub fn parse(raw: &str, station: &str) -> Result<Observation> {
         temperature_c: None,
         pressure_hpa: None,
         visibility_m: None,
+        precipitation: [0.0; 2],
         clouds: None,
     };
     let words: Vec<_> = words.collect();
     for (index, &word) in words.iter().enumerate() {
-        if word == "RMK" {
+        if matches!(word, "RMK" | "NOSIG" | "TEMPO" | "BECMG") {
             break;
         }
         if !word.is_ascii() {
             continue;
+        }
+        if !word.starts_with("VC")
+            && !word.starts_with("RE")
+            && !word.contains("BLSN")
+            && !word.contains("DRSN")
+        {
+            let intensity: f64 = if word.starts_with('-') {
+                0.3
+            } else if word.starts_with('+') {
+                1.0
+            } else {
+                0.6
+            };
+            if word.contains("RA") || word.contains("DZ") {
+                result.precipitation[0] = result.precipitation[0].max(intensity);
+            }
+            if word.contains("SN") || word.contains("SG") {
+                result.precipitation[1] = result.precipitation[1].max(intensity);
+            }
         }
         if matches!(word, "CLR" | "SKC" | "NSC" | "NCD" | "CAVOK") {
             result.clouds = Some(Vec::new());
@@ -254,6 +276,19 @@ mod tests {
         let mixed = parse("KJFK 081020Z 00000KT 1 1/2SM -RA 05/04 A2992", "KJFK").unwrap();
         assert!((mixed.visibility_m.unwrap() - 1.5 * 1609.344).abs() < 0.1);
         assert_eq!(mixed.temperature_c, Some(5.0));
+        assert_eq!(mixed.precipitation, [0.3, 0.0]);
+        let snow = parse(
+            "METAR TEST 081020Z 00000KT 2000 +SHSN BKN010 M02/M04 Q1005",
+            "TEST",
+        )
+        .unwrap();
+        assert_eq!(snow.precipitation, [0.0, 1.0]);
+        let clear = parse(
+            "METAR TEST 081020Z 00000KT CAVOK 05/04 Q1005 NOSIG RMK RAB05",
+            "TEST",
+        )
+        .unwrap();
+        assert_eq!(clear.precipitation, [0.0, 0.0]);
         let layers = parse(
             "METAR LQBK 220600Z 33007KT 9999 SCT012 BKN027 12/10 Q1015",
             "LQBK",

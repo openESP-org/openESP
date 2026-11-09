@@ -83,5 +83,5 @@ struct Output {
         let haze = (1.0 - exp(-5000.0 / max(camera.lighting.y, 1.0))) * exp(-max(ray.y, 0.0) * 6.0);
         color = mix(color, mix(vec3(0.015, 0.02, 0.03), vec3(0.57, 0.64, 0.70), daylight), haze);
     }
-    return vec4(color, 1.0);
+    return vec4(precipitation(color, input.position.xy), 1.0);
 }

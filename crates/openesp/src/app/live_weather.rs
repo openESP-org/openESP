@@ -34,6 +34,13 @@ pub(super) fn render_state(
         origin_msl: weather::origin_elevation(variables),
         clouds,
         cloud_offset: [drift.east, drift.north],
+        precipitation: weather::precipitation(variables),
+        simulation_seconds: variables
+            .read(&Reference::new('E', "SIMULATION TIME", Some("seconds")))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0),
     }
 }
 
@@ -82,6 +89,16 @@ pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation
     if let Some(visibility) = report.visibility_m {
         variables.set_number("AMBIENT VISIBILITY", "meters", visibility);
     }
+    variables.set_number(
+        "OPENESP PRECIPITATION RAIN",
+        "number",
+        report.precipitation[0],
+    );
+    variables.set_number(
+        "OPENESP PRECIPITATION SNOW",
+        "number",
+        report.precipitation[1],
+    );
     if let Some(clouds) = &report.clouds {
         for index in 0..3 {
             let layer = clouds.get(index);
@@ -125,11 +142,12 @@ mod tests {
         let mut variables = Variables::default();
         variables.set_number("WORLD ORIGIN ALTITUDE", "meters", 1000.0);
         let report = esp_weather::parse(
-            "METAR TEST 081020Z 27020G30KT 4000 BKN020 10/05 Q1000",
+            "METAR TEST 081020Z 27020G30KT 4000 -RA BKN020 10/05 Q1000",
             "TEST",
         )
         .unwrap();
         apply(&mut variables, &report);
+        assert_eq!(weather::precipitation(&mut variables), [0.3, 0.0]);
         let wind = weather::wind(&mut variables).unwrap();
         assert!((wind.y - 20.0 * 1852.0 / 3600.0).abs() < 1e-6);
         let atmosphere = weather::conditions(&mut variables)
@@ -161,6 +179,7 @@ mod tests {
         );
         let clear = esp_weather::parse("TEST 081030Z 00000KT CAVOK 12/05 Q1000", "TEST").unwrap();
         apply(&mut variables, &clear);
+        assert_eq!(weather::precipitation(&mut variables), [0.0, 0.0]);
         assert_eq!(
             variables
                 .read(&Reference::new('A', "OPENESP WIND GUST", Some("knots")))

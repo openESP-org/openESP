@@ -115,11 +115,14 @@ uses it for surface lighting and atmospheric sky scattering.
 applies observations to the flight session and renderer asynchronously, retaining
 manual weather when the network or station data is unavailable. `--live-weather`
 uses the selected `--airport` station and refreshes every ten minutes; wind,
-pressure, temperature and visibility are applied. Up to three METAR cloud
+pressure, temperature, visibility and precipitation are applied. Rain and snow
+drive an approximate wetness/snow accumulation model for ground friction, and
+a screen-space precipitation view effect. Up to three METAR cloud
 layers drive procedural ray-marched sky volumes at station-relative heights;
 the same volumes obscure scene geometry up to each fragment's distance. This
 forward-rendered approach has not yet been performance tuned; cloud shadows
-are not yet implemented. Cloud volumes advect with mean wind on fixed simulation
+are not yet implemented. Precipitation is not a reported runway-condition or
+hydroplaning model. Cloud volumes advect with mean wind on fixed simulation
 steps and keep their position through wind changes. METAR gust peaks drive a bounded,
 deterministic approximation of wind variation in the flight model.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select

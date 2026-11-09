@@ -48,6 +48,7 @@ pub struct Flight {
     on_ground: bool,
     ground: Option<ground::Ground>,
     origin_elevation: f64,
+    surface_condition: crate::weather::SurfaceCondition,
 }
 
 pub mod ground;
@@ -83,9 +84,10 @@ impl Flight {
     }
 
     fn surface_at(&self, state: &State) -> Surface {
-        self.ground.as_ref().map_or(TEST_SURFACE, |ground| {
+        let surface = self.ground.as_ref().map_or(TEST_SURFACE, |ground| {
             ground.surface(state.position.x, state.position.y)
-        })
+        });
+        self.surface_condition.surface(surface)
     }
 
     pub fn new(
@@ -230,6 +232,7 @@ impl Flight {
             on_ground,
             ground: None,
             origin_elevation: 0.0,
+            surface_condition: crate::weather::SurfaceCondition::default(),
         })
     }
 

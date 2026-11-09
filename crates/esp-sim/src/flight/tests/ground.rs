@@ -2,6 +2,37 @@ use super::*;
 use std::{path::Path, sync::Arc};
 
 #[test]
+#[ignore = "requires an original wheeled aircraft in OPENESP_AIRCRAFT_PATHS"]
+fn contaminated_surface_reduces_real_aircraft_braking() {
+    let path = content::aircraft_paths().into_iter().next().unwrap();
+    let data = FlightData::load(&path, 0).unwrap();
+    let mut resting = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+    let mut rest_variables = controls(&data);
+    for _ in 0..600 {
+        resting.advance(1.0 / 60.0, &mut rest_variables).unwrap();
+    }
+    let mut speeds = Vec::new();
+    for snow in [0.0, 1.0] {
+        let mut flight = Flight::new(&data, 0.0, 0.0, 0.5, true).unwrap();
+        let mut variables = controls(&data);
+        flight.current = resting.current;
+        flight.current.velocity = DVec3::X * 15.0;
+        flight.surface_condition.snow = snow;
+        variables
+            .dispatch_event("PARKING_BRAKES", Value::Number(0.0))
+            .unwrap();
+        for _ in 0..60 {
+            flight.advance(1.0 / 60.0, &mut variables).unwrap();
+        }
+        speeds.push(flight.current.velocity.length());
+    }
+    assert!(
+        speeds[1] > speeds[0] + 0.2,
+        "snow should reduce braking: {speeds:?}"
+    );
+}
+
+#[test]
 #[ignore = "requires an original aircraft in OPENESP_AIRCRAFT_PATHS"]
 fn real_aircraft_responds_to_reported_gusts() {
     let path = content::aircraft_paths().into_iter().next().unwrap();

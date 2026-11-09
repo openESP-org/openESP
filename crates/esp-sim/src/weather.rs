@@ -4,6 +4,64 @@ use esp_physics::{atmosphere::Atmosphere, flight::Motion as State};
 use esp_script::{Host, Reference};
 use glam::DVec3;
 
+/// Approximate local surface contamination inferred from recent precipitation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceCondition {
+    pub wetness: f64,
+    pub snow: f64,
+}
+
+impl SurfaceCondition {
+    pub fn advance(self, dt: f64, rain: f64, snow: f64, temperature_c: f64) -> Result<Self> {
+        ensure!(
+            dt.is_finite()
+                && dt >= 0.0
+                && rain.is_finite()
+                && snow.is_finite()
+                && temperature_c.is_finite(),
+            "invalid surface weather"
+        );
+        let rain = rain.clamp(0.0, 1.0);
+        let snowfall = snow.clamp(0.0, 1.0);
+        let wet = self.wetness + (1.0 - self.wetness) * (1.0 - (-rain * dt / 120.0).exp());
+        let wetness = (wet * (-(1.0 - rain) * dt / 1800.0).exp()).clamp(0.0, 1.0);
+        let accumulated = self.snow + (1.0 - self.snow) * (1.0 - (-snowfall * dt / 1200.0).exp());
+        let melt = if temperature_c > 0.0 {
+            1.0 / 1800.0
+        } else {
+            0.0
+        };
+        Ok(Self {
+            wetness,
+            snow: (accumulated * (-melt * dt).exp()).clamp(0.0, 1.0),
+        })
+    }
+    pub fn surface(
+        self,
+        mut surface: esp_physics::ground::Surface,
+    ) -> esp_physics::ground::Surface {
+        surface.tyre_friction *= (1.0 - 0.3 * self.wetness) * (1.0 - 0.65 * self.snow);
+        surface.rolling_resistance += 0.02 * self.snow;
+        surface
+    }
+}
+
+pub fn precipitation(variables: &mut Variables) -> [f64; 2] {
+    ["RAIN", "SNOW"].map(|kind| {
+        variables
+            .read(&Reference::new(
+                'A',
+                &format!("OPENESP PRECIPITATION {kind}"),
+                Some("number"),
+            ))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    })
+}
+
 #[derive(Clone, Copy)]
 pub struct Conditions {
     pub sea_pressure: f64,
@@ -118,6 +176,25 @@ pub fn publish(state: &State, wind: DVec3, variables: &mut Variables) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precipitation_accumulates_and_drying_restores_grip() {
+        let base = esp_physics::ground::Surface {
+            elevation: 0.0,
+            rolling_resistance: 0.02,
+            tyre_friction: 0.8,
+        };
+        let dry = SurfaceCondition::default();
+        let wet = dry.advance(600.0, 1.0, 0.0, 10.0).unwrap();
+        let snowy = wet.advance(2400.0, 0.0, 1.0, -5.0).unwrap();
+        assert!(wet.wetness > 0.99);
+        assert!(snowy.snow > 0.8);
+        assert!(snowy.surface(base).tyre_friction < wet.surface(base).tyre_friction);
+        assert!(wet.surface(base).tyre_friction < dry.surface(base).tyre_friction);
+        let recovered = snowy.advance(20_000.0, 0.0, 0.0, 10.0).unwrap();
+        assert!(recovered.surface(base).tyre_friction > 0.79);
+        assert!(dry.advance(f64::NAN, 0.0, 0.0, 0.0).is_err());
+    }
 
     #[test]
     fn reported_gust_changes_air_relative_speed_and_returns_to_steady_wind() {

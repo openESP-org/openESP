@@ -91,7 +91,8 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
         let lines = 1.0 - smoothstep(vec2(0.008), vec2(0.008) + width * 0.5, distance);
         let fade = 1.0 - smoothstep(0.2, 0.5, max(width.x, width.y));
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
-        return vec4(weather_fog(weather_volume(colour.rgb, input.camera_relative_position), length(input.camera_relative_position)), colour.a);
+        let fogged = weather_fog(weather_volume(colour.rgb, input.camera_relative_position), length(input.camera_relative_position));
+        return vec4(precipitation(fogged, input.position.xy), colour.a);
     }
     if draw.settings.y > 2.5 && draw.settings.y < 3.5 {
         colour = vec4(input.tangent.xyz, 1.0);
@@ -166,5 +167,9 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
             default: { lit = mix(lit, lit * emission, night); }
         }
     }
-    return vec4(weather_fog(weather_volume(lit, input.camera_relative_position), length(input.camera_relative_position)), colour.a);
+    let fogged = weather_fog(weather_volume(lit, input.camera_relative_position), length(input.camera_relative_position));
+    let in_cockpit = camera.world.w > 0.5 && draw.settings.y < 0.5;
+    var result = fogged;
+    if !in_cockpit { result = precipitation(result, input.position.xy); }
+    return vec4(result, colour.a);
 }

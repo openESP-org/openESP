@@ -19,9 +19,17 @@ use material::{PipelineKey, texture_format};
 const AIRCRAFT_SHADER: &str = concat!(
     include_str!("aircraft.wgsl"),
     "\n",
-    include_str!("clouds.wgsl")
+    include_str!("clouds.wgsl"),
+    "\n",
+    include_str!("precipitation.wgsl")
 );
-const SKY_SHADER: &str = concat!(include_str!("sky.wgsl"), "\n", include_str!("clouds.wgsl"));
+const SKY_SHADER: &str = concat!(
+    include_str!("sky.wgsl"),
+    "\n",
+    include_str!("clouds.wgsl"),
+    "\n",
+    include_str!("precipitation.wgsl")
+);
 pub use sky::{CloudLayer, Weather};
 
 #[repr(C)]
@@ -1115,7 +1123,7 @@ impl Renderer {
             "invalid sun direction"
         );
         let sun = sun.normalize();
-        let camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather);
+        let camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather, cockpit);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         let draws = if cockpit {

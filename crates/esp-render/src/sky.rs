@@ -27,6 +27,8 @@ pub struct Weather {
     pub clouds: [Option<CloudLayer>; 3],
     /// Displacement of cloud patterns in local east/north metres.
     pub cloud_offset: [f64; 2],
+    pub precipitation: [f64; 2],
+    pub simulation_seconds: f64,
 }
 
 pub(super) fn uniform(
@@ -35,6 +37,7 @@ pub(super) fn uniform(
     sun: glam::Vec3,
     panel_lights: bool,
     weather: Weather,
+    cockpit: bool,
 ) -> CameraUniform {
     CameraUniform {
         view_projection: matrix.to_cols_array_2d(),
@@ -52,8 +55,8 @@ pub(super) fn uniform(
             } else {
                 100_000.0
             },
-            0.0,
-            0.0,
+            weather.precipitation[0].clamp(0.0, 1.0) as f32,
+            weather.precipitation[1].clamp(0.0, 1.0) as f32,
         ],
         clouds: weather.clouds.map(|layer| {
             layer
@@ -70,8 +73,8 @@ pub(super) fn uniform(
         world: [
             (camera.position.x - weather.cloud_offset[0]) as f32,
             (camera.position.z - weather.cloud_offset[1]) as f32,
-            0.0,
-            0.0,
+            weather.simulation_seconds.rem_euclid(40960.0) as f32,
+            f32::from(cockpit),
         ],
     }
 }
