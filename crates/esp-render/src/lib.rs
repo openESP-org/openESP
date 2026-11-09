@@ -16,6 +16,12 @@ mod tangent;
 pub use camera::Camera;
 use draw::make_draw;
 use material::{PipelineKey, texture_format};
+const AIRCRAFT_SHADER: &str = concat!(
+    include_str!("aircraft.wgsl"),
+    "\n",
+    include_str!("clouds.wgsl")
+);
+const SKY_SHADER: &str = concat!(include_str!("sky.wgsl"), "\n", include_str!("clouds.wgsl"));
 pub use sky::{CloudLayer, Weather};
 
 #[repr(C)]
@@ -410,7 +416,7 @@ impl Renderer {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("aircraft"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("aircraft.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(AIRCRAFT_SHADER.into()),
         });
         let pipeline = |key: PipelineKey| -> Result<wgpu::RenderPipeline> {
             Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

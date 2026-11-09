@@ -77,7 +77,7 @@ pub(super) fn pipeline(
 ) -> RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("atmospheric scattering"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::SKY_SHADER.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sky"),

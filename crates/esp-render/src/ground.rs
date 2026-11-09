@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn terrain_shader_is_valid_wgsl() {
-        let shader = naga::front::wgsl::parse_str(include_str!("aircraft.wgsl")).unwrap();
+        let shader = naga::front::wgsl::parse_str(crate::AIRCRAFT_SHADER).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -359,7 +359,7 @@ mod tests {
                 .unwrap();
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: None,
-                source: wgpu::ShaderSource::Wgsl(include_str!("aircraft.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(crate::AIRCRAFT_SHADER.into()),
             });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None, layout: None,
@@ -378,6 +378,7 @@ mod tests {
                 }), multiview_mask: None, cache: None,
             });
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
+            let cloud_test = std::env::var("OPENESP_CLOUD_OCCLUSION").ok();
             let visibility = std::env::var("OPENESP_VISIBILITY_METERS")
                 .ok()
                 .map(|value| value.parse::<f32>().unwrap())
@@ -389,7 +390,7 @@ mod tests {
                 .ok()
                 .map(|value| value.parse::<f32>().unwrap())
                 .unwrap_or(1.0);
-            let camera = crate::sky::CameraUniform {
+            let mut camera = crate::sky::CameraUniform {
                 view_projection: Mat4::from_cols_array_2d(&[
                     [1.0 / 600.0, 0.0, 0.0, 0.0],
                     [0.0, 0.0, 0.0, 0.0],
@@ -409,6 +410,15 @@ mod tests {
                 clouds: [[0.0; 4]; 3],
                 world: [0.0; 4],
             };
+            if let Some(mode) = &cloud_test {
+                camera.sun[3] = 50.0;
+                if mode == "cloud" {
+                    camera.clouds[0] = [10.0, 30.0, 1.0, 0.0];
+                }
+                if mode == "behind" {
+                    camera.clouds[0] = [-100.0, 30.0, 1.0, 0.0];
+                }
+            }
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::bytes_of(&camera),
@@ -471,6 +481,12 @@ mod tests {
                 0,
             )
             .unwrap();
+            if cloud_test.is_some() {
+                for draw in &mut draws {
+                    draw.uniform.model[3][1] = -50.0;
+                    queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
+                }
+            }
             if let Some(path) = &normal_path {
                 let image =
                     esp_assets::texture::Texture::load(std::path::Path::new(path), !bc.is_empty())
@@ -665,7 +681,19 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if visibility > 0.0 {
+            if let Some(mode) = &cloud_test {
+                let green = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pixel| u64::from(pixel[1]))
+                    .sum::<u64>();
+                if mode == "cloud" {
+                    assert!(green > 20_000, "cloud did not obscure terrain: {green}");
+                } else {
+                    assert!(green < 1000, "unexpected green in clear terrain: {green}");
+                }
+            } else if visibility > 0.0 {
                 let corner = &pixels[(5 * 64 + 5) * 4..][..4];
                 assert!(
                     corner[0] > 100 && corner[1] > 100 && corner[2] > 100,
@@ -703,17 +731,23 @@ mod tests {
                         .any(|pixel| pixel[..3] != center[..3])
                 );
             }
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if visibility > 0.0 {
-                "../../target/visibility-headless.png"
-            } else if normal_path.is_some() {
-                "../../target/legacy-bump-headless.png"
-            } else if emissive_path.is_some() {
-                "../../target/emissive-headless.png"
-            } else if external.is_some() {
-                "../../target/terrain-texture-headless.png"
-            } else {
-                "../../target/terrain-blend-headless.png"
-            });
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                if cloud_test.as_deref() == Some("cloud") {
+                    "../../target/cloud-occlusion-headless.png"
+                } else if cloud_test.is_some() {
+                    "../../target/cloud-clear-headless.png"
+                } else if visibility > 0.0 {
+                    "../../target/visibility-headless.png"
+                } else if normal_path.is_some() {
+                    "../../target/legacy-bump-headless.png"
+                } else if emissive_path.is_some() {
+                    "../../target/emissive-headless.png"
+                } else if external.is_some() {
+                    "../../target/terrain-texture-headless.png"
+                } else {
+                    "../../target/terrain-blend-headless.png"
+                },
+            );
             image::save_buffer(path, &pixels, 64, 64, image::ColorType::Rgba8).unwrap();
         });
     }

@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 
 #[test]
 fn sky_shader_is_valid_wgsl() {
-    let shader = naga::front::wgsl::parse_str(include_str!("../sky.wgsl")).unwrap();
+    let shader = naga::front::wgsl::parse_str(crate::SKY_SHADER).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),

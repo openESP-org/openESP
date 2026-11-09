@@ -35,6 +35,19 @@ fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
     let fog_colour = mix(vec3(0.015, 0.02, 0.03), vec3(0.57, 0.64, 0.70), daylight);
     return mix(lit, fog_colour, fog);
 }
+fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
+    let distance = length(position);
+    if distance < 0.001 { return lit; }
+    let ray = position / distance;
+    let sun = normalize(camera.sun.xyz);
+    var result = lit;
+    for (var i = 0; i < 3; i += 1) {
+        let index = select(2 - i, i, ray.y < 0.0);
+        let cloud = cloud_layer(ray, sun, camera.clouds[index], min(distance, 40000.0));
+        result = result * (1.0 - cloud.a) + cloud.rgb;
+    }
+    return result;
+}
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) tangent: vec4<f32>) -> Output {
     var output: Output;
     output.position = camera.view_projection * draw.model * vec4(position, 1.0);
@@ -78,7 +91,7 @@ fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
         let lines = 1.0 - smoothstep(vec2(0.008), vec2(0.008) + width * 0.5, distance);
         let fade = 1.0 - smoothstep(0.2, 0.5, max(width.x, width.y));
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
-        return vec4(weather_fog(colour.rgb, length(input.camera_relative_position)), colour.a);
+        return vec4(weather_fog(weather_volume(colour.rgb, input.camera_relative_position), length(input.camera_relative_position)), colour.a);
     }
     if draw.settings.y > 2.5 && draw.settings.y < 3.5 {
         colour = vec4(input.tangent.xyz, 1.0);
@@ -153,5 +166,5 @@ fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
             default: { lit = mix(lit, lit * emission, night); }
         }
     }
-    return vec4(weather_fog(lit, length(input.camera_relative_position)), colour.a);
+    return vec4(weather_fog(weather_volume(lit, input.camera_relative_position), length(input.camera_relative_position)), colour.a);
 }
