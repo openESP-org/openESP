@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 esp-assets = { path = "../esp-assets" }
+esp-audio = { path = "../esp-audio" }
 esp-formats = { path = "../esp-formats" }
 esp-installs = { path = "../esp-installs" }
 esp-render = { path = "../esp-render" }

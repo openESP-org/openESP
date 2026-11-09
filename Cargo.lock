@@ -2064,6 +2064,7 @@ dependencies = [
  "anyhow",
  "clap",
  "esp-assets",
+ "esp-audio",
  "esp-formats",
  "esp-installs",
  "esp-nav",

@@ -25,7 +25,11 @@ use crate::cli::Arguments;
 use crate::cli::{parse_event, parse_utc_time};
 use crate::{flight::Flight, navigation, scenery, speed_limits::SpeedLimits, vor, weather};
 
-type LoadedAircraft = (Aircraft, Option<(Flight, SpeedLimits)>);
+type LoadedAircraft = (
+    Aircraft,
+    Option<(Flight, SpeedLimits)>,
+    Option<audio::Prepared>,
+);
 
 struct App {
     arguments: Arguments,
@@ -35,6 +39,7 @@ struct App {
     terrain_stream: Option<terrain::Stream>,
     aircraft: Option<Aircraft>,
     flight: Option<Flight>,
+    audio: Option<audio::Runtime>,
     speed_limits: Option<SpeedLimits>,
     exterior_state: Option<ModelState>,
     interior_state: Option<ModelState>,
@@ -263,10 +268,16 @@ impl App {
         if self.renderer.is_none() {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
-                    let (mut aircraft, flight) = aircraft?;
+                    let (mut aircraft, flight, sound) = aircraft?;
                     if let Some((flight, limits)) = flight {
                         self.flight = Some(flight);
                         self.speed_limits = Some(limits);
+                    }
+                    if let Some(sound) = sound {
+                        match sound.open() {
+                            Ok(audio) => self.audio = audio,
+                            Err(error) => eprintln!("audio unavailable: {error:#}"),
+                        }
                     }
                     let window = self.window.as_ref().context("window is absent")?;
                     window.set_title(&format!("openESP - {}", aircraft.title));
@@ -517,6 +528,12 @@ impl App {
         }
         self.apply_variable_overrides();
         self.update_flight_pose(frame.alpha)?;
+        if let Some(audio) = &mut self.audio
+            && let Err(error) = audio.update(&mut self.variables, self.arguments.cockpit)
+            && self.reported_diagnostics.insert("audio control".into())
+        {
+            eprintln!("audio control: {error:#}");
+        }
         if let (Some(stream), Some(renderer)) = (&mut self.terrain_stream, &mut self.renderer) {
             let position = self
                 .flight
@@ -865,6 +882,7 @@ impl ApplicationHandler for App {
     }
 }
 
+mod audio;
 mod scenery_folder;
 mod spawn;
 mod terrain;
@@ -964,7 +982,14 @@ pub(crate) fn run() -> Result<()> {
                 if flight.is_some() {
                     eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder and steering, B brakes, F1-F4 throttle");
                 }
-                Ok((aircraft, flight))
+                let sound = if flight.is_some() {
+                    let root = fsx_root.clone().or_else(|| esp_installs::discover().into_iter().next().map(|install| install.root));
+                    match audio::Prepared::load(&path, variant, root.as_deref()) {
+                        Ok(sound) => Some(sound),
+                        Err(error) => { eprintln!("aircraft sound unavailable: {error:#}"); None }
+                    }
+                } else { None };
+                Ok((aircraft, flight, sound))
             })();
             let _ = sender.send(loaded);
         })?;
@@ -1061,6 +1086,7 @@ pub(crate) fn run() -> Result<()> {
         terrain_stream: None,
         aircraft: None,
         flight: None,
+        audio: None,
         speed_limits: None,
         exterior_state: None,
         interior_state: None,
@@ -1323,6 +1349,7 @@ mod tests {
                 texture_directories: vec![],
             }),
             flight: None,
+            audio: None,
             speed_limits: None,
             exterior_state: None,
             interior_state: None,

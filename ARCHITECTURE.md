@@ -105,6 +105,10 @@ fallback grid.
 The app updates that direction from the live flight position; `esp-render`
 uses it for surface lighting and atmospheric sky scattering.
 
+Aircraft sound resources are prepared on the aircraft loading worker. The app
+owns the audio output and supplies engine state and view selection to the
+`esp-audio` mixer; device or content failures leave the flight running silently.
+
 `esp-installs` reads simulator installation paths from the Windows registry;
 it does not modify the registry or simulator directories. The app uses a
 registered install for base terrain when no explicit simulator root is set.
