@@ -11,6 +11,7 @@ pub struct Mesh {
     valid: Vec<bool>,
     side: usize,
     radius: f64,
+    centre: [f64; 2],
 }
 
 impl Mesh {
@@ -25,11 +26,33 @@ impl Mesh {
         cells: usize,
         reference_msl: f64,
     ) -> Result<Self> {
+        Self::build_at(
+            terrain,
+            latitude,
+            longitude,
+            [0.0, 0.0],
+            radius,
+            cells,
+            reference_msl,
+        )
+    }
+
+    /// Build around an east/north offset while retaining the original local frame.
+    pub fn build_at(
+        terrain: &Terrain,
+        latitude: f64,
+        longitude: f64,
+        centre: [f64; 2],
+        radius: f64,
+        cells: usize,
+        reference_msl: f64,
+    ) -> Result<Self> {
         ensure!(
             radius.is_finite()
                 && radius > 0.0
                 && radius <= 100_000.0
                 && (1..=1024).contains(&cells)
+                && centre.iter().all(|value| value.is_finite())
                 && reference_msl.is_finite(),
             "invalid terrain mesh parameters"
         );
@@ -39,9 +62,9 @@ impl Mesh {
         let mut vertices = Vec::with_capacity(side * side);
         let mut valid = Vec::with_capacity(side * side);
         for row in 0..side {
-            let north = -radius + row as f64 * step;
+            let north = centre[1] - radius + row as f64 * step;
             for col in 0..side {
-                let east = -radius + col as f64 * step;
+                let east = centre[0] - radius + col as f64 * step;
                 let (lat, lon) = origin.position(north, east)?;
                 let height = terrain.height(lat, lon);
                 valid.push(height.is_some());
@@ -89,11 +112,14 @@ impl Mesh {
             valid,
             side,
             radius,
+            centre,
         })
     }
 
     /// Height of the generated mesh at an east/north offset, if all samples exist.
     pub fn height(&self, east: f64, north: f64) -> Option<f64> {
+        let east = east - self.centre[0];
+        let north = north - self.centre[1];
         if !east.is_finite()
             || !north.is_finite()
             || east.abs() > self.radius
@@ -147,12 +173,16 @@ mod tests {
             valid: vec![true; 4],
             side: 2,
             radius: 1.0,
+            centre: [0.0, 0.0],
         };
         assert_eq!(mesh.height(-0.5, 0.5), Some(35.0));
         assert_eq!(mesh.height(0.5, -0.5), Some(30.0));
         assert_eq!(mesh.height(0.0, 0.0), Some(50.0));
         assert_eq!(mesh.height(2.0, 0.0), None);
-        mesh.valid[3] = false;
+        mesh.centre = [100.0, -200.0];
+        assert_eq!(mesh.height(99.5, -199.5), Some(35.0));
         assert_eq!(mesh.height(0.0, 0.0), None);
+        mesh.valid[3] = false;
+        assert_eq!(mesh.height(100.0, -200.0), None);
     }
 }

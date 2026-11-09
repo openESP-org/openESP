@@ -27,6 +27,11 @@ impl Ground {
         }
     }
 
+    /// Swap terrain while retaining the airport's surface footprints.
+    pub fn set_terrain(&mut self, terrain: Arc<Mesh>) {
+        self.terrain = terrain;
+    }
+
     pub fn add_segment(&mut self, start: [f64; 2], end: [f64; 2], width: f64) {
         if start.iter().chain(&end).all(|value| value.is_finite())
             && width.is_finite()

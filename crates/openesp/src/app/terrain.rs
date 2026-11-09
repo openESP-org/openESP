@@ -1,5 +1,10 @@
 use anyhow::Result;
 use glam::DVec3;
+use std::{
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    time::{Duration, Instant},
+};
 
 use crate::{cli::Arguments, navigation::Origin, scenery::AirportScene};
 
@@ -39,10 +44,83 @@ pub(super) fn ground(
     ground
 }
 
+type LoadedTerrain = Result<(Arc<esp_terrain::mesh::Mesh>, [f64; 2])>;
+
+pub(super) struct Stream {
+    root: PathBuf,
+    latitude: f64,
+    longitude: f64,
+    reference: f64,
+    centre: [f64; 2],
+    pending: Option<mpsc::Receiver<LoadedTerrain>>,
+    retry_at: Instant,
+}
+
+impl Stream {
+    pub fn update(&mut self, east: f64, north: f64) -> Option<Arc<esp_terrain::mesh::Mesh>> {
+        let mut ready = None;
+        if let Some(receiver) = &self.pending {
+            match receiver.try_recv() {
+                Ok(Ok((mesh, centre))) => {
+                    self.centre = centre;
+                    self.pending = None;
+                    ready = Some(mesh);
+                }
+                Ok(Err(error)) => {
+                    eprintln!("terrain streaming: {error:#}");
+                    self.pending = None;
+                    self.retry_at = Instant::now() + Duration::from_secs(10);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("terrain streaming: worker disconnected");
+                    self.pending = None;
+                    self.retry_at = Instant::now() + Duration::from_secs(10);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.pending.is_none()
+            && Instant::now() >= self.retry_at
+            && (east - self.centre[0])
+                .abs()
+                .max((north - self.centre[1]).abs())
+                > 12_000.0
+            && east.is_finite()
+            && north.is_finite()
+        {
+            // Keep the sampling grid aligned across replacements so overlapping
+            // triangles do not change height as the aircraft crosses a boundary.
+            let step = 60_000.0 / 256.0;
+            let centre = [east, north].map(|coordinate| (coordinate / step).round() * step);
+            let root = self.root.clone();
+            let (latitude, longitude, reference) = (self.latitude, self.longitude, self.reference);
+            let (sender, receiver) = mpsc::channel();
+            self.pending = Some(receiver);
+            std::thread::spawn(move || {
+                let result = (|| -> Result<_> {
+                    let origin = Origin::new(latitude, longitude)?;
+                    let (lat, lon) = origin.position(centre[1], centre[0])?;
+                    let terrain = esp_terrain::elevation::Terrain::load(&root, lat, lon, 45_000.0)?;
+                    let mesh = esp_terrain::mesh::Mesh::build_at(
+                        &terrain, latitude, longitude, centre, 30_000.0, 256, reference,
+                    )?;
+                    anyhow::ensure!(
+                        !mesh.indices.is_empty(),
+                        "no elevation data near {lat:.4}, {lon:.4}"
+                    );
+                    Ok((Arc::new(mesh), centre))
+                })();
+                let _ = sender.send(result);
+            });
+        }
+        ready
+    }
+}
+
 pub(super) fn load(
     arguments: &Arguments,
     airport_elevation: f64,
-) -> Result<Option<esp_terrain::mesh::Mesh>> {
+) -> Result<Option<(Arc<esp_terrain::mesh::Mesh>, Stream)>> {
     let roots = arguments.fsx_root.clone().map_or_else(
         || {
             esp_installs::discover()
@@ -87,7 +165,18 @@ pub(super) fn load(
         return Ok(None);
     }
     eprintln!("terrain: loaded elevation from {}", root.display());
-    Ok(Some(mesh))
+    Ok(Some((
+        Arc::new(mesh),
+        Stream {
+            root,
+            latitude: arguments.latitude,
+            longitude: arguments.longitude,
+            reference,
+            centre: [0.0, 0.0],
+            pending: None,
+            retry_at: Instant::now(),
+        },
+    )))
 }
 
 pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::TerrainMesh {
@@ -171,4 +260,62 @@ pub(super) fn photos(
     }
     eprintln!("scenery: loaded {} photo tiles", result.len());
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed Prepar3D root in OPENESP_P3D_ROOT"]
+    fn streams_real_elevation_and_preserves_overlapping_heights() {
+        let root = PathBuf::from(std::env::var_os("OPENESP_P3D_ROOT").unwrap());
+        let (latitude, longitude) = (41.17574, 40.84646);
+        let terrain =
+            esp_terrain::elevation::Terrain::load(&root, latitude, longitude, 45_000.0).unwrap();
+        let reference = terrain.height(latitude, longitude).unwrap();
+        let initial = Arc::new(
+            esp_terrain::mesh::Mesh::build(&terrain, latitude, longitude, 30_000.0, 256, reference)
+                .unwrap(),
+        );
+        let mut ground = esp_sim::flight::ground::Ground::new(Arc::clone(&initial));
+        ground.add_segment([990.0, 2000.0], [1010.0, 2000.0], 10.0);
+        let mut stream = Stream {
+            root,
+            latitude,
+            longitude,
+            reference,
+            centre: [0.0, 0.0],
+            pending: None,
+            retry_at: Instant::now(),
+        };
+        assert!(stream.update(20_000.0, 0.0).is_none());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mesh = loop {
+            if let Some(mesh) = stream.update(20_000.0, 0.0) {
+                break mesh;
+            }
+            assert!(Instant::now() < deadline, "terrain worker did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(mesh.height(40_000.0, 0.0).is_some());
+        assert!(initial.height(40_000.0, 0.0).is_none());
+        for point in [[1000.0, 2000.0], [15_000.0, -5000.0], [20_000.0, 1000.0]] {
+            let before = initial.height(point[0], point[1]).unwrap();
+            let after = mesh.height(point[0], point[1]).unwrap();
+            assert!(
+                (before - after).abs() < 1e-6,
+                "overlapping mesh changed from {before} to {after}"
+            );
+        }
+        ground.set_terrain(Arc::clone(&mesh));
+        assert_eq!(ground.surface(2000.0, 1000.0).elevation, 0.0);
+        assert_eq!(
+            ground.surface(0.0, 40_000.0).elevation,
+            mesh.height(40_000.0, 0.0).unwrap()
+        );
+        assert!(stream.pending.is_none());
+        assert!(stream.update(20_000.0, 0.0).is_none());
+        assert!(stream.pending.is_none());
+    }
 }

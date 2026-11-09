@@ -32,6 +32,7 @@ struct App {
     loaded: mpsc::Receiver<Result<LoadedAircraft>>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    terrain_stream: Option<terrain::Stream>,
     aircraft: Option<Aircraft>,
     flight: Option<Flight>,
     speed_limits: Option<SpeedLimits>,
@@ -317,7 +318,11 @@ impl App {
                     } else {
                         Vec::new()
                     };
-                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?.map(Arc::new);
+                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?;
+                    let terrain = terrain.map(|(mesh, stream)| {
+                        self.terrain_stream = Some(stream);
+                        mesh
+                    });
                     let photos = terrain::photos(&self.arguments, terrain.as_deref())?;
                     let render_terrain = terrain.as_deref().map(terrain::render_mesh);
                     if let (Some(flight), Some(mesh)) = (&mut self.flight, &terrain) {
@@ -487,6 +492,24 @@ impl App {
         }
         self.apply_variable_overrides();
         self.update_flight_pose(frame.alpha)?;
+        if let (Some(stream), Some(renderer)) = (&mut self.terrain_stream, &mut self.renderer) {
+            let position = self
+                .flight
+                .as_ref()
+                .map_or(renderer.aircraft_origin, |flight| {
+                    DVec3::new(
+                        flight.current.position.y,
+                        -flight.current.position.z,
+                        flight.current.position.x,
+                    )
+                });
+            if let Some(mesh) = stream.update(position.x, position.z) {
+                renderer.update_terrain(&terrain::render_mesh(&mesh))?;
+                if let Some(flight) = &mut self.flight {
+                    flight.set_terrain(mesh);
+                }
+            }
+        }
         if let Some(aircraft) = &mut self.aircraft {
             for (name, panel) in &mut aircraft.panel_images {
                 let changed = panel.update(&mut self.variables);
@@ -1008,6 +1031,7 @@ pub(crate) fn run() -> Result<()> {
         loaded,
         window: None,
         renderer: None,
+        terrain_stream: None,
         aircraft: None,
         flight: None,
         speed_limits: None,
@@ -1256,6 +1280,7 @@ mod tests {
             loaded,
             window: None,
             renderer: None,
+            terrain_stream: None,
             aircraft: Some(Aircraft {
                 title: "test".into(),
                 flaps: vec![],

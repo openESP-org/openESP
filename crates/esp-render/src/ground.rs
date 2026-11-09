@@ -1,5 +1,31 @@
-use crate::{TerrainMesh, Vertex};
+use crate::{Renderer, TerrainMesh, Vertex};
 use anyhow::{Result, ensure};
+use wgpu::util::DeviceExt;
+
+impl Renderer {
+    /// Replace the terrain geometry without rebuilding the rest of the scene.
+    pub fn update_terrain(&mut self, terrain: &TerrainMesh) -> Result<()> {
+        let (vertices, indices) = mesh(Some(terrain))?;
+        let count = u32::try_from(indices.len())?;
+        self.ground.vertices = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("terrain vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.ground.indices = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("terrain indices"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.ground.count = count;
+        self.ground_tracks_camera = false;
+        Ok(())
+    }
+}
 
 pub(super) fn mesh(terrain: Option<&TerrainMesh>) -> Result<(Vec<Vertex>, Vec<u32>)> {
     if let Some(terrain) = terrain {

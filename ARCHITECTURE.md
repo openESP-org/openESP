@@ -83,9 +83,11 @@ the renderer. The app projects selected bounds into its local scene; the
 renderer uploads and composites the imagery beneath airport surfaces.
 The initial elevation mesh samples registered simulator DEM tiles over a fixed
 area around the starting position; photo tiles are subdivided onto that mesh.
-Terrain paging and land-class textures remain unfinished. The flight runtime
-samples the same local height mesh for ground contact and uses the airport's
-runway, taxiway and apron footprints for its flat airport surfaces.
+Terrain elevation is rebuilt on a worker as the aircraft travels and swapped
+into both the renderer and flight runtime in the same frame. This uses a moving
+local mesh rather than a full worldwide tile cache; land-class textures and
+streaming of airport scenery and photos remain unfinished. The flight runtime
+uses runway, taxiway and apron footprints for flat airport surfaces.
 `esp-render::ground` validates and uploads either the terrain geometry or the
 fallback grid.
 

@@ -64,6 +64,12 @@ impl Flight {
         self.ground = Some(ground);
     }
 
+    pub fn set_terrain(&mut self, mesh: std::sync::Arc<esp_terrain::mesh::Mesh>) {
+        if let Some(ground) = &mut self.ground {
+            ground.set_terrain(mesh);
+        }
+    }
+
     fn surface_at(&self, state: &State) -> Surface {
         self.ground.as_ref().map_or(TEST_SURFACE, |ground| {
             ground.surface(state.position.x, state.position.y)
