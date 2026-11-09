@@ -69,6 +69,9 @@ struct Output {
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
         return colour;
     }
+    if draw.settings.y > 1.5 {
+        colour = vec4(input.tangent.xyz, 1.0);
+    }
     let daylight = smoothstep(-0.105, 0.087, camera.sun.y);
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);

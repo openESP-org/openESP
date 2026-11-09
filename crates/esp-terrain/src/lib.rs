@@ -5,6 +5,7 @@ use esp_formats::bgl::{Bgl, qmid::Bounds};
 use std::path::Path;
 
 pub mod elevation;
+pub mod landclass;
 pub mod mesh;
 
 /// A decoded photo tile and its geographic extent, in north-to-south row order.

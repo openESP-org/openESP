@@ -101,13 +101,14 @@ impl Stream {
                     let origin = Origin::new(latitude, longitude)?;
                     let (lat, lon) = origin.position(centre[1], centre[0])?;
                     let terrain = esp_terrain::elevation::Terrain::load(&root, lat, lon, 45_000.0)?;
-                    let mesh = esp_terrain::mesh::Mesh::build_at(
+                    let mut mesh = esp_terrain::mesh::Mesh::build_at(
                         &terrain, latitude, longitude, centre, 30_000.0, 256, reference,
                     )?;
                     anyhow::ensure!(
                         !mesh.indices.is_empty(),
                         "no elevation data near {lat:.4}, {lon:.4}"
                     );
+                    classify(&mut mesh, &root, latitude, longitude, lat, lon);
                     Ok((Arc::new(mesh), centre))
                 })();
                 let _ = sender.send(result);
@@ -153,7 +154,7 @@ pub(super) fn load(
             .height(arguments.latitude, arguments.longitude)
             .unwrap_or(0.0)
     };
-    let mesh = esp_terrain::mesh::Mesh::build(
+    let mut mesh = esp_terrain::mesh::Mesh::build(
         &terrain,
         arguments.latitude,
         arguments.longitude,
@@ -164,6 +165,14 @@ pub(super) fn load(
     if mesh.indices.is_empty() {
         return Ok(None);
     }
+    classify(
+        &mut mesh,
+        &root,
+        arguments.latitude,
+        arguments.longitude,
+        arguments.latitude,
+        arguments.longitude,
+    );
     eprintln!("terrain: loaded elevation from {}", root.display());
     Ok(Some((
         Arc::new(mesh),
@@ -177,6 +186,21 @@ pub(super) fn load(
             retry_at: Instant::now(),
         },
     )))
+}
+
+fn classify(
+    mesh: &mut esp_terrain::mesh::Mesh,
+    root: &std::path::Path,
+    origin_lat: f64,
+    origin_lon: f64,
+    lat: f64,
+    lon: f64,
+) {
+    let result = esp_terrain::landclass::LandClass::load(root, lat, lon, 45_000.0)
+        .and_then(|land| mesh.classify(&land, origin_lat, origin_lon));
+    if let Err(error) = result {
+        eprintln!("terrain land class: {error:#}");
+    }
 }
 
 pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::TerrainMesh {
@@ -193,6 +217,7 @@ pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::Terrain
             .copied()
             .map(DVec3::from_array)
             .collect(),
+        land_classes: mesh.land_classes.clone(),
         indices: mesh.indices.clone(),
     }
 }
@@ -274,10 +299,19 @@ mod tests {
         let terrain =
             esp_terrain::elevation::Terrain::load(&root, latitude, longitude, 45_000.0).unwrap();
         let reference = terrain.height(latitude, longitude).unwrap();
-        let initial = Arc::new(
+        let mut initial =
             esp_terrain::mesh::Mesh::build(&terrain, latitude, longitude, 30_000.0, 256, reference)
-                .unwrap(),
+                .unwrap();
+        classify(
+            &mut initial,
+            &root,
+            latitude,
+            longitude,
+            latitude,
+            longitude,
         );
+        assert!(initial.land_classes.iter().any(Option::is_some));
+        let initial = Arc::new(initial);
         let mut ground = esp_sim::flight::ground::Ground::new(Arc::clone(&initial));
         ground.add_segment([990.0, 2000.0], [1010.0, 2000.0], 10.0);
         let mut stream = Stream {
@@ -299,6 +333,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert!(mesh.height(40_000.0, 0.0).is_some());
+        assert!(mesh.land_classes.iter().any(Option::is_some));
         assert!(initial.height(40_000.0, 0.0).is_none());
         for point in [[1000.0, 2000.0], [15_000.0, -5000.0], [20_000.0, 1000.0]] {
             let before = initial.height(point[0], point[1]).unwrap();

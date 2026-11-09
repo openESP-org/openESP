@@ -8,6 +8,7 @@ pub struct Mesh {
     pub vertices: Vec<[f64; 3]>,
     pub normals: Vec<[f64; 3]>,
     pub indices: Vec<u32>,
+    pub land_classes: Vec<Option<u8>>,
     valid: Vec<bool>,
     side: usize,
     radius: f64,
@@ -106,6 +107,7 @@ impl Mesh {
             }
         }
         Ok(Self {
+            land_classes: vec![None; vertices.len()],
             vertices,
             normals,
             indices,
@@ -114,6 +116,20 @@ impl Mesh {
             radius,
             centre,
         })
+    }
+
+    pub fn classify(
+        &mut self,
+        land: &crate::landclass::LandClass,
+        latitude: f64,
+        longitude: f64,
+    ) -> Result<()> {
+        let origin = Origin::new(latitude, longitude)?;
+        for (vertex, class) in self.vertices.iter().zip(&mut self.land_classes) {
+            let (lat, lon) = origin.position(vertex[2], vertex[0])?;
+            *class = land.class(lat, lon);
+        }
+        Ok(())
     }
 
     /// Height of the generated mesh at an east/north offset, if all samples exist.
@@ -170,6 +186,7 @@ mod tests {
             ],
             normals: vec![],
             indices: vec![0, 2, 3, 0, 3, 1],
+            land_classes: vec![None; 4],
             valid: vec![true; 4],
             side: 2,
             radius: 1.0,

@@ -131,6 +131,7 @@ pub struct PhotoTile {
 pub struct TerrainMesh {
     pub vertices: Vec<DVec3>,
     pub normals: Vec<DVec3>,
+    pub land_classes: Vec<Option<u8>>,
     pub indices: Vec<u32>,
 }
 
@@ -491,7 +492,7 @@ impl Renderer {
                     } else {
                         let mut is_panel = false;
                         let resolved = if let Some(root) = texture_root {
-                            esp_assets::resolve_path(root, name).map(Some)
+                            esp_assets::resolve_texture(root, name).map(Some)
                         } else {
                             aircraft.texture_path(name)
                         };

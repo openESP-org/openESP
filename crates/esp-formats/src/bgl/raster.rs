@@ -84,7 +84,11 @@ impl<'a> Raster<'a> {
             .checked_mul(usize::from(self.rows))
             .and_then(|size| size.checked_mul(bytes_per_pixel))
             .ok_or(codec::Error::Limit)?;
-        codec::decode(self.data_compression, self.data, size)
+        if bytes_per_pixel == 1 {
+            codec::decode_mask(self.data_compression, self.data, self.columns, self.rows)
+        } else {
+            codec::decode(self.data_compression, self.data, size)
+        }
     }
 
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
@@ -142,6 +146,27 @@ impl Bgl<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_bitpacked_land_class_pixels() {
+        let mut data = vec![1, 0, 37, 0];
+        data.extend([0; 8]);
+        let raster = Raster {
+            data_type: 3,
+            data_compression: Compression::BitPack,
+            mask_compression: Compression::None,
+            qmid: [0; 2],
+            variations: 0,
+            columns: 9,
+            rows: 10,
+            dimension_flags: [0; 2],
+            header_extension: &[],
+            data: &data,
+            mask: &[],
+            trailing_data: &[],
+        };
+        assert_eq!(raster.decode_data().unwrap(), vec![37; 90]);
+    }
 
     #[test]
     fn separates_dimensions_flags_and_bounded_payloads() {

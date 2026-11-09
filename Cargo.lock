@@ -856,6 +856,7 @@ dependencies = [
  "esp-formats",
  "glam 0.30.10",
  "image",
+ "naga",
  "wgpu",
  "winit",
 ]

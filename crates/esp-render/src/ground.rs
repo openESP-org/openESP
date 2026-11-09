@@ -31,6 +31,7 @@ pub(super) fn mesh(terrain: Option<&TerrainMesh>) -> Result<(Vec<Vertex>, Vec<u3
     if let Some(terrain) = terrain {
         ensure!(
             terrain.vertices.len() == terrain.normals.len()
+                && terrain.vertices.len() == terrain.land_classes.len()
                 && !terrain.indices.is_empty()
                 && terrain.indices.len().is_multiple_of(3)
                 && terrain.vertices.iter().all(|vertex| vertex.is_finite())
@@ -45,11 +46,15 @@ pub(super) fn mesh(terrain: Option<&TerrainMesh>) -> Result<(Vec<Vertex>, Vec<u3
             .vertices
             .iter()
             .zip(&terrain.normals)
-            .map(|(position, normal)| Vertex {
+            .zip(&terrain.land_classes)
+            .map(|((position, normal), class)| Vertex {
                 position: position.as_vec3().to_array(),
                 normal: normal.as_vec3().to_array(),
                 uv: [0.0; 2],
-                tangent: [0.0; 4],
+                tangent: {
+                    let [r, g, b] = land_colour(*class);
+                    [r, g, b, 1.0]
+                },
             })
             .collect();
         return Ok((vertices, terrain.indices.clone()));
@@ -104,6 +109,46 @@ pub(super) fn mesh(terrain: Option<&TerrainMesh>) -> Result<(Vec<Vertex>, Vec<u3
     Ok((vertices, indices))
 }
 
+// Approximate colours until region/season texture lookup and water rendering are available.
+// Class meanings are defined by the Prepar3D Terrain SDK's Olson table.
+fn land_colour(class: Option<u8>) -> [f32; 3] {
+    match class {
+        Some(0 | 100 | 123..=127) => [0.07, 0.17, 0.23],
+        Some(1 | 101..=121 | 136) => [0.36, 0.35, 0.32],
+        Some(
+            3..=6 | 13 | 19..=29 | 32..=34 | 48 | 54 | 60..=62 | 72 | 78 | 89 | 90 | 144 | 145,
+        ) => [0.16, 0.26, 0.13],
+        Some(8 | 11 | 50..=52 | 69 | 99 | 129 | 137 | 146) => [0.48, 0.39, 0.25],
+        Some(9 | 42 | 53 | 63 | 130 | 131 | 133 | 138 | 141) => [0.32, 0.31, 0.26],
+        Some(122 | 142 | 143) => [0.72, 0.75, 0.74],
+        Some(
+            2
+            | 7
+            | 10
+            | 12
+            | 16
+            | 17
+            | 30
+            | 31
+            | 35..=38
+            | 40
+            | 41
+            | 43..=47
+            | 55..=59
+            | 64
+            | 76
+            | 91..=98
+            | 128
+            | 134
+            | 135
+            | 139
+            | 140
+            | 147,
+        ) => [0.29, 0.35, 0.19],
+        _ => [0.32, 0.32, 0.32],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,13 +159,27 @@ mod tests {
         let mut terrain = TerrainMesh {
             vertices: vec![DVec3::ZERO, DVec3::X, DVec3::new(0.0, 10.0, 1.0)],
             normals: vec![DVec3::Y; 3],
+            land_classes: vec![Some(0), Some(3), None],
             indices: vec![0, 1, 2],
         };
         let (vertices, indices) = mesh(Some(&terrain)).unwrap();
         assert_eq!(vertices[2].position, [0.0, 10.0, 1.0]);
+        assert_eq!(vertices[0].tangent, [0.07, 0.17, 0.23, 1.0]);
+        assert_ne!(vertices[0].tangent, vertices[1].tangent);
         assert_eq!(indices, [0, 1, 2]);
         terrain.indices[2] = 3;
         assert!(mesh(Some(&terrain)).is_err());
         assert!(!mesh(None).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn terrain_shader_is_valid_wgsl() {
+        let shader = naga::front::wgsl::parse_str(include_str!("aircraft.wgsl")).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&shader)
+        .unwrap();
     }
 }

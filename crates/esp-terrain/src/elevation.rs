@@ -95,7 +95,7 @@ impl Terrain {
     }
 }
 
-fn intersects(b: Bounds, lat: f64, lon: f64, radius: f64) -> bool {
+pub(crate) fn intersects(b: Bounds, lat: f64, lon: f64, radius: f64) -> bool {
     let lat_margin = radius / 110_000.0;
     let lon_margin = lat_margin / lat.to_radians().cos().abs().max(0.01);
     b.north >= lat - lat_margin
