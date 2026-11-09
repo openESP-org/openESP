@@ -4,6 +4,10 @@ use anyhow::{Context, Result, ensure};
 use esp_assets::sound::SoundSet;
 use std::sync::Arc;
 
+// The mixer uses normalized controls; this covers the authored knot curves
+// without clipping realistic aircraft speeds.
+const WIND_SPEED_SCALE_KNOTS: f64 = 4096.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
     GearUp,
@@ -15,6 +19,7 @@ enum Event {
 pub struct SystemsBank {
     voices: Vec<(Event, VoiceId)>,
     rolls: Vec<Roll>,
+    wind: Vec<(VoiceId, f64)>,
 }
 
 struct Roll {
@@ -127,6 +132,7 @@ impl SystemsBank {
         let mut voices = Vec::new();
         let mut commands = Vec::new();
         let mut rolls = Vec::new();
+        let mut wind = Vec::new();
         for (name, event) in [
             ("GEAR_UP", Event::GearUp),
             ("GEAR_DOWN", Event::GearDown),
@@ -218,7 +224,91 @@ impl SystemsBank {
                 maximum,
             });
         }
-        Ok((Self { voices, rolls }, commands))
+        for layer in set.optional_layers("WIND_SOUND")? {
+            let mut parameters = layer.parameters;
+            if parameters.flags.unwrap_or(0) & 1 != 0 {
+                continue;
+            }
+            let Some(filename) = layer.filenames.first() else {
+                continue;
+            };
+            let sample = match set.sample(filename) {
+                Ok(sample) => sample,
+                Err(error) => {
+                    eprintln!("sound [WIND_SOUND]: {error:#}");
+                    continue;
+                }
+            };
+            let minimum = parameters.minimum_speed.unwrap_or(0.0).max(0.0);
+            let maximum = parameters
+                .maximum_speed
+                .unwrap_or(200.0)
+                .max(minimum + 0.001);
+            // Unlike engine envelopes, wind envelopes are authored in knots.
+            for envelope in [
+                &mut parameters.volume_envelope,
+                &mut parameters.pitch_envelope,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for point in envelope {
+                    point[0] /= WIND_SPEED_SCALE_KNOTS;
+                }
+            }
+            if parameters.volume_envelope.is_none()
+                && (parameters.minimum_volume.is_some() || parameters.maximum_volume.is_some())
+            {
+                let min = parameters.minimum_volume.unwrap_or(10000.0);
+                let max = parameters.maximum_volume.unwrap_or(10000.0);
+                parameters.volume_envelope = Some(
+                    (0..=16)
+                        .map(|i| {
+                            let t = f64::from(i) / 16.0;
+                            let db = (min + (max - min) * t).clamp(0.0, 10000.0);
+                            [
+                                (minimum + (maximum - minimum) * t) / WIND_SPEED_SCALE_KNOTS,
+                                100.0 * 10.0_f64.powf((db - 10000.0) / 1000.0),
+                            ]
+                        })
+                        .collect(),
+                );
+            }
+            if parameters.pitch_envelope.is_none()
+                && (parameters.minimum_rate.is_some() || parameters.maximum_rate.is_some())
+            {
+                parameters.pitch_envelope = Some(vec![
+                    [
+                        minimum / WIND_SPEED_SCALE_KNOTS,
+                        parameters.minimum_rate.unwrap_or(1.0),
+                    ],
+                    [
+                        maximum / WIND_SPEED_SCALE_KNOTS,
+                        parameters.maximum_rate.unwrap_or(1.0),
+                    ],
+                ]);
+            }
+            let id = VoiceId(
+                first_id
+                    .checked_add(commands.len() as u64)
+                    .context("sound voice ID overflow")?,
+            );
+            commands.push(Command::Add {
+                id,
+                sample: Arc::new(sample),
+                parameters: Box::new(parameters),
+                looping: true,
+            });
+            wind.push((id, minimum));
+        }
+        Ok((
+            Self {
+                voices,
+                rolls,
+                wind,
+            },
+            commands,
+        ))
     }
 
     pub fn update(
@@ -300,6 +390,19 @@ impl SystemsBank {
                     && speed > 0.0,
             });
         }
+        for &(id, minimum) in &self.wind {
+            let speed = state.airspeed_knots.unwrap_or(0.0);
+            commands.push(Command::Spatial {
+                id,
+                position: spatial,
+            });
+            commands.push(Command::Set {
+                id,
+                level: (speed / WIND_SPEED_SCALE_KNOTS).clamp(0.0, 1.0),
+                inside: state.inside,
+                active: speed > 0.0 && speed >= minimum,
+            });
+        }
         Ok((tracker, commands))
     }
 }
@@ -311,6 +414,7 @@ mod tests {
     fn roll_selects_surface_and_stops_when_airborne() {
         let bank = SystemsBank {
             voices: Vec::new(),
+            wind: Vec::new(),
             rolls: vec![
                 Roll {
                     id: VoiceId(0),
@@ -357,6 +461,7 @@ mod tests {
     fn triggers_once_per_motion_and_handles_idle_frames_and_reversal() {
         let bank = SystemsBank {
             rolls: Vec::new(),
+            wind: Vec::new(),
             voices: vec![
                 (Event::GearUp, VoiceId(0)),
                 (Event::GearDown, VoiceId(1)),
@@ -449,6 +554,7 @@ mod tests {
     fn touchdown_contacts_trigger_independently_and_filter_jitter() {
         let bank = SystemsBank {
             rolls: Vec::new(),
+            wind: Vec::new(),
             voices: (0..4)
                 .map(|index| (Event::Touchdown(index), VoiceId(index as u64)))
                 .collect(),

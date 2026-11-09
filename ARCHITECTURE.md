@@ -117,6 +117,8 @@ committed only after audio controls are queued successfully. Individual wheel
 contacts trigger their configured touchdown sound categories. Airport BGL
 surface types and airspeed select and modulate ground-roll sound layers; terrain
 outside airport surfaces currently falls back to the first ground-roll layer.
+Wind layers use true airspeed and their authored cockpit/exterior viewpoints,
+speed curves and sound lists.
 
 `esp-installs` reads simulator installation paths from the Windows registry;
 it does not modify the registry or simulator directories. The app uses a

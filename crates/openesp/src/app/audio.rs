@@ -278,6 +278,7 @@ mod tests {
         write_preview("b737-ground-roll.wav", &samples);
         let airborne = SystemsState {
             contacts: [Some(false); 4],
+            airspeed_knots: Some(0.0),
             ..rolling
         };
         let (_, commands) = systems.update(tracker, airborne, 0.016, None).unwrap();
@@ -286,6 +287,84 @@ mod tests {
         }
         mixer.render(&mut samples);
         assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    #[ignore = "requires aircraft and installed Prepar3D in OPENESP_AIRCRAFT_PATHS and OPENESP_P3D_ROOT"]
+    fn real_aircraft_wind_layers_follow_airspeed_and_view() {
+        let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
+        let path = std::env::split_paths(&paths).next().unwrap();
+        let root = std::env::var_os("OPENESP_P3D_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        let prepared = Prepared::load(&path, 0, Some(&root)).unwrap();
+        assert!(prepared.commands.iter().any(|command| match command {
+            Command::Add { parameters, .. } =>
+                parameters.viewpoint == Some(1)
+                    && parameters.volume_envelope.as_ref().is_some_and(|points| {
+                        points.iter().any(|point| {
+                            (point[0] - 30.5 / 4096.0).abs() < 1e-10
+                                && (point[1] - 11.2).abs() < 1e-10
+                        })
+                    }),
+            _ => false,
+        }));
+        let systems = prepared.systems.expect("aircraft has no systems sounds");
+        let mut mixer = esp_audio::Mixer::new(48_000, 2).unwrap();
+        for command in prepared.commands {
+            mixer.command(command).unwrap();
+        }
+        let state = SystemsState {
+            contacts: [Some(false); 4],
+            airspeed_knots: Some(120.0),
+            inside: true,
+            ..Default::default()
+        };
+        let (tracker, commands) = systems
+            .update(Tracker::default(), state, 0.016, None)
+            .unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut inside = vec![0.0; 48_000];
+        mixer.render(&mut inside);
+        assert!(inside.iter().any(|sample| sample.abs() > 0.0001));
+        write_preview("b737-wind-inside.wav", &inside);
+        let (tracker, commands) = systems
+            .update(
+                tracker,
+                SystemsState {
+                    inside: false,
+                    ..state
+                },
+                0.016,
+                None,
+            )
+            .unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut outside = vec![0.0; 48_000];
+        mixer.render(&mut outside);
+        assert!(outside.iter().any(|sample| sample.abs() > 0.0001));
+        assert_ne!(inside, outside);
+        write_preview("b737-wind-outside.wav", &outside);
+        let (_, commands) = systems
+            .update(
+                tracker,
+                SystemsState {
+                    airspeed_knots: Some(0.0),
+                    ..state
+                },
+                0.016,
+                None,
+            )
+            .unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        mixer.render(&mut outside);
+        assert!(outside.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]
