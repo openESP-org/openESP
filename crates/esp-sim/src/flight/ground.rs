@@ -9,13 +9,14 @@ use super::TEST_SURFACE;
 pub struct Ground {
     terrain: Arc<Mesh>,
     segments: Vec<Segment>,
-    triangles: Vec<[[f64; 2]; 3]>,
+    triangles: Vec<([[f64; 2]; 3], Option<u16>)>,
 }
 
 struct Segment {
     start: [f64; 2],
     end: [f64; 2],
     half_width: f64,
+    surface: Option<u16>,
 }
 
 impl Ground {
@@ -37,6 +38,16 @@ impl Ground {
     }
 
     pub fn add_segment(&mut self, start: [f64; 2], end: [f64; 2], width: f64) {
+        self.add_surface_segment(start, end, width, None);
+    }
+
+    pub fn add_surface_segment(
+        &mut self,
+        start: [f64; 2],
+        end: [f64; 2],
+        width: f64,
+        surface: Option<u16>,
+    ) {
         if start.iter().chain(&end).all(|value| value.is_finite())
             && width.is_finite()
             && width > 0.0
@@ -45,14 +56,34 @@ impl Ground {
                 start,
                 end,
                 half_width: width * 0.5,
+                surface,
             });
         }
     }
 
     pub fn add_triangle(&mut self, vertices: [[f64; 2]; 3]) {
+        self.add_surface_triangle(vertices, None);
+    }
+
+    pub fn add_surface_triangle(&mut self, vertices: [[f64; 2]; 3], surface: Option<u16>) {
         if vertices.iter().flatten().all(|value| value.is_finite()) {
-            self.triangles.push(vertices);
+            self.triangles.push((vertices, surface));
         }
+    }
+
+    /// BGL airport surface type at the aircraft position, if known.
+    pub fn surface_type(&self, north: f64, east: f64) -> Option<u16> {
+        let point = [east, north];
+        self.segments
+            .iter()
+            .find(|segment| segment.contains(point))
+            .and_then(|segment| segment.surface)
+            .or_else(|| {
+                self.triangles
+                    .iter()
+                    .find(|(triangle, _)| contains(*triangle, point))
+                    .and_then(|(_, surface)| *surface)
+            })
     }
 
     pub fn surface(&self, north: f64, east: f64) -> Surface {
@@ -61,7 +92,7 @@ impl Ground {
             || self
                 .triangles
                 .iter()
-                .any(|triangle| contains(*triangle, point));
+                .any(|(triangle, _)| contains(*triangle, point));
         Surface {
             elevation: if airport {
                 0.0
@@ -112,6 +143,7 @@ mod tests {
             start: [0.0, 0.0],
             end: [0.0, 100.0],
             half_width: 10.0,
+            surface: None,
         };
         assert!(segment.contains([9.0, 50.0]));
         assert!(!segment.contains([11.0, 50.0]));
@@ -152,5 +184,13 @@ mod tests {
                 .abs()
                 < 1e-6
         );
+        ground.add_surface_segment(
+            [east - 10.0, north + 20.0],
+            [east + 10.0, north + 20.0],
+            10.0,
+            Some(4),
+        );
+        assert_eq!(ground.surface_type(north + 20.0, east), Some(4));
+        assert_eq!(ground.surface_type(north + 26.0, east), None);
     }
 }

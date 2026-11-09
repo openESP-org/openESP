@@ -13,22 +13,23 @@ pub(super) fn ground(
     scene: &AirportScene,
 ) -> esp_sim::flight::ground::Ground {
     let mut ground = esp_sim::flight::ground::Ground::new(mesh);
-    for runway in &scene.runways {
+    for (runway, surface) in scene.runways.iter().zip(&scene.runway_surfaces) {
         let start = [runway.threshold.x, runway.threshold.z];
         let end = [
             start[0] + runway.heading.sin() * f64::from(runway.length),
             start[1] + runway.heading.cos() * f64::from(runway.length),
         ];
-        ground.add_segment(start, end, f64::from(runway.width));
+        ground.add_surface_segment(start, end, f64::from(runway.width), Some(*surface));
     }
-    for taxiway in &scene.taxiways {
-        ground.add_segment(
+    for (taxiway, surface) in scene.taxiways.iter().zip(&scene.taxiway_surfaces) {
+        ground.add_surface_segment(
             [taxiway.start.x, taxiway.start.z],
             [taxiway.end.x, taxiway.end.z],
             f64::from(taxiway.width),
+            Some(*surface),
         );
     }
-    for apron in &scene.aprons {
+    for (apron, surface) in scene.aprons.iter().zip(&scene.apron_surfaces) {
         for triangle in apron.indices.as_chunks::<3>().0 {
             let points = triangle.map(|index| {
                 apron
@@ -37,7 +38,7 @@ pub(super) fn ground(
                     .map(|point| [point.x, point.z])
             });
             if let [Some(a), Some(b), Some(c)] = points {
-                ground.add_triangle([a, b, c]);
+                ground.add_surface_triangle([a, b, c], Some(*surface));
             }
         }
     }

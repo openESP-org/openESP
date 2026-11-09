@@ -3,6 +3,14 @@ use super::*;
 impl Flight {
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
+        let surface = self.ground.as_ref().and_then(|ground| {
+            ground.surface_type(self.current.position.x, self.current.position.y)
+        });
+        variables.set_number(
+            "OPENESP GROUND SURFACE",
+            "number",
+            surface.map_or(-1.0, f64::from),
+        );
         let contacts = self.gear.sound_contacts(
             &self.current,
             self.loading.cg,

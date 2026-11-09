@@ -309,6 +309,9 @@ impl App {
                             }],
                             taxiways: Vec::new(),
                             aprons: Vec::new(),
+                            runway_surfaces: vec![0],
+                            taxiway_surfaces: Vec::new(),
+                            apron_surfaces: Vec::new(),
                         }
                     } else {
                         scenery::AirportScene {
@@ -316,6 +319,9 @@ impl App {
                             runways: Vec::new(),
                             taxiways: Vec::new(),
                             aprons: Vec::new(),
+                            runway_surfaces: Vec::new(),
+                            taxiway_surfaces: Vec::new(),
+                            apron_surfaces: Vec::new(),
                         }
                     };
                     let terrain = terrain::load(

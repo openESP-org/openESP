@@ -14,6 +14,23 @@ enum Event {
 
 pub struct SystemsBank {
     voices: Vec<(Event, VoiceId)>,
+    rolls: Vec<Roll>,
+}
+
+struct Roll {
+    id: VoiceId,
+    flags: u32,
+    minimum: f64,
+    maximum: f64,
+}
+
+fn surface_flag(surface: u16) -> Option<u32> {
+    match surface {
+        0..=16 => Some(1 << (surface + 1)),
+        17 | 19 | 23 => Some(32),
+        26..=29 => Some(8),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -99,12 +116,17 @@ pub struct State {
     pub flaps: Option<f64>,
     pub inside: bool,
     pub contacts: [Option<bool>; 4],
+    /// True airspeed in knots, as used by the authored ground sound parameters.
+    pub airspeed_knots: Option<f64>,
+    /// FSX/P3D airport surface code, when available.
+    pub surface: Option<u16>,
 }
 
 impl SystemsBank {
     pub fn prepare(set: &SoundSet, first_id: u64) -> Result<(Self, Vec<Command>)> {
         let mut voices = Vec::new();
         let mut commands = Vec::new();
+        let mut rolls = Vec::new();
         for (name, event) in [
             ("GEAR_UP", Event::GearUp),
             ("GEAR_DOWN", Event::GearDown),
@@ -142,7 +164,61 @@ impl SystemsBank {
                 voices.push((event, id));
             }
         }
-        Ok((Self { voices }, commands))
+        for layer in set.optional_layers("GROUND_ROLL")? {
+            let mut parameters = layer.parameters;
+            let flags = parameters.flags.unwrap_or(0);
+            if flags & 1 != 0 {
+                continue;
+            }
+            let Some(filename) = layer.filenames.first() else {
+                continue;
+            };
+            let sample = match set.sample(filename) {
+                Ok(sample) => sample,
+                Err(error) => {
+                    eprintln!("sound [GROUND_ROLL]: {error:#}");
+                    continue;
+                }
+            };
+            let minimum = parameters.minimum_speed.unwrap_or(0.0).max(0.0);
+            let maximum = parameters
+                .maximum_speed
+                .unwrap_or(55.0)
+                .max(minimum + 0.001);
+            if parameters.volume_envelope.is_none() {
+                let volume = |value: f64| {
+                    100.0 * 10.0_f64.powf((value.clamp(0.0, 10000.0) - 10000.0) / 1000.0)
+                };
+                parameters.volume_envelope = Some(vec![
+                    [0.0, volume(parameters.minimum_volume.unwrap_or(10000.0))],
+                    [1.0, volume(parameters.maximum_volume.unwrap_or(10000.0))],
+                ]);
+            }
+            if parameters.pitch_envelope.is_none() {
+                parameters.pitch_envelope = Some(vec![
+                    [0.0, parameters.minimum_rate.unwrap_or(1.0)],
+                    [1.0, parameters.maximum_rate.unwrap_or(1.0)],
+                ]);
+            }
+            let id = VoiceId(
+                first_id
+                    .checked_add(commands.len() as u64)
+                    .context("sound voice ID overflow")?,
+            );
+            commands.push(Command::Add {
+                id,
+                sample: Arc::new(sample),
+                parameters: Box::new(parameters),
+                looping: true,
+            });
+            rolls.push(Roll {
+                id,
+                flags,
+                minimum,
+                maximum,
+            });
+        }
+        Ok((Self { voices, rolls }, commands))
     }
 
     pub fn update(
@@ -158,7 +234,10 @@ impl SystemsBank {
                 && [state.gear, state.flaps]
                     .into_iter()
                     .flatten()
-                    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value)),
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+                && state
+                    .airspeed_knots
+                    .is_none_or(|speed| speed.is_finite() && speed >= 0.0),
             "invalid mechanism sound state"
         );
         let gear = tracker.gear.advance(state.gear, elapsed);
@@ -199,6 +278,28 @@ impl SystemsBank {
                 });
             }
         }
+        for (index, roll) in self.rolls.iter().enumerate() {
+            let speed = state.airspeed_knots.unwrap_or(0.0);
+            let surface = state.surface.and_then(surface_flag);
+            let matches_surface = if let Some(surface) = surface {
+                roll.flags & !1 == 0 || roll.flags & surface != 0
+            } else {
+                index == 0
+            };
+            commands.push(Command::Spatial {
+                id: roll.id,
+                position: spatial,
+            });
+            commands.push(Command::Set {
+                id: roll.id,
+                level: ((speed - roll.minimum) / (roll.maximum - roll.minimum)).clamp(0.0, 1.0),
+                inside: state.inside,
+                active: matches_surface
+                    && state.contacts.contains(&Some(true))
+                    && speed >= roll.minimum
+                    && speed > 0.0,
+            });
+        }
         Ok((tracker, commands))
     }
 }
@@ -207,8 +308,55 @@ impl SystemsBank {
 mod tests {
     use super::*;
     #[test]
+    fn roll_selects_surface_and_stops_when_airborne() {
+        let bank = SystemsBank {
+            voices: Vec::new(),
+            rolls: vec![
+                Roll {
+                    id: VoiceId(0),
+                    flags: 2 | 32,
+                    minimum: 3.0,
+                    maximum: 55.0,
+                },
+                Roll {
+                    id: VoiceId(1),
+                    flags: 64,
+                    minimum: 3.0,
+                    maximum: 55.0,
+                },
+            ],
+        };
+        let mut state = State {
+            airspeed_knots: Some(29.0),
+            contacts: [Some(true); 4],
+            surface: Some(4),
+            ..Default::default()
+        };
+        let controls = |state| {
+            let (_, commands) = bank.update(Tracker::default(), state, 0.016, None).unwrap();
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Set {
+                        id, active, level, ..
+                    } => Some((id.0, active, level)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(controls(state), vec![(0, true, 0.5), (1, false, 0.5)]);
+        state.surface = Some(5);
+        assert_eq!(controls(state), vec![(0, false, 0.5), (1, true, 0.5)]);
+        state.contacts = [Some(false); 4];
+        assert!(controls(state).iter().all(|(_, active, _)| !active));
+        state.contacts[0] = Some(true);
+        state.airspeed_knots = Some(2.0);
+        assert!(controls(state).iter().all(|(_, active, _)| !active));
+    }
+    #[test]
     fn triggers_once_per_motion_and_handles_idle_frames_and_reversal() {
         let bank = SystemsBank {
+            rolls: Vec::new(),
             voices: vec![
                 (Event::GearUp, VoiceId(0)),
                 (Event::GearDown, VoiceId(1)),
@@ -300,6 +448,7 @@ mod tests {
     #[test]
     fn touchdown_contacts_trigger_independently_and_filter_jitter() {
         let bank = SystemsBank {
+            rolls: Vec::new(),
             voices: (0..4)
                 .map(|index| (Event::Touchdown(index), VoiceId(index as u64)))
                 .collect(),

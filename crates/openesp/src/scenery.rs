@@ -9,6 +9,9 @@ pub struct AirportScene {
     pub runways: Vec<esp_render::Runway>,
     pub taxiways: Vec<esp_render::Taxiway>,
     pub aprons: Vec<esp_render::Apron>,
+    pub runway_surfaces: Vec<u16>,
+    pub taxiway_surfaces: Vec<u16>,
+    pub apron_surfaces: Vec<u16>,
 }
 
 /// Place BGL airport surfaces on the current local ground plane.
@@ -78,6 +81,7 @@ fn airport_scene(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut taxiways = Vec::new();
+    let mut taxiway_surfaces = Vec::new();
     for path in &airport.taxi_paths {
         // Runway links are already covered by the dedicated runway surface.
         if !matches!(path.kind, 1 | 3)
@@ -112,6 +116,7 @@ fn airport_scene(
             width: path.width_m,
             centerline: path.centerline,
         });
+        taxiway_surfaces.push(u16::from(path.surface));
     }
     let mut aprons = airport
         .aprons
@@ -132,6 +137,12 @@ fn airport_scene(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut apron_surfaces: Vec<u16> = airport
+        .aprons
+        .iter()
+        .filter(|apron| apron.draw_surface)
+        .map(|apron| u16::from(apron.surface))
+        .collect();
     for pad in airport.helipads.iter().filter(|pad| !pad.transparent) {
         ensure!(
             pad.length_m.is_finite()
@@ -156,12 +167,20 @@ fn airport_scene(
             ],
             indices: vec![0, 1, 2, 0, 2, 3],
         });
+        apron_surfaces.push(u16::from(pad.surface));
     }
     Ok(AirportScene {
         elevation_m: airport.elevation_m,
         runways,
         taxiways,
         aprons,
+        runway_surfaces: airport
+            .runways
+            .iter()
+            .map(|runway| runway.surface)
+            .collect(),
+        taxiway_surfaces,
+        apron_surfaces,
     })
 }
 
@@ -420,6 +439,16 @@ mod tests {
             airport_data.longitude,
         )
         .unwrap();
+        assert_eq!(
+            scene.runway_surfaces,
+            airport_data
+                .runways
+                .iter()
+                .map(|runway| runway.surface)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(scene.taxiway_surfaces.len(), scene.taxiways.len());
+        assert_eq!(scene.apron_surfaces.len(), scene.aprons.len());
         let normal_links = airport_data
             .taxi_paths
             .iter()

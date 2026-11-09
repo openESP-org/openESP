@@ -183,6 +183,26 @@ fn systems_state(variables: &mut Variables, inside: bool) -> SystemsState {
                 .filter(|value| value.is_finite())
                 .map(|value| value != 0.0)
         }),
+        airspeed_knots: variables
+            .read(&Reference::new('A', "AIRSPEED TRUE", Some("knots")))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0),
+        surface: variables
+            .read(&Reference::new(
+                'A',
+                "OPENESP GROUND SURFACE",
+                Some("number"),
+            ))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| {
+                value.is_finite()
+                    && *value >= 0.0
+                    && *value <= f64::from(u16::MAX)
+                    && value.fract() == 0.0
+            })
+            .map(|value| value as u16),
     }
 }
 
@@ -219,6 +239,54 @@ fn engine_state(variables: &mut Variables, engine: u32, inside: bool) -> EngineS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires aircraft and installed Prepar3D in OPENESP_AIRCRAFT_PATHS and OPENESP_P3D_ROOT"]
+    fn real_aircraft_ground_roll_plays_and_stops() {
+        let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
+        let path = std::env::split_paths(&paths).next().unwrap();
+        let root = std::env::var_os("OPENESP_P3D_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        let prepared = Prepared::load(&path, 0, Some(&root)).unwrap();
+        let systems = prepared.systems.expect("aircraft has no systems sounds");
+        let mut mixer = esp_audio::Mixer::new(48_000, 2).unwrap();
+        for command in prepared.commands {
+            mixer.command(command).unwrap();
+        }
+        let rolling = SystemsState {
+            contacts: [Some(true); 4],
+            airspeed_knots: Some(35.0),
+            surface: Some(0),
+            inside: true,
+            ..Default::default()
+        };
+        let (tracker, commands) = systems
+            .update(Tracker::default(), rolling, 0.016, None)
+            .unwrap();
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::Set { active: true, .. }))
+        );
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut samples = vec![0.0; 48_000];
+        mixer.render(&mut samples);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.0001));
+        write_preview("b737-ground-roll.wav", &samples);
+        let airborne = SystemsState {
+            contacts: [Some(false); 4],
+            ..rolling
+        };
+        let (_, commands) = systems.update(tracker, airborne, 0.016, None).unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        mixer.render(&mut samples);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
 
     #[test]
     #[ignore = "requires aircraft in OPENESP_AIRCRAFT_PATHS"]
@@ -373,11 +441,15 @@ mod tests {
         variables.set_number("GEAR TOTAL PCT EXTENDED", "percent", 70.0);
         variables.set_number("TRAILING EDGE FLAPS LEFT PERCENT", "percent", 25.0);
         variables.set_number("OPENESP GEAR SOUND CONTACT:2", "bool", 1.0);
+        variables.set_number("OPENESP GROUND SURFACE", "number", 4.0);
+        variables.set_number("AIRSPEED TRUE", "knots", 35.0);
         let state = systems_state(&mut variables, true);
         assert!((state.gear.unwrap() - 0.7).abs() < 1e-9);
         assert!((state.flaps.unwrap() - 0.25).abs() < 1e-9);
         assert!(state.inside);
         assert_eq!(state.contacts[2], Some(true));
+        assert_eq!(state.surface, Some(4));
+        assert_eq!(state.airspeed_knots, Some(35.0));
     }
 
     #[test]
