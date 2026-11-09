@@ -48,6 +48,7 @@ type LoadedTerrain = Result<(
     Arc<esp_terrain::mesh::Mesh>,
     esp_render::TerrainMesh,
     [f64; 2],
+    u8,
 )>;
 
 pub(super) struct Stream {
@@ -56,6 +57,7 @@ pub(super) struct Stream {
     longitude: f64,
     reference: f64,
     centre: [f64; 2],
+    month: u8,
     pending: Option<mpsc::Receiver<LoadedTerrain>>,
     retry_at: Instant,
 }
@@ -65,14 +67,18 @@ impl Stream {
         &mut self,
         east: f64,
         north: f64,
+        month: u8,
     ) -> Option<(Arc<esp_terrain::mesh::Mesh>, esp_render::TerrainMesh)> {
         let mut ready = None;
         if let Some(receiver) = &self.pending {
             match receiver.try_recv() {
-                Ok(Ok((mesh, render, centre))) => {
-                    self.centre = centre;
+                Ok(Ok((mesh, render, centre, loaded_month))) => {
                     self.pending = None;
-                    ready = Some((mesh, render));
+                    if loaded_month == month {
+                        self.centre = centre;
+                        self.month = month;
+                        ready = Some((mesh, render));
+                    }
                 }
                 Ok(Err(error)) => {
                     eprintln!("terrain streaming: {error:#}");
@@ -89,10 +95,11 @@ impl Stream {
         }
         if self.pending.is_none()
             && Instant::now() >= self.retry_at
-            && (east - self.centre[0])
-                .abs()
-                .max((north - self.centre[1]).abs())
-                > 12_000.0
+            && (month != self.month
+                || (east - self.centre[0])
+                    .abs()
+                    .max((north - self.centre[1]).abs())
+                    > 12_000.0)
             && east.is_finite()
             && north.is_finite()
         {
@@ -116,9 +123,9 @@ impl Stream {
                         !mesh.indices.is_empty(),
                         "no elevation data near {lat:.4}, {lon:.4}"
                     );
-                    classify(&mut mesh, &root, latitude, longitude, lat, lon);
+                    classify(&mut mesh, &root, latitude, longitude, lat, lon, month);
                     let render = render_mesh(&mesh, &root);
-                    Ok((Arc::new(mesh), render, centre))
+                    Ok((Arc::new(mesh), render, centre, month))
                 })();
                 let _ = sender.send(result);
             });
@@ -134,6 +141,7 @@ impl Stream {
 pub(super) fn load(
     arguments: &Arguments,
     airport_elevation: f64,
+    month: u8,
 ) -> Result<Option<(Arc<esp_terrain::mesh::Mesh>, Stream)>> {
     let roots = arguments.fsx_root.clone().map_or_else(
         || {
@@ -185,6 +193,7 @@ pub(super) fn load(
         arguments.longitude,
         arguments.latitude,
         arguments.longitude,
+        month,
     );
     eprintln!("terrain: loaded elevation from {}", root.display());
     Ok(Some((
@@ -195,6 +204,7 @@ pub(super) fn load(
             longitude: arguments.longitude,
             reference,
             centre: [0.0, 0.0],
+            month,
             pending: None,
             retry_at: Instant::now(),
         },
@@ -208,9 +218,14 @@ fn classify(
     origin_lon: f64,
     lat: f64,
     lon: f64,
+    month: u8,
 ) {
     let result = (|| -> Result<()> {
         let land = esp_terrain::landclass::LandClass::load(root, lat, lon, 45_000.0)?;
+        let seasons = esp_terrain::landclass::LandClass::seasons(root, lat, lon, 45_000.0, month);
+        if let Err(error) = &seasons {
+            eprintln!("terrain seasons: {error:#}");
+        }
         let textures = (|| -> Result<_> {
             let regions = esp_terrain::landclass::LandClass::regions(root, lat, lon, 45_000.0)?;
             let data = std::fs::read(root.join("Scenery/BASE/Scenery/lclookup.bgl"))?;
@@ -227,6 +242,7 @@ fn classify(
                 .as_ref()
                 .ok()
                 .map(|(regions, lookup)| (regions, lookup)),
+            seasons.as_ref().ok(),
             origin_lat,
             origin_lon,
         )
@@ -237,23 +253,39 @@ fn classify(
 }
 
 fn render_mesh(mesh: &esp_terrain::mesh::Mesh, root: &std::path::Path) -> esp_render::TerrainMesh {
-    let key = |texture: esp_formats::bgl::land_lookup::TextureSet| {
-        u32::from(texture.number) | (u32::from(texture.region) << 16)
+    let key = |texture: esp_formats::bgl::land_lookup::TextureSet, season: Option<u8>| {
+        u32::from(texture.number)
+            | (u32::from(texture.region) << 16)
+            | (u32::from(season.filter(|value| *value <= 4).unwrap_or(3)) << 24)
     };
     let mut textures = std::collections::HashMap::new();
     let directory = root.join("Scenery/World/texture");
     let mut seen = std::collections::HashSet::new();
-    for texture in mesh.texture_sets.iter().flatten() {
-        let id = key(*texture);
+    for (texture, season) in mesh.texture_sets.iter().zip(&mesh.seasons) {
+        let Some(texture) = texture else { continue };
+        let id = key(*texture, *season);
         if !seen.insert(id) || texture.region >= 26 {
             continue;
         }
+        let season_name = match (id >> 24) as u8 {
+            0 => "wi",
+            1 => "hw",
+            2 => "sp",
+            4 => "fa",
+            _ => "su",
+        };
         let filename = format!(
+            "{:03}{}2{season_name}1.bmp",
+            texture.number,
+            char::from(b'a' + texture.region)
+        );
+        let summer = format!(
             "{:03}{}2su1.bmp",
             texture.number,
             char::from(b'a' + texture.region)
         );
         if let Ok(path) = esp_assets::resolve_texture(&directory, &filename)
+            .or_else(|_| esp_assets::resolve_texture(&directory, &summer))
             && let Ok(bytes) = std::fs::read(path)
             && let Ok(texture) = esp_assets::texture::Texture::from_bytes(&bytes, true)
         {
@@ -277,7 +309,8 @@ fn render_mesh(mesh: &esp_terrain::mesh::Mesh, root: &std::path::Path) -> esp_re
         texture_sets: mesh
             .texture_sets
             .iter()
-            .map(|texture| texture.map(key))
+            .zip(&mesh.seasons)
+            .map(|(texture, season)| texture.map(|texture| key(texture, *season)))
             .collect(),
         textures,
         indices: mesh.indices.clone(),
@@ -371,6 +404,7 @@ mod tests {
             longitude,
             latitude,
             longitude,
+            7,
         );
         assert!(initial.land_classes.iter().any(Option::is_some));
         let initial = Arc::new(initial);
@@ -382,13 +416,14 @@ mod tests {
             longitude,
             reference,
             centre: [0.0, 0.0],
+            month: 7,
             pending: None,
             retry_at: Instant::now(),
         };
-        assert!(stream.update(20_000.0, 0.0).is_none());
+        assert!(stream.update(20_000.0, 0.0, 7).is_none());
         let deadline = Instant::now() + Duration::from_secs(30);
-        let (mesh, render) = loop {
-            if let Some(loaded) = stream.update(20_000.0, 0.0) {
+        let (mesh, summer_render) = loop {
+            if let Some(loaded) = stream.update(20_000.0, 0.0, 7) {
                 break loaded;
             }
             assert!(Instant::now() < deadline, "terrain worker did not finish");
@@ -397,7 +432,8 @@ mod tests {
         assert!(mesh.height(40_000.0, 0.0).is_some());
         assert!(mesh.land_classes.iter().any(Option::is_some));
         assert!(mesh.texture_sets.iter().any(Option::is_some));
-        assert!(!render.textures.is_empty());
+        assert!(mesh.seasons.contains(&Some(3)));
+        assert!(!summer_render.textures.is_empty());
         assert!(initial.height(40_000.0, 0.0).is_none());
         for point in [[1000.0, 2000.0], [15_000.0, -5000.0], [20_000.0, 1000.0]] {
             let before = initial.height(point[0], point[1]).unwrap();
@@ -414,7 +450,36 @@ mod tests {
             mesh.height(40_000.0, 0.0).unwrap()
         );
         assert!(stream.pending.is_none());
-        assert!(stream.update(20_000.0, 0.0).is_none());
+        assert!(stream.update(20_000.0, 0.0, 7).is_none());
         assert!(stream.pending.is_none());
+        assert!(stream.update(20_000.0, 0.0, 1).is_none());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (winter, winter_render) = loop {
+            if let Some(loaded) = stream.update(20_000.0, 0.0, 1) {
+                break loaded;
+            }
+            assert!(Instant::now() < deadline, "season update did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            winter
+                .seasons
+                .iter()
+                .any(|season| matches!(season, Some(0 | 1)))
+        );
+        assert!(winter_render.textures.keys().any(|id| id >> 24 <= 1));
+        assert!(
+            winter_render.textures.iter().any(|(id, texture)| {
+                if id >> 24 > 1 {
+                    return false;
+                }
+                let summer_id = (id & 0x00ff_ffff) | (3 << 24);
+                summer_render
+                    .textures
+                    .get(&summer_id)
+                    .is_some_and(|summer| summer.mips[0].data != texture.mips[0].data)
+            }),
+            "expected distinct summer and winter texture data"
+        );
     }
 }

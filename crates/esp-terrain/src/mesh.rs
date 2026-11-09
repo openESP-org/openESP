@@ -10,6 +10,7 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     pub land_classes: Vec<Option<u8>>,
     pub texture_sets: Vec<Option<esp_formats::bgl::land_lookup::TextureSet>>,
+    pub seasons: Vec<Option<u8>>,
     valid: Vec<bool>,
     side: usize,
     radius: f64,
@@ -110,6 +111,7 @@ impl Mesh {
         Ok(Self {
             land_classes: vec![None; vertices.len()],
             texture_sets: vec![None; vertices.len()],
+            seasons: vec![None; vertices.len()],
             vertices,
             normals,
             indices,
@@ -127,18 +129,21 @@ impl Mesh {
             &crate::landclass::LandClass,
             &esp_formats::bgl::land_lookup::Lookup,
         )>,
+        seasons: Option<&crate::landclass::LandClass>,
         latitude: f64,
         longitude: f64,
     ) -> Result<()> {
         let origin = Origin::new(latitude, longitude)?;
-        for ((vertex, class), texture) in self
+        for (((vertex, class), texture), season) in self
             .vertices
             .iter()
             .zip(&mut self.land_classes)
             .zip(&mut self.texture_sets)
+            .zip(&mut self.seasons)
         {
             let (lat, lon) = origin.position(vertex[2], vertex[0])?;
             *class = land.class(lat, lon);
+            *season = seasons.and_then(|seasons| seasons.class(lat, lon));
             *texture = textures.and_then(|(regions, lookup)| {
                 lookup.texture_set(regions.class(lat, lon)?, (*class)?)
             });
@@ -202,6 +207,7 @@ mod tests {
             indices: vec![0, 2, 3, 0, 3, 1],
             land_classes: vec![None; 4],
             texture_sets: vec![None; 4],
+            seasons: vec![None; 4],
             valid: vec![true; 4],
             side: 2,
             radius: 1.0,

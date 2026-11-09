@@ -89,8 +89,9 @@ local mesh rather than a full worldwide tile cache. Base land-class rasters
 are sampled into the mesh and given approximate fallback colours. The terrain
 engine resolves region and land class to base texture sets, which the renderer
 tiles over the mesh, with interpolated transitions between adjacent texture
-classes. Texture selection currently uses one summer variant; seasonal selection and streaming airport
-scenery and photos remain unfinished. The flight runtime
+classes. Monthly geographic season rasters select the matching seasonal
+texture variant, with summer as a fallback; streaming airport scenery and
+photos remains unfinished. The flight runtime
 uses runway, taxiway and apron footprints for flat airport surfaces.
 `esp-render::ground` validates and uploads either the terrain geometry or the
 fallback grid.

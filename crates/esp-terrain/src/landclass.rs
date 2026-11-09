@@ -31,6 +31,26 @@ impl LandClass {
         Self::load_layer(root, latitude, longitude, radius, "regions.bgl", 0x6a, 5)
     }
 
+    /// Load the local season codes for a UTC calendar month (1 through 12).
+    pub fn seasons(
+        root: &Path,
+        latitude: f64,
+        longitude: f64,
+        radius: f64,
+        month: u8,
+    ) -> Result<Self> {
+        ensure!((1..=12).contains(&month), "invalid season month");
+        Self::load_layer(
+            root,
+            latitude,
+            longitude,
+            radius,
+            "seasons.bgl",
+            0x78 + u32::from(month - 1),
+            6,
+        )
+    }
+
     fn load_layer(
         root: &Path,
         latitude: f64,
@@ -66,6 +86,9 @@ impl LandClass {
                     continue;
                 }
                 let raster = Raster::parse(subsection.records.data)?;
+                if (0x78..=0x83).contains(&kind) && raster.variations & (1 << (kind - 0x78)) == 0 {
+                    continue;
+                }
                 ensure!(
                     raster.data_type == data_type,
                     "unexpected terrain classification raster type {}",
@@ -143,6 +166,10 @@ mod tests {
     fn reads_real_land_classes() {
         let root = std::env::var_os("OPENESP_P3D_ROOT").unwrap();
         let data = LandClass::load(Path::new(&root), 41.17574, 40.84646, 45_000.0).unwrap();
+        let january = LandClass::seasons(Path::new(&root), 41.17, 40.84, 45_000.0, 1).unwrap();
+        let july = LandClass::seasons(Path::new(&root), 41.17, 40.84, 45_000.0, 7).unwrap();
+        assert_eq!(january.class(41.17, 40.84), Some(0));
+        assert_eq!(july.class(41.17, 40.84), Some(3));
         let regions = LandClass::regions(Path::new(&root), 41.17574, 40.84646, 45_000.0).unwrap();
         let bytes =
             std::fs::read(Path::new(&root).join("Scenery/BASE/Scenery/lclookup.bgl")).unwrap();

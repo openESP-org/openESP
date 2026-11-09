@@ -318,7 +318,11 @@ impl App {
                     } else {
                         Vec::new()
                     };
-                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?;
+                    let terrain = terrain::load(
+                        &self.arguments,
+                        scene.elevation_m,
+                        self.sim_time.utc_month(),
+                    )?;
                     let terrain = terrain.map(|(mesh, stream)| {
                         self.terrain_stream = Some(stream);
                         mesh
@@ -506,7 +510,9 @@ impl App {
                         flight.current.position.x,
                     )
                 });
-            if let Some((mesh, render)) = stream.update(position.x, position.z) {
+            if let Some((mesh, render)) =
+                stream.update(position.x, position.z, self.sim_time.utc_month())
+            {
                 renderer.update_terrain(&render)?;
                 if let Some(flight) = &mut self.flight {
                     flight.set_terrain(mesh);
