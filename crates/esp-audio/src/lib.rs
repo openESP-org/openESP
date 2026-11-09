@@ -1,5 +1,6 @@
 //! esp-audio owns audio device output and sound mixing.
 pub mod engine;
+pub mod systems;
 use anyhow::{Context, Result, ensure};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use esp_assets::sound::Sample;
@@ -39,6 +40,10 @@ pub enum Command {
         id: VoiceId,
         position: Option<Spatial>,
     },
+    View {
+        id: VoiceId,
+        inside: bool,
+    },
     Remove(VoiceId),
 }
 
@@ -50,7 +55,10 @@ enum Message {
 fn send_controls(sender: &SyncSender<Message>, commands: Vec<Command>) -> Result<()> {
     for command in &commands {
         ensure!(
-            matches!(command, Command::Set { .. } | Command::Spatial { .. }),
+            matches!(
+                command,
+                Command::Set { .. } | Command::Spatial { .. } | Command::View { .. }
+            ),
             "audio control batch contains a non-control command"
         );
         validate_command(command)?;
@@ -197,6 +205,7 @@ fn validate_command(command: &Command) -> Result<()> {
             "invalid sound position"
         ),
         Command::Remove(_) => {}
+        Command::View { .. } => {}
     }
     Ok(())
 }
@@ -262,6 +271,11 @@ impl Mixer {
             Command::Spatial { id, position } => {
                 if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
                     voice.spatial = position;
+                }
+            }
+            Command::View { id, inside } => {
+                if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+                    voice.inside = inside;
                 }
             }
         }
@@ -619,6 +633,49 @@ mod tests {
         let mut centred = [0.0; 2];
         mixer.render(&mut centred);
         assert!((centred[0] - centred[1]).abs() < 1e-7);
+    }
+
+    #[test]
+    fn changing_view_does_not_restart_a_one_shot() {
+        let mut mixer = Mixer::new(8_000, 1).unwrap();
+        mixer
+            .command(Command::Add {
+                id: VoiceId(4),
+                sample: sample(&[0.1, 0.2, 0.3], 1, 8_000),
+                parameters: Box::new(Parameters {
+                    viewpoint: Some(1),
+                    ..Default::default()
+                }),
+                looping: false,
+            })
+            .unwrap();
+        mixer
+            .command(Command::Set {
+                id: VoiceId(4),
+                level: 0.0,
+                inside: true,
+                active: true,
+            })
+            .unwrap();
+        let mut frame = [0.0];
+        mixer.render(&mut frame);
+        assert!((frame[0] - 0.1).abs() < 1e-6);
+        mixer
+            .command(Command::View {
+                id: VoiceId(4),
+                inside: false,
+            })
+            .unwrap();
+        mixer.render(&mut frame);
+        assert_eq!(frame[0], 0.0);
+        mixer
+            .command(Command::View {
+                id: VoiceId(4),
+                inside: true,
+            })
+            .unwrap();
+        mixer.render(&mut frame);
+        assert!((frame[0] - 0.3).abs() < 1e-6);
     }
     fn add(mixer: &mut Mixer, sample: Arc<Sample>, parameters: Parameters, looping: bool) {
         mixer

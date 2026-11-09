@@ -4,6 +4,7 @@ use esp_assets::sound::SoundSet;
 use esp_audio::{
     Command, Output, Spatial,
     engine::{EngineBank, EngineState},
+    systems::{State as SystemsState, SystemsBank, Tracker},
 };
 use esp_script::{Host, Reference};
 use esp_sim::variables::Variables;
@@ -13,6 +14,7 @@ use std::path::Path;
 pub(super) struct Prepared {
     banks: Vec<(u32, EngineBank, DVec3)>,
     commands: Vec<Command>,
+    systems: Option<SystemsBank>,
 }
 
 impl Prepared {
@@ -41,11 +43,26 @@ impl Prepared {
                 Err(error) => eprintln!("sound engine {engine}: {error:#}"),
             }
         }
-        Ok(Self { banks, commands })
+        let systems = match SystemsBank::prepare(&sound, commands.len() as u64) {
+            Ok((systems, loaded)) if !loaded.is_empty() => {
+                commands.extend(loaded);
+                Some(systems)
+            }
+            Ok(_) => None,
+            Err(error) => {
+                eprintln!("mechanism sounds: {error:#}");
+                None
+            }
+        };
+        Ok(Self {
+            banks,
+            commands,
+            systems,
+        })
     }
 
     pub fn open(self) -> Result<Option<Runtime>> {
-        if self.banks.is_empty() {
+        if self.banks.is_empty() && self.systems.is_none() {
             return Ok(None);
         }
         let output = Output::open_default()?;
@@ -56,6 +73,8 @@ impl Prepared {
             output,
             banks: self.banks,
             previous: [None; 4],
+            systems: self.systems,
+            systems_tracker: Tracker::default(),
         }))
     }
 }
@@ -64,6 +83,8 @@ pub(super) struct Runtime {
     output: Output,
     banks: Vec<(u32, EngineBank, DVec3)>,
     previous: [Option<EngineState>; 4],
+    systems: Option<SystemsBank>,
+    systems_tracker: Tracker,
 }
 
 pub(super) struct Listener {
@@ -105,6 +126,7 @@ impl Runtime {
         variables: &mut Variables,
         inside: bool,
         listener: &Listener,
+        elapsed: f64,
     ) -> Result<()> {
         while let Some(error) = self.output.try_error() {
             eprintln!("audio output: {error}");
@@ -118,9 +140,37 @@ impl Runtime {
             commands.extend(bank.spatial((!inside).then(|| listener.relative(*position))));
             states[index] = Some(state);
         }
+        let mut systems_tracker = self.systems_tracker;
+        if let Some(systems) = &self.systems {
+            let (tracker, changes) = systems.update(
+                self.systems_tracker,
+                systems_state(variables, inside),
+                elapsed,
+                (!inside).then(|| listener.relative(DVec3::ZERO)),
+            )?;
+            systems_tracker = tracker;
+            commands.extend(changes);
+        }
         self.output.try_controls(commands)?;
         self.previous = states;
+        self.systems_tracker = systems_tracker;
         Ok(())
+    }
+}
+
+fn systems_state(variables: &mut Variables, inside: bool) -> SystemsState {
+    let read = |variables: &mut Variables, name| {
+        variables
+            .read(&Reference::new('A', name, Some("percent over 100")))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0))
+    };
+    SystemsState {
+        gear: read(variables, "GEAR TOTAL PCT EXTENDED"),
+        flaps: read(variables, "TRAILING EDGE FLAPS LEFT PERCENT"),
+        inside,
     }
 }
 
@@ -159,6 +209,65 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires aircraft in OPENESP_AIRCRAFT_PATHS"]
+    fn real_aircraft_mechanisms_follow_movement() {
+        let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
+        let path = std::env::split_paths(&paths).next().unwrap();
+        let prepared = Prepared::load(&path, 0, None).unwrap();
+        let systems = prepared
+            .systems
+            .expect("aircraft has no gear or flap sounds");
+        let mut mixer = esp_audio::Mixer::new(48_000, 2).unwrap();
+        for command in prepared.commands {
+            mixer.command(command).unwrap();
+        }
+        let initial = SystemsState {
+            gear: Some(1.0),
+            flaps: Some(0.0),
+            inside: true,
+        };
+        let (tracker, commands) = systems
+            .update(Tracker::default(), initial, 0.016, None)
+            .unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut before = [0.0; 200];
+        mixer.render(&mut before);
+        assert!(before.iter().all(|sample| *sample == 0.0));
+        let moving = SystemsState {
+            gear: Some(0.9),
+            flaps: Some(0.1),
+            inside: true,
+        };
+        let (tracker, commands) = systems.update(tracker, moving, 0.016, None).unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut samples = vec![0.0; 48_000];
+        mixer.render(&mut samples);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.0001));
+        write_preview("b737-mechanisms.wav", &samples);
+        let (_, commands) = systems
+            .update(
+                tracker,
+                SystemsState {
+                    gear: Some(0.8),
+                    flaps: Some(0.2),
+                    inside: true,
+                },
+                0.016,
+                None,
+            )
+            .unwrap();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, Command::Set { active: true, .. }))
+        );
+    }
+
+    #[test]
     fn listener_tracks_rotated_engine_positions() {
         let mut listener = Listener {
             position: DVec3::ZERO,
@@ -189,6 +298,17 @@ mod tests {
         let state = engine_state(&mut variables, 1, true);
         assert_eq!(state.engine_level, 0.85);
         assert_eq!(state.propeller_level, 0.75);
+        assert!(state.inside);
+    }
+
+    #[test]
+    fn mechanism_state_uses_actual_positions_and_units() {
+        let mut variables = Variables::default();
+        variables.set_number("GEAR TOTAL PCT EXTENDED", "percent", 70.0);
+        variables.set_number("TRAILING EDGE FLAPS LEFT PERCENT", "percent", 25.0);
+        let state = systems_state(&mut variables, true);
+        assert!((state.gear.unwrap() - 0.7).abs() < 1e-9);
+        assert!((state.flaps.unwrap() - 0.25).abs() < 1e-9);
         assert!(state.inside);
     }
 
@@ -244,6 +364,10 @@ mod tests {
             (values.iter().map(|sample| sample * sample).sum::<f32>() / values.len() as f32).sqrt()
         };
         assert!(rms(&samples[96_000..]) < rms(&samples[48_000..96_000]) * 0.1);
+        write_preview("b737-engine-views.wav", &samples);
+    }
+
+    fn write_preview(name: &str, samples: &[f32]) {
         let mut wav = Vec::with_capacity(44 + samples.len() * 2);
         let byte_length = (samples.len() * 2) as u32;
         wav.extend(b"RIFF");
@@ -258,11 +382,12 @@ mod tests {
         wav.extend(16u16.to_le_bytes());
         wav.extend(b"data");
         wav.extend(byte_length.to_le_bytes());
-        for sample in samples {
+        for &sample in samples {
             wav.extend(((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes());
         }
-        let output =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/b737-engine-views.wav");
+        let output = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(name);
         std::fs::write(output, wav).unwrap();
     }
 }

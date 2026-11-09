@@ -58,6 +58,19 @@ impl SoundSet {
         self.layers(list.first)
     }
 
+    /// Resolve an optional named sound list such as GEAR_UP or FLAPS.
+    pub fn optional_layers(&self, section: &str) -> Result<Vec<Layer>> {
+        let sounds = cfg::sound::Sounds::from_config(&self.config)?;
+        if !sounds
+            .sounds
+            .iter()
+            .any(|sound| sound.section.eq_ignore_ascii_case(section))
+        {
+            return Ok(Vec::new());
+        }
+        self.layers(section)
+    }
+
     pub fn layers(&self, first: &str) -> Result<Vec<Layer>> {
         let sounds = cfg::sound::Sounds::from_config(&self.config)?;
         sounds

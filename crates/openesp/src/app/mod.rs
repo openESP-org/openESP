@@ -541,6 +541,7 @@ impl App {
                     aircraft_origin: renderer.aircraft_origin,
                     aircraft_rotation: renderer.aircraft_rotation,
                 },
+                dt,
             )
             && self.reported_diagnostics.insert("audio control".into())
         {

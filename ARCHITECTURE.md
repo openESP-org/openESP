@@ -112,6 +112,8 @@ Exterior engine layers use aircraft-configured source locations and camera
 position for stereo panning and distance attenuation. Authored directional
 cones apply in aircraft coordinates, including their inside/outside angles and
 outside volume. This is a stereo model, not HRTF or an acoustic simulation.
+Gear and flap sound lists trigger from actual actuator movement, with state
+committed only after audio controls are queued successfully.
 
 `esp-installs` reads simulator installation paths from the Windows registry;
 it does not modify the registry or simulator directories. The app uses a
