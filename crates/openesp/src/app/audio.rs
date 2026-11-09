@@ -86,7 +86,16 @@ impl Listener {
             .normalize_or_zero()
             .dot(self.right.normalize_or_zero())
             .clamp(-1.0, 1.0);
-        Spatial { distance, pan }
+        let local_direction = self
+            .aircraft_rotation
+            .transpose()
+            .transform_vector3((-offset).as_vec3())
+            .normalize_or_zero();
+        Spatial {
+            distance,
+            pan,
+            source_to_listener: local_direction.as_dvec3().to_array(),
+        }
     }
 }
 
@@ -160,9 +169,11 @@ mod tests {
         let right = listener.relative(DVec3::new(5.0, 0.0, 0.0));
         assert!((right.distance - 125.0_f64.sqrt()).abs() < 1e-6);
         assert!(right.pan > 0.4);
+        assert!(right.source_to_listener[0] < -0.4 && right.source_to_listener[2] < -0.8);
         listener.aircraft_rotation = Mat4::from_rotation_y(std::f32::consts::PI);
         let left = listener.relative(DVec3::new(5.0, 0.0, 0.0));
         assert!(left.pan < -0.4);
+        assert!(left.source_to_listener[0] < -0.4 && left.source_to_listener[2] > 0.8);
     }
     #[test]
     fn engine_state_tracks_spool_combustion_and_view() {
@@ -209,6 +220,7 @@ mod tests {
         for command in bank.spatial(Some(Spatial {
             distance: 50.0,
             pan: 1.0,
+            source_to_listener: [0.0, 0.0, 1.0],
         })) {
             mixer.command(command).unwrap();
         }
@@ -216,6 +228,7 @@ mod tests {
         for command in bank.spatial(Some(Spatial {
             distance: 5_000.0,
             pan: 1.0,
+            source_to_listener: [0.0, 0.0, 1.0],
         })) {
             mixer.command(command).unwrap();
         }

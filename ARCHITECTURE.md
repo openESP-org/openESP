@@ -109,8 +109,9 @@ Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the
 `esp-audio` mixer; device or content failures leave the flight running silently.
 Exterior engine layers use aircraft-configured source locations and camera
-position for stereo panning and distance attenuation. This is a stereo model,
-not HRTF or an acoustic simulation.
+position for stereo panning and distance attenuation. Authored directional
+cones apply in aircraft coordinates, including their inside/outside angles and
+outside volume. This is a stereo model, not HRTF or an acoustic simulation.
 
 `esp-installs` reads simulator installation paths from the Windows registry;
 it does not modify the registry or simulator directories. The app uses a

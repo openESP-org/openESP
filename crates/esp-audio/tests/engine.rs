@@ -1,11 +1,116 @@
 use esp_assets::sound::SoundSet;
 use esp_audio::engine::{EngineBank, EngineState};
-use esp_audio::{Command, Mixer, VoiceId};
+use esp_audio::{Command, Mixer, Spatial, VoiceId};
 use esp_formats::cfg::sound::EngineEvent;
 use std::sync::Arc;
 
 #[path = "../../../tests/support/content.rs"]
 mod content;
+
+#[test]
+#[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]
+fn real_jet_cone_changes_volume_between_front_and_rear() {
+    for path in content::aircraft_paths() {
+        let set = SoundSet::load(&path, 0, None).unwrap();
+        let find_layer = || {
+            set.engine_layers(1, EngineEvent::JetWhine)
+                .unwrap()
+                .into_iter()
+                .find(|layer| {
+                    layer.parameters.viewpoint == Some(2)
+                        && layer
+                            .parameters
+                            .outside_cone_angle
+                            .is_some_and(|angle| angle < 360.0)
+                        && layer
+                            .parameters
+                            .outside_cone_volume
+                            .is_some_and(|volume| volume < 10_000.0)
+                })
+                .expect("missing exterior jet cone")
+        };
+        let layer = find_layer();
+        let sample = Arc::new(set.sample(&layer.filenames[0]).unwrap());
+        let heading = layer.parameters.cone_heading.unwrap_or(0.0).to_radians();
+        let pitch = layer.parameters.cone_pitch.unwrap_or(0.0).to_radians();
+        let axis = [
+            heading.sin() * pitch.cos(),
+            pitch.sin(),
+            heading.cos() * pitch.cos(),
+        ];
+        let expected =
+            10.0_f64.powf((layer.parameters.outside_cone_volume.unwrap() - 10_000.0) / 2000.0);
+        let render = |direction| {
+            let mut mixer = Mixer::new(48_000, 2).unwrap();
+            mixer
+                .command(Command::Add {
+                    id: VoiceId(0),
+                    sample: Arc::clone(&sample),
+                    parameters: Box::new(find_layer().parameters),
+                    looping: true,
+                })
+                .unwrap();
+            mixer
+                .command(Command::Set {
+                    id: VoiceId(0),
+                    level: 0.25,
+                    inside: false,
+                    active: true,
+                })
+                .unwrap();
+            mixer
+                .command(Command::Spatial {
+                    id: VoiceId(0),
+                    position: Some(Spatial {
+                        distance: 0.0,
+                        pan: 0.0,
+                        source_to_listener: direction,
+                    }),
+                })
+                .unwrap();
+            let mut output = vec![0.0; 48_000];
+            mixer.render(&mut output);
+            output
+        };
+        let front_samples = render(axis);
+        let rear_samples = render(axis.map(|value| -value));
+        let rms = |samples: &[f32]| {
+            (samples
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                / samples.len() as f64)
+                .sqrt()
+        };
+        let front = rms(&front_samples);
+        let rear = rms(&rear_samples);
+        assert!(front > 0.0001, "{path:?}: silent cone sample");
+        assert!(
+            (rear / front - expected).abs() < 1e-5,
+            "{path:?}: front={front}, rear={rear}, expected={expected}"
+        );
+        let size = ((front_samples.len() + rear_samples.len()) * 2) as u32;
+        let mut wav = Vec::with_capacity(size as usize + 44);
+        wav.extend(b"RIFF");
+        wav.extend((size + 36).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(48_000u32.to_le_bytes());
+        wav.extend(192_000u32.to_le_bytes());
+        wav.extend(4u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(size.to_le_bytes());
+        for sample in front_samples.into_iter().chain(rear_samples) {
+            wav.extend(((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let preview = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/engine-cone-preview.wav");
+        std::fs::write(preview, wav).unwrap();
+    }
+}
 
 #[test]
 #[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]

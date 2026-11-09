@@ -18,6 +18,8 @@ pub struct Spatial {
     pub distance: f64,
     /// -1 is left, +1 is right.
     pub pan: f64,
+    /// Unit direction from source to listener in aircraft right/up/forward axes.
+    pub source_to_listener: [f64; 3],
 }
 
 pub enum Command {
@@ -96,6 +98,62 @@ fn envelope(points: &[[f64; 2]], x: f64, default: f64) -> f64 {
     points.last().map_or(default, |point| point[1])
 }
 
+fn cone_gain(parameters: &Parameters, spatial: Spatial) -> f64 {
+    let inner = parameters
+        .inside_cone_angle
+        .filter(|value| value.is_finite())
+        .unwrap_or(360.0)
+        .clamp(0.0, 360.0)
+        * 0.5;
+    let outer = parameters
+        .outside_cone_angle
+        .filter(|value| value.is_finite())
+        .unwrap_or(360.0)
+        .clamp(inner * 2.0, 360.0)
+        * 0.5;
+    let outside = parameters
+        .outside_cone_volume
+        .filter(|value| value.is_finite())
+        .unwrap_or(10_000.0)
+        .clamp(0.0, 10_000.0);
+    let direction = spatial.source_to_listener;
+    let length = direction
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if length < 1e-9 || inner >= 180.0 || outside >= 10_000.0 {
+        return 1.0;
+    }
+    let heading = parameters
+        .cone_heading
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .to_radians();
+    let pitch = parameters
+        .cone_pitch
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .to_radians();
+    let axis = [
+        heading.sin() * pitch.cos(),
+        pitch.sin(),
+        heading.cos() * pitch.cos(),
+    ];
+    let angle = (axis.iter().zip(direction).map(|(a, b)| a * b).sum::<f64>() / length)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
+    let blend = if angle <= inner {
+        0.0
+    } else if angle >= outer || outer <= inner {
+        1.0
+    } else {
+        (angle - inner) / (outer - inner)
+    };
+    10.0_f64.powf((outside - 10_000.0) * blend / 2000.0)
+}
+
 // Sample validation can scan millions of frames. Keep it off the device callback.
 fn validate_command(command: &Command) -> Result<()> {
     match command {
@@ -132,7 +190,10 @@ fn validate_command(command: &Command) -> Result<()> {
             position.is_none_or(|p| p.distance.is_finite()
                 && p.distance >= 0.0
                 && p.pan.is_finite()
-                && (-1.0..=1.0).contains(&p.pan)),
+                && (-1.0..=1.0).contains(&p.pan)
+                && p.source_to_listener
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() <= 1.000_001)),
             "invalid sound position"
         ),
         Command::Remove(_) => {}
@@ -236,7 +297,11 @@ impl Mixer {
                 (volume.clamp(0.0, 100.0) / 100.0).sqrt() as f32
             } else {
                 0.0
-            } * distance_gain;
+            } * distance_gain
+                * voice
+                    .spatial
+                    .map_or(1.0, |position| cone_gain(&voice.parameters, position))
+                    as f32;
             let authored_pan = voice
                 .parameters
                 .panning
@@ -458,6 +523,34 @@ mod tests {
     }
 
     #[test]
+    fn directional_cone_interpolates_in_decibels_and_rotates_with_heading() {
+        let mut parameters = Parameters {
+            inside_cone_angle: Some(90.0),
+            outside_cone_angle: Some(180.0),
+            outside_cone_volume: Some(8_000.0),
+            ..Default::default()
+        };
+        let at = |angle: f64| Spatial {
+            distance: 10.0,
+            pan: 0.0,
+            source_to_listener: [angle.to_radians().sin(), 0.0, angle.to_radians().cos()],
+        };
+        assert!((cone_gain(&parameters, at(0.0)) - 1.0).abs() < 1e-9);
+        assert!((cone_gain(&parameters, at(67.5)) - 10.0_f64.powf(-0.5)).abs() < 1e-9);
+        assert!((cone_gain(&parameters, at(90.0)) - 0.1).abs() < 1e-9);
+        parameters.cone_heading = Some(90.0);
+        assert!((cone_gain(&parameters, at(90.0)) - 1.0).abs() < 1e-9);
+        parameters.cone_pitch = Some(90.0);
+        let above = Spatial {
+            distance: 10.0,
+            pan: 0.0,
+            source_to_listener: [0.0, 1.0, 0.0],
+        };
+        assert!((cone_gain(&parameters, above) - 1.0).abs() < 1e-9);
+        assert_eq!(cone_gain(&Parameters::default(), at(180.0)), 1.0);
+    }
+
+    #[test]
     fn spatial_sound_follows_distance_pan_and_authored_full_scale() {
         let mut mixer = Mixer::new(48_000, 2).unwrap();
         mixer
@@ -485,6 +578,7 @@ mod tests {
                 position: Some(Spatial {
                     distance: 10.0,
                     pan: 1.0,
+                    source_to_listener: [0.0, 0.0, 1.0],
                 }),
             })
             .unwrap();
@@ -497,6 +591,7 @@ mod tests {
                 position: Some(Spatial {
                     distance: 100.0,
                     pan: 1.0,
+                    source_to_listener: [0.0, 0.0, 1.0],
                 }),
             })
             .unwrap();
@@ -509,7 +604,8 @@ mod tests {
                     id: VoiceId(7),
                     position: Some(Spatial {
                         distance: f64::NAN,
-                        pan: 0.0
+                        pan: 0.0,
+                        source_to_listener: [0.0, 0.0, 1.0],
                     })
                 })
                 .is_err()
