@@ -171,6 +171,18 @@ fn systems_state(variables: &mut Variables, inside: bool) -> SystemsState {
         gear: read(variables, "GEAR TOTAL PCT EXTENDED"),
         flaps: read(variables, "TRAILING EDGE FLAPS LEFT PERCENT"),
         inside,
+        contacts: std::array::from_fn(|index| {
+            variables
+                .read(&Reference::new(
+                    'A',
+                    &format!("OPENESP GEAR SOUND CONTACT:{index}"),
+                    Some("bool"),
+                ))
+                .ok()
+                .and_then(|value| value.number().ok())
+                .filter(|value| value.is_finite())
+                .map(|value| value != 0.0)
+        }),
     }
 }
 
@@ -210,6 +222,57 @@ mod tests {
 
     #[test]
     #[ignore = "requires aircraft in OPENESP_AIRCRAFT_PATHS"]
+    fn real_aircraft_touchdown_sounds_follow_wheel_contacts() {
+        let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
+        let path = std::env::split_paths(&paths).next().unwrap();
+        let root = std::env::var_os("OPENESP_P3D_ROOT").map(std::path::PathBuf::from);
+        let prepared = Prepared::load(&path, 0, root.as_deref()).unwrap();
+        let systems = prepared.systems.expect("aircraft has no systems sounds");
+        let mut mixer = esp_audio::Mixer::new(48_000, 2).unwrap();
+        for command in prepared.commands {
+            mixer.command(command).unwrap();
+        }
+        let airborne = SystemsState {
+            contacts: [Some(false); 4],
+            inside: true,
+            ..Default::default()
+        };
+        let (tracker, commands) = systems
+            .update(Tracker::default(), airborne, 0.016, None)
+            .unwrap();
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut before = [0.0; 200];
+        mixer.render(&mut before);
+        assert!(before.iter().all(|sample| *sample == 0.0));
+        let landing = SystemsState {
+            contacts: [Some(false), Some(false), Some(true), Some(false)],
+            ..airborne
+        };
+        let (tracker, commands) = systems.update(tracker, landing, 0.016, None).unwrap();
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::Set { active: true, .. }))
+        );
+        for command in commands {
+            mixer.command(command).unwrap();
+        }
+        let mut samples = vec![0.0; 48_000];
+        mixer.render(&mut samples);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.0001));
+        write_preview("b737-touchdown.wav", &samples);
+        let (_, commands) = systems.update(tracker, landing, 0.016, None).unwrap();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, Command::Set { active: true, .. }))
+        );
+    }
+
+    #[test]
+    #[ignore = "requires aircraft in OPENESP_AIRCRAFT_PATHS"]
     fn real_aircraft_mechanisms_follow_movement() {
         let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
         let path = std::env::split_paths(&paths).next().unwrap();
@@ -225,6 +288,7 @@ mod tests {
             gear: Some(1.0),
             flaps: Some(0.0),
             inside: true,
+            ..Default::default()
         };
         let (tracker, commands) = systems
             .update(Tracker::default(), initial, 0.016, None)
@@ -239,6 +303,7 @@ mod tests {
             gear: Some(0.9),
             flaps: Some(0.1),
             inside: true,
+            ..Default::default()
         };
         let (tracker, commands) = systems.update(tracker, moving, 0.016, None).unwrap();
         for command in commands {
@@ -255,6 +320,7 @@ mod tests {
                     gear: Some(0.8),
                     flaps: Some(0.2),
                     inside: true,
+                    ..Default::default()
                 },
                 0.016,
                 None,
@@ -306,10 +372,12 @@ mod tests {
         let mut variables = Variables::default();
         variables.set_number("GEAR TOTAL PCT EXTENDED", "percent", 70.0);
         variables.set_number("TRAILING EDGE FLAPS LEFT PERCENT", "percent", 25.0);
+        variables.set_number("OPENESP GEAR SOUND CONTACT:2", "bool", 1.0);
         let state = systems_state(&mut variables, true);
         assert!((state.gear.unwrap() - 0.7).abs() < 1e-9);
         assert!((state.flaps.unwrap() - 0.25).abs() < 1e-9);
         assert!(state.inside);
+        assert_eq!(state.contacts[2], Some(true));
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct Impact {
 
 struct Wheel {
     index: u32,
+    sound_type: u32,
     position: DVec3,
     spring: f64,
     damper: f64,
@@ -79,6 +80,28 @@ pub struct Output {
 }
 
 impl LandingGear {
+    /// Loaded wheel contacts grouped by authored center/auxiliary/left/right sound type.
+    pub fn sound_contacts(&self, state: &Motion, cg: DVec3, surface: Surface) -> [bool; 4] {
+        let mut contacts = [false; 4];
+        for wheel in &self.wheels {
+            let Some(contact) = contacts.get_mut(wheel.sound_type as usize) else {
+                continue;
+            };
+            if wheel.extension < 1.0 {
+                continue;
+            }
+            let arm = wheel.position - cg;
+            let compression = state.position.z + (state.orientation * arm).z + surface.elevation;
+            if compression < 0.0 {
+                continue;
+            }
+            let velocity = state.velocity + state.orientation * state.angular_velocity.cross(arm);
+            let excess = (compression - wheel.maximum_compression).max(0.0);
+            let normal = wheel.spring * (compression + 19.0 * excess) + wheel.damper * velocity.z;
+            *contact |= normal > 0.0;
+        }
+        contacts
+    }
     pub fn animation_positions(
         &self,
         state: &Motion,
@@ -289,6 +312,7 @@ impl LandingGear {
             let damper = 2.0 * point.damping_ratio * (spring * load / 9.80665).sqrt();
             wheels.push(Wheel {
                 index: point.index,
+                sound_type: point.sound_type,
                 position: position(point.position_feet),
                 spring,
                 damper,
@@ -464,6 +488,7 @@ mod tests {
             .enumerate()
             .map(|(i, position)| Wheel {
                 index: i as u32,
+                sound_type: i as u32,
                 position,
                 spring,
                 damper: 2.0 * 0.8 * (spring * 100.0).sqrt(),
@@ -515,6 +540,31 @@ mod tests {
             gear.forces(&state, DVec3::ZERO, SURFACE, Controls::default())
                 .unwrap()
                 .on_ground
+        );
+    }
+
+    #[test]
+    fn sound_contacts_follow_individual_loaded_wheels_and_sound_types() {
+        let mut gear = tripod();
+        gear.wheels[1].sound_type = 2;
+        gear.wheels[2].sound_type = 3;
+        let mut state = Motion {
+            position: DVec3::new(0.0, 0.0, -0.9),
+            ..Motion::default()
+        };
+        assert_eq!(
+            gear.sound_contacts(&state, DVec3::ZERO, SURFACE),
+            [true, false, true, true]
+        );
+        gear.wheels[1].extension = 0.0;
+        assert_eq!(
+            gear.sound_contacts(&state, DVec3::ZERO, SURFACE),
+            [true, false, false, true]
+        );
+        state.position.z = -2.0;
+        assert_eq!(
+            gear.sound_contacts(&state, DVec3::ZERO, SURFACE),
+            [false; 4]
         );
     }
 

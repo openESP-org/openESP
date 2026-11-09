@@ -9,6 +9,7 @@ enum Event {
     GearUp,
     GearDown,
     Flaps,
+    Touchdown(usize),
 }
 
 pub struct SystemsBank {
@@ -61,6 +62,35 @@ pub struct Tracker {
     gear: Motion,
     flaps: Motion,
     inside: Option<bool>,
+    contacts: [Contact; 4],
+}
+
+#[derive(Clone, Copy, Default)]
+struct Contact {
+    previous: Option<bool>,
+    airborne: f64,
+    armed: bool,
+}
+
+impl Contact {
+    fn advance(&mut self, contact: Option<bool>, elapsed: f64) -> bool {
+        let Some(contact) = contact else {
+            *self = Self::default();
+            return false;
+        };
+        let previous = self.previous.replace(contact);
+        if !contact {
+            self.airborne += elapsed;
+            if previous.is_none() || self.airborne >= 0.2 {
+                self.armed = true;
+            }
+            return false;
+        }
+        self.airborne = 0.0;
+        let trigger = previous == Some(false) && self.armed;
+        self.armed = false;
+        trigger
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -68,6 +98,7 @@ pub struct State {
     pub gear: Option<f64>,
     pub flaps: Option<f64>,
     pub inside: bool,
+    pub contacts: [Option<bool>; 4],
 }
 
 impl SystemsBank {
@@ -78,6 +109,10 @@ impl SystemsBank {
             ("GEAR_UP", Event::GearUp),
             ("GEAR_DOWN", Event::GearDown),
             ("FLAPS", Event::Flaps),
+            ("CENTER_TOUCHDOWN", Event::Touchdown(0)),
+            ("AUX_TOUCHDOWN", Event::Touchdown(1)),
+            ("LEFT_TOUCHDOWN", Event::Touchdown(2)),
+            ("RIGHT_TOUCHDOWN", Event::Touchdown(3)),
         ] {
             for layer in set.optional_layers(name)? {
                 if layer.parameters.flags.unwrap_or(0) & 1 != 0 {
@@ -128,6 +163,9 @@ impl SystemsBank {
         );
         let gear = tracker.gear.advance(state.gear, elapsed);
         let flaps = tracker.flaps.advance(state.flaps, elapsed);
+        let touchdowns: [bool; 4] = std::array::from_fn(|index| {
+            tracker.contacts[index].advance(state.contacts[index], elapsed)
+        });
         let view_changed = tracker.inside != Some(state.inside);
         tracker.inside = Some(state.inside);
         let mut commands = Vec::new();
@@ -145,7 +183,7 @@ impl SystemsBank {
             let trigger = matches!(
                 (event, gear, flaps),
                 (Event::GearUp, -1, _) | (Event::GearDown, 1, _) | (Event::Flaps, _, -1 | 1)
-            );
+            ) || matches!(event, Event::Touchdown(index) if touchdowns[index]);
             if trigger {
                 commands.push(Command::Set {
                     id,
@@ -190,6 +228,7 @@ mod tests {
                     gear: Some(1.0),
                     flaps: Some(0.0),
                     inside: true,
+                    ..Default::default()
                 },
                 0.016,
                 None,
@@ -203,6 +242,7 @@ mod tests {
                     gear: Some(0.9),
                     flaps: Some(0.1),
                     inside: true,
+                    ..Default::default()
                 },
                 0.016,
                 None,
@@ -216,6 +256,7 @@ mod tests {
                     gear: Some(0.9),
                     flaps: Some(0.1),
                     inside: true,
+                    ..Default::default()
                 },
                 0.016,
                 None,
@@ -228,6 +269,7 @@ mod tests {
                     gear: Some(0.8),
                     flaps: Some(0.2),
                     inside: false,
+                    ..Default::default()
                 },
                 0.016,
                 None,
@@ -246,11 +288,78 @@ mod tests {
                     gear: Some(0.9),
                     flaps: Some(0.1),
                     inside: false,
+                    ..Default::default()
                 },
                 0.016,
                 None,
             )
             .unwrap();
         assert_eq!(count(&commands), 2);
+    }
+
+    #[test]
+    fn touchdown_contacts_trigger_independently_and_filter_jitter() {
+        let bank = SystemsBank {
+            voices: (0..4)
+                .map(|index| (Event::Touchdown(index), VoiceId(index as u64)))
+                .collect(),
+        };
+        let run = |tracker, contacts, elapsed| {
+            let (tracker, commands) = bank
+                .update(
+                    tracker,
+                    State {
+                        contacts,
+                        ..Default::default()
+                    },
+                    elapsed,
+                    None,
+                )
+                .unwrap();
+            let ids: Vec<_> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Set {
+                        id, active: true, ..
+                    } => Some(id.0),
+                    _ => None,
+                })
+                .collect();
+            (tracker, ids)
+        };
+        let (tracker, ids) = run(
+            Tracker::default(),
+            [Some(true), Some(false), Some(false), Some(false)],
+            0.01,
+        );
+        assert!(ids.is_empty());
+        let (tracker, ids) = run(
+            tracker,
+            [Some(true), Some(false), Some(true), Some(false)],
+            0.01,
+        );
+        assert_eq!(ids, [2]);
+        let (tracker, _) = run(
+            tracker,
+            [Some(true), Some(false), Some(false), Some(false)],
+            0.01,
+        );
+        let (tracker, ids) = run(
+            tracker,
+            [Some(true), Some(false), Some(true), Some(true)],
+            0.01,
+        );
+        assert_eq!(ids, [3]);
+        let (tracker, _) = run(
+            tracker,
+            [Some(true), Some(false), Some(false), Some(true)],
+            0.21,
+        );
+        let (_, ids) = run(
+            tracker,
+            [Some(true), Some(false), Some(true), Some(true)],
+            0.01,
+        );
+        assert_eq!(ids, [2]);
     }
 }

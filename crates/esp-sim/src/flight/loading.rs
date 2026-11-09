@@ -3,6 +3,18 @@ use super::*;
 impl Flight {
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
+        let contacts = self.gear.sound_contacts(
+            &self.current,
+            self.loading.cg,
+            self.surface_at(&self.current),
+        );
+        for (index, contact) in contacts.into_iter().enumerate() {
+            variables.set_number(
+                &format!("OPENESP GEAR SOUND CONTACT:{index}"),
+                "bool",
+                f64::from(contact),
+            );
+        }
         variables.set_number(
             "AUTO SPOILERS AVAILABLE",
             "bool",
