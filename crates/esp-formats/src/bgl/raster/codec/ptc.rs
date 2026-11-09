@@ -2,6 +2,33 @@ use super::Error;
 
 unsafe extern "C" {
     fn openesp_ptc_photo(source: *const u8, length: i32, output: *mut u8, output_size: i32) -> i32;
+    fn openesp_ptc_elevation(
+        source: *const u8,
+        length: i32,
+        output: *mut u8,
+        output_size: i32,
+    ) -> i32;
+}
+
+pub(super) fn elevation(input: &[u8]) -> Result<Vec<u8>, Error> {
+    const SIZE: usize = 256 * 256 * 2;
+    if input.len() > super::LIMIT {
+        return Err(Error::Limit);
+    }
+    let mut output = vec![0u8; SIZE];
+    // The bridge validates the fixed monochrome frame and tile bounds before decoding.
+    let result = unsafe {
+        openesp_ptc_elevation(
+            input.as_ptr(),
+            input.len() as i32,
+            output.as_mut_ptr(),
+            SIZE as i32,
+        )
+    };
+    if result != SIZE as i32 {
+        return Err(Error::InvalidData);
+    }
+    Ok(output)
 }
 
 pub(super) fn photo(input: &[u8], size: usize) -> Result<Vec<u8>, Error> {

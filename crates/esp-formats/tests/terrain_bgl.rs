@@ -1,6 +1,64 @@
 use esp_formats::bgl::Bgl;
 
 #[test]
+#[ignore = "requires the installed regional DEM in OPENESP_DEM_BGL"]
+fn decodes_real_p3d_elevation_near_ltfo() {
+    let path = std::env::var_os("OPENESP_DEM_BGL").unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let bgl = Bgl::parse(&bytes).unwrap();
+    let mut nearby = bgl
+        .raster_tiles()
+        .unwrap()
+        .into_iter()
+        .filter_map(|(kind, tile)| {
+            let qmid = esp_formats::bgl::qmid::Qmid::from_packed(tile.qmid)?;
+            let bounds = qmid.bounds();
+            (kind == 0x67
+                && bounds.south <= 41.17574
+                && bounds.north >= 41.17574
+                && bounds.west <= 40.84646
+                && bounds.east >= 40.84646)
+                .then_some((qmid.level(), tile))
+        })
+        .collect::<Vec<_>>();
+    nearby.sort_by_key(|(level, _)| std::cmp::Reverse(*level));
+    assert!(!nearby.is_empty(), "no elevation tiles at LTFO");
+    for (_, tile) in nearby.iter().take(3) {
+        let elevation = tile.decode_elevation().unwrap();
+        let bounds = esp_formats::bgl::qmid::Qmid::from_packed(tile.qmid)
+            .unwrap()
+            .bounds();
+        let x = (((40.84646 - bounds.west) / (bounds.east - bounds.west))
+            * f64::from(tile.columns - 1))
+        .round() as usize;
+        let y = (((bounds.north - 41.17574) / (bounds.north - bounds.south))
+            * f64::from(tile.rows - 1))
+        .round() as usize;
+        let airport_height = elevation.metres[y * usize::from(tile.columns) + x];
+        assert!(
+            (-20.0..=30.0).contains(&airport_height),
+            "LTFO elevation {airport_height} m"
+        );
+        assert_eq!(
+            elevation.metres.len(),
+            usize::from(tile.rows) * usize::from(tile.columns)
+        );
+        let low = elevation
+            .metres
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min);
+        let high = elevation
+            .metres
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((-1000.0..=9000.0).contains(&low) && (-1000.0..=9000.0).contains(&high));
+        assert!(high - low > 100.0, "expected terrain relief around LTFO");
+    }
+}
+
+#[test]
 #[ignore = "requires LTFO photoreal BGL in OPENESP_LTFO_PHOTOREAL_BGL"]
 fn locates_ltfo_photo_tiles_on_the_world_grid() {
     let path = std::env::var_os("OPENESP_LTFO_PHOTOREAL_BGL").unwrap();

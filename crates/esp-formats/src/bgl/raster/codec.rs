@@ -5,6 +5,10 @@ use super::Compression;
 mod bitpack;
 mod ptc;
 
+pub(super) fn decode_ptc_elevation(input: &[u8]) -> Result<Vec<u8>, Error> {
+    ptc::elevation(input)
+}
+
 const LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]

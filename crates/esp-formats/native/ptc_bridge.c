@@ -2,8 +2,8 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Fixed-size photo-only entry point. The caller owns the output allocation. */
-int openesp_ptc_photo(const uint8_t* source, int length, uint8_t* output, int output_size)
+/* Fixed-size PTC entry point. The caller owns the output allocation. */
+static int decode_ptc(const uint8_t* source, int length, uint8_t* output, int output_size, int pixel_type)
 {
     if (!source || !output || length < 48 || output_size != 256 * 256 * 2)
         return -1;
@@ -11,8 +11,8 @@ int openesp_ptc_photo(const uint8_t* source, int length, uint8_t* output, int ou
     memcpy(&width, source + 12, 4);
     memcpy(&height, source + 16, 4);
     memcpy(&offset, source + 32, 4);
-    if (source[0] != 1 || memcmp(source + 4, "PTC\0", 4) != 0 ||
-        source[9] != PT1555 || width != 256 || height != 256 || offset != 44 || source[40] != 0)
+    if (source[0] != (pixel_type == PT16 ? 5 : 1) || memcmp(source + 4, "PTC\0", 4) != 0 ||
+        source[9] != pixel_type || width != 256 || height != 256 || offset != 44 || source[40] != 0)
         return -1;
     source += 48;
     length -= 48;
@@ -29,6 +29,8 @@ int openesp_ptc_photo(const uint8_t* source, int length, uint8_t* output, int ou
         frame.CompressedLength <= 0 || frame.CompressedLength > length ||
         frame.NumChannels < 1 || frame.NumChannels > 4 || frame.BitDepth < 1 || frame.BitDepth > 16 ||
         frame.OffsetToData < 0 || frame.OffsetToData > length)
+        return -1;
+    if (pixel_type == PT16 && (frame.NumChannels != 1 || (frame.Flags & 0xf0) != 0))
         return -1;
     if (file.OffsetToFrame != 0 || frame.CompressedLength != length - (int)sizeof(file) - 4)
         return -1;
@@ -48,14 +50,24 @@ int openesp_ptc_photo(const uint8_t* source, int length, uint8_t* output, int ou
     WriteRowParams row = {0};
     DecodeParams params = {0};
     row.Dest = output;
-    row.Type = PT1555;
+    row.Type = pixel_type;
     row.RowWidth = 256;
     row.StrideBytes = 512;
-    row.PixelParams.NumBitsColor = 5;
-    row.PixelParams.NumBitsAlpha = 1;
+    row.PixelParams.NumBitsColor = pixel_type == PT16 ? 16 : 5;
+    row.PixelParams.NumBitsAlpha = pixel_type == PT16 ? 0 : 1;
     params.LP2 = 4;
     params.LP4 = 7;
     params.MipGenerate[0] = 1;
     params.RowParams[0] = &row;
     return PTCDecompress(&params, source, length) == length ? output_size : -1;
+}
+
+int openesp_ptc_photo(const uint8_t* source, int length, uint8_t* output, int output_size)
+{
+    return decode_ptc(source, length, output, output_size, PT1555);
+}
+
+int openesp_ptc_elevation(const uint8_t* source, int length, uint8_t* output, int output_size)
+{
+    return decode_ptc(source, length, output, output_size, PT16);
 }

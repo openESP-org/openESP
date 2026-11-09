@@ -1,6 +1,8 @@
 //! FSX/P3D TRQ1 terrain raster records, with borrowed compressed payloads.
 use super::{Bgl, Directory, Error, range};
 pub mod codec;
+mod elevation;
+pub use elevation::Elevation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
