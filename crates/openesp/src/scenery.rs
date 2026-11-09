@@ -172,6 +172,8 @@ pub fn objects(
     texture_directory: Option<&Path>,
     latitude: f64,
     longitude: f64,
+    ground: Option<&esp_sim::flight::ground::Ground>,
+    reference_msl: Option<f64>,
 ) -> Result<Vec<esp_render::SceneryObject>> {
     use std::{
         collections::{HashMap, HashSet},
@@ -231,7 +233,8 @@ pub fn objects(
     }
     // The airport scene uses a flat ground plane at the selected airport's
     // elevation. Object-only libraries do not contain a terrain datum.
-    let airport_elevation = airport_elevation.map(|(_, elevation)| elevation);
+    let airport_elevation =
+        reference_msl.or_else(|| airport_elevation.map(|(_, elevation)| elevation));
     let mut result = Vec::new();
     for path in paths {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -264,7 +267,9 @@ pub fn objects(
                     )?;
                     let [pitch, bank, heading] =
                         object.placement.orientation_degrees().map(f64::to_radians);
-                    let height = placement_height(&object.placement, airport_elevation);
+                    let local_ground = ground.map(|ground| ground.surface(north, east).elevation);
+                    let height =
+                        placement_height(&object.placement, airport_elevation, local_ground);
                     let transform = glam::Mat4::from_translation(glam::Vec3::new(
                         east as f32,
                         height as f32,
@@ -289,9 +294,10 @@ pub fn objects(
 fn placement_height(
     placement: &esp_formats::bgl::scenery::Placement,
     ground_msl: Option<f64>,
+    local_ground: Option<f64>,
 ) -> f64 {
     if placement.flags & 1 != 0 {
-        placement.altitude_meters()
+        local_ground.unwrap_or(0.0) + placement.altitude_meters()
     } else {
         ground_msl.map_or(0.0, |ground| placement.altitude_meters() - ground)
     }
@@ -315,11 +321,11 @@ mod tests {
             unknown: 0,
             instance: Default::default(),
         };
-        assert_eq!(placement_height(&placement, Some(100.0)), 5.0);
-        assert_eq!(placement_height(&placement, None), 0.0);
+        assert_eq!(placement_height(&placement, Some(100.0), Some(70.0)), 5.0);
+        assert_eq!(placement_height(&placement, None, Some(70.0)), 0.0);
         placement.flags = 1;
-        assert_eq!(placement_height(&placement, Some(100.0)), 105.0);
-        assert_eq!(placement_height(&placement, None), 105.0);
+        assert_eq!(placement_height(&placement, Some(100.0), Some(70.0)), 175.0);
+        assert_eq!(placement_height(&placement, None, None), 105.0);
     }
 
     #[test]
@@ -439,7 +445,16 @@ mod object_tests {
     fn loads_real_placed_model_from_embedded_library() {
         let path =
             std::env::var_os("OPENESP_SCENERY_OBJECT_BGL").expect("set OPENESP_SCENERY_OBJECT_BGL");
-        let objects = objects(Path::new(&path), &[], None, 48.63158628, 9.43264246).unwrap();
+        let objects = objects(
+            Path::new(&path),
+            &[],
+            None,
+            48.63158628,
+            9.43264246,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(objects.len(), 1);
         assert!(
             objects[0]
@@ -459,13 +474,22 @@ mod object_tests {
         let libraries = std::env::var_os("OPENESP_SCENERY_OBJECT_BGLS")
             .expect("set OPENESP_SCENERY_OBJECT_BGLS");
         let libraries: Vec<_> = std::env::split_paths(&libraries).collect();
-        let objects = objects(Path::new(&placement), &libraries, None, 41.168, 40.835).unwrap();
+        let objects = objects(
+            Path::new(&placement),
+            &libraries,
+            None,
+            41.168,
+            40.835,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!objects.is_empty(), "no placed objects found");
         let mut reversed = libraries.clone();
         reversed.push(placement.clone().into());
         reversed.push(placement.clone().into());
         let objects_from_library =
-            super::objects(&libraries[0], &reversed, None, 41.168, 40.835).unwrap();
+            super::objects(&libraries[0], &reversed, None, 41.168, 40.835, None, None).unwrap();
         assert_eq!(
             objects_from_library.len(),
             objects.len(),

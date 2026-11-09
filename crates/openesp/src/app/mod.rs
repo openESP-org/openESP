@@ -307,17 +307,6 @@ impl App {
                             aprons: Vec::new(),
                         }
                     };
-                    let objects = if let Some(path) = &self.arguments.scenery_objects {
-                        scenery::objects(
-                            path,
-                            &self.arguments.scenery_library,
-                            self.arguments.scenery_textures.as_deref(),
-                            self.arguments.latitude,
-                            self.arguments.longitude,
-                        )?
-                    } else {
-                        Vec::new()
-                    };
                     let terrain = terrain::load(
                         &self.arguments,
                         scene.elevation_m,
@@ -332,10 +321,36 @@ impl App {
                         .as_deref()
                         .zip(self.terrain_stream.as_ref())
                         .map(|(mesh, stream)| stream.render_mesh(mesh));
+                    let ground = terrain
+                        .as_ref()
+                        .map(|mesh| terrain::ground(mesh.clone(), &scene));
+                    let reference_msl =
+                        terrain
+                            .as_ref()
+                            .map(|mesh| mesh.reference_msl())
+                            .or_else(|| {
+                                self.arguments
+                                    .scenery_bgl
+                                    .as_ref()
+                                    .map(|_| scene.elevation_m)
+                            });
+                    let objects = if let Some(path) = &self.arguments.scenery_objects {
+                        scenery::objects(
+                            path,
+                            &self.arguments.scenery_library,
+                            self.arguments.scenery_textures.as_deref(),
+                            self.arguments.latitude,
+                            self.arguments.longitude,
+                            ground.as_ref(),
+                            reference_msl,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
                     if let Some(flight) = &mut self.flight {
                         flight.set_origin_elevation(scene.elevation_m)?;
-                        if let Some(mesh) = &terrain {
-                            flight.set_ground(terrain::ground(mesh.clone(), &scene));
+                        if let Some(ground) = ground {
+                            flight.set_ground(ground);
                         }
                     }
                     self.renderer = Some(pollster::block_on(Renderer::new(

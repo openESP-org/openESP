@@ -77,6 +77,8 @@ the app because they exercise flight and weather together.
 and object loaders before `app/spawn.rs` resolves the selected runway or parking
 stand. It reads content without modifying the add-on. Airport surface and
 object loading will move together into `esp-scenery` as that domain grows.
+Placed objects use the scene's mean-sea-level datum, and above-ground placements
+sample the same terrain and airport surface footprints used by flight contact.
 
 `esp-terrain` decodes and selects geographic imagery tiles independently of
 the renderer. The app projects selected bounds into its local scene; the

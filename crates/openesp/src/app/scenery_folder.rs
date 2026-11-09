@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires LTFO add-on folder in OPENESP_SCENERY_FOLDER"]
+    #[ignore = "requires LTFO in OPENESP_SCENERY_FOLDER and Prepar3D in OPENESP_P3D_ROOT"]
     fn discovers_real_addon_and_supports_direct_scenery_directory() {
         let folder = PathBuf::from(std::env::var_os("OPENESP_SCENERY_FOLDER").unwrap());
         let package = discover(&folder, Some("ltfo")).unwrap();
@@ -169,8 +169,48 @@ mod tests {
             None,
             args.latitude,
             args.longitude,
+            None,
+            None,
         )
         .unwrap();
         assert!(models.len() >= 448);
+        let root =
+            PathBuf::from(std::env::var_os("OPENESP_P3D_ROOT").expect("set OPENESP_P3D_ROOT"));
+        let scene = crate::scenery::airport(
+            args.scenery_bgl.as_deref().unwrap(),
+            args.airport.as_deref(),
+            args.latitude,
+            args.longitude,
+        )
+        .unwrap();
+        let elevation =
+            esp_terrain::elevation::Terrain::load(&root, args.latitude, args.longitude, 45_000.0)
+                .unwrap();
+        let mesh = std::sync::Arc::new(
+            esp_terrain::mesh::Mesh::build(
+                &elevation,
+                args.latitude,
+                args.longitude,
+                30_000.0,
+                256,
+                scene.elevation_m,
+            )
+            .unwrap(),
+        );
+        let ground = super::super::terrain::ground(mesh, &scene);
+        let grounded = crate::scenery::objects(
+            args.scenery_objects.as_deref().unwrap(),
+            &args.scenery_library,
+            None,
+            args.latitude,
+            args.longitude,
+            Some(&ground),
+            Some(scene.elevation_m),
+        )
+        .unwrap();
+        assert_eq!(models.len(), grounded.len());
+        assert!(models.iter().zip(&grounded).any(|(before, after)| {
+            (before.transform.w_axis.y - after.transform.w_axis.y).abs() > 0.5
+        }));
     }
 }
