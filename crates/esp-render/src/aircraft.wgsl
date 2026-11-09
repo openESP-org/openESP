@@ -69,7 +69,7 @@ struct Output {
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
         return colour;
     }
-    if draw.settings.y > 1.5 {
+    if draw.settings.y > 2.5 && draw.settings.y < 3.5 {
         colour = vec4(input.tangent.xyz, 1.0);
     }
     let daylight = smoothstep(-0.105, 0.087, camera.sun.y);

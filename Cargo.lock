@@ -857,6 +857,7 @@ dependencies = [
  "glam 0.30.10",
  "image",
  "naga",
+ "pollster",
  "wgpu",
  "winit",
 ]

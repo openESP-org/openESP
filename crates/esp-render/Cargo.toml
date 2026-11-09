@@ -15,3 +15,4 @@ winit = "0.30"
 [dev-dependencies]
 esp-formats = { path = "../esp-formats" }
 naga = { version = "30", features = ["wgsl-in"] }
+pollster = "0.4"

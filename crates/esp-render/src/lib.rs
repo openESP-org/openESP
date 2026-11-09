@@ -78,6 +78,9 @@ pub struct Renderer {
     interior: Vec<Draw>,
     panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
+    terrain_draws: Vec<Draw>,
+    draw_layout: wgpu::BindGroupLayout,
+    terrain_sampler: wgpu::Sampler,
     ground_tracks_camera: bool,
     photos: Vec<Draw>,
     runway: Vec<Draw>,
@@ -132,6 +135,8 @@ pub struct TerrainMesh {
     pub vertices: Vec<DVec3>,
     pub normals: Vec<DVec3>,
     pub land_classes: Vec<Option<u8>>,
+    pub texture_sets: Vec<Option<u32>>,
+    pub textures: HashMap<u32, texture::Texture>,
     pub indices: Vec<u32>,
 }
 
@@ -690,7 +695,7 @@ impl Renderer {
                     model: Mat4::IDENTITY.to_cols_array_2d(),
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
                     diffuse: [0.32, 0.32, 0.32, 1.0],
-                    settings: [0.0, if terrain.is_some() { 2.0 } else { 1.0 }, 0.0, 0.0],
+                    settings: [0.0, if terrain.is_some() { 3.0 } else { 1.0 }, 0.0, 0.0],
                     pbr: [0.0; 4],
                     normal_settings: [0.0; 4],
                 },
@@ -701,6 +706,9 @@ impl Renderer {
                 normal_map: None,
             },
         );
+        let terrain_draws = terrain.map_or(Ok(Vec::new()), |terrain| {
+            ground::textured_draws(&device, &queue, &draw_layout, &sampler, terrain)
+        })?;
         let photo_key = PipelineKey {
             source: 5,
             destination: 6,
@@ -931,6 +939,9 @@ impl Renderer {
             interior,
             panels,
             ground,
+            terrain_draws,
+            draw_layout,
+            terrain_sampler: sampler,
             ground_tracks_camera: terrain.is_none(),
             photos: photo_draws,
             runway: runway_draws,
@@ -1053,6 +1064,7 @@ impl Renderer {
         for draw in draws
             .iter_mut()
             .chain(std::iter::once(&mut self.ground))
+            .chain(self.terrain_draws.iter_mut())
             .chain(self.photos.iter_mut())
             .chain(self.runway.iter_mut())
             .chain(self.objects.iter_mut())
@@ -1123,6 +1135,9 @@ impl Renderer {
                 pass.draw_indexed(0..draw.count, 0, 0..1);
             };
             draw_one(&mut pass, &self.ground);
+            for draw in &self.terrain_draws {
+                draw_one(&mut pass, draw);
+            }
             for draw in &self.photos {
                 draw_one(&mut pass, draw);
             }

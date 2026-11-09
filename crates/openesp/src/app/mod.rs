@@ -324,7 +324,10 @@ impl App {
                         mesh
                     });
                     let photos = terrain::photos(&self.arguments, terrain.as_deref())?;
-                    let render_terrain = terrain.as_deref().map(terrain::render_mesh);
+                    let render_terrain = terrain
+                        .as_deref()
+                        .zip(self.terrain_stream.as_ref())
+                        .map(|(mesh, stream)| stream.render_mesh(mesh));
                     if let (Some(flight), Some(mesh)) = (&mut self.flight, &terrain) {
                         flight.set_ground(terrain::ground(mesh.clone(), &scene));
                     }
@@ -503,8 +506,8 @@ impl App {
                         flight.current.position.x,
                     )
                 });
-            if let Some(mesh) = stream.update(position.x, position.z) {
-                renderer.update_terrain(&terrain::render_mesh(&mesh))?;
+            if let Some((mesh, render)) = stream.update(position.x, position.z) {
+                renderer.update_terrain(&render)?;
                 if let Some(flight) = &mut self.flight {
                     flight.set_terrain(mesh);
                 }

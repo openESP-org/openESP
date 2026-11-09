@@ -44,7 +44,11 @@ pub(super) fn ground(
     ground
 }
 
-type LoadedTerrain = Result<(Arc<esp_terrain::mesh::Mesh>, [f64; 2])>;
+type LoadedTerrain = Result<(
+    Arc<esp_terrain::mesh::Mesh>,
+    esp_render::TerrainMesh,
+    [f64; 2],
+)>;
 
 pub(super) struct Stream {
     root: PathBuf,
@@ -57,14 +61,18 @@ pub(super) struct Stream {
 }
 
 impl Stream {
-    pub fn update(&mut self, east: f64, north: f64) -> Option<Arc<esp_terrain::mesh::Mesh>> {
+    pub fn update(
+        &mut self,
+        east: f64,
+        north: f64,
+    ) -> Option<(Arc<esp_terrain::mesh::Mesh>, esp_render::TerrainMesh)> {
         let mut ready = None;
         if let Some(receiver) = &self.pending {
             match receiver.try_recv() {
-                Ok(Ok((mesh, centre))) => {
+                Ok(Ok((mesh, render, centre))) => {
                     self.centre = centre;
                     self.pending = None;
-                    ready = Some(mesh);
+                    ready = Some((mesh, render));
                 }
                 Ok(Err(error)) => {
                     eprintln!("terrain streaming: {error:#}");
@@ -109,12 +117,17 @@ impl Stream {
                         "no elevation data near {lat:.4}, {lon:.4}"
                     );
                     classify(&mut mesh, &root, latitude, longitude, lat, lon);
-                    Ok((Arc::new(mesh), centre))
+                    let render = render_mesh(&mesh, &root);
+                    Ok((Arc::new(mesh), render, centre))
                 })();
                 let _ = sender.send(result);
             });
         }
         ready
+    }
+
+    pub fn render_mesh(&self, mesh: &esp_terrain::mesh::Mesh) -> esp_render::TerrainMesh {
+        render_mesh(mesh, &self.root)
     }
 }
 
@@ -223,7 +236,30 @@ fn classify(
     }
 }
 
-pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::TerrainMesh {
+fn render_mesh(mesh: &esp_terrain::mesh::Mesh, root: &std::path::Path) -> esp_render::TerrainMesh {
+    let key = |texture: esp_formats::bgl::land_lookup::TextureSet| {
+        u32::from(texture.number) | (u32::from(texture.region) << 16)
+    };
+    let mut textures = std::collections::HashMap::new();
+    let directory = root.join("Scenery/World/texture");
+    let mut seen = std::collections::HashSet::new();
+    for texture in mesh.texture_sets.iter().flatten() {
+        let id = key(*texture);
+        if !seen.insert(id) || texture.region >= 26 {
+            continue;
+        }
+        let filename = format!(
+            "{:03}{}2su1.bmp",
+            texture.number,
+            char::from(b'a' + texture.region)
+        );
+        if let Ok(path) = esp_assets::resolve_texture(&directory, &filename)
+            && let Ok(bytes) = std::fs::read(path)
+            && let Ok(texture) = esp_assets::texture::Texture::from_bytes(&bytes, true)
+        {
+            textures.insert(id, texture);
+        }
+    }
     esp_render::TerrainMesh {
         vertices: mesh
             .vertices
@@ -238,6 +274,12 @@ pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::Terrain
             .map(DVec3::from_array)
             .collect(),
         land_classes: mesh.land_classes.clone(),
+        texture_sets: mesh
+            .texture_sets
+            .iter()
+            .map(|texture| texture.map(key))
+            .collect(),
+        textures,
         indices: mesh.indices.clone(),
     }
 }
@@ -345,9 +387,9 @@ mod tests {
         };
         assert!(stream.update(20_000.0, 0.0).is_none());
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mesh = loop {
-            if let Some(mesh) = stream.update(20_000.0, 0.0) {
-                break mesh;
+        let (mesh, render) = loop {
+            if let Some(loaded) = stream.update(20_000.0, 0.0) {
+                break loaded;
             }
             assert!(Instant::now() < deadline, "terrain worker did not finish");
             std::thread::sleep(Duration::from_millis(10));
@@ -355,6 +397,7 @@ mod tests {
         assert!(mesh.height(40_000.0, 0.0).is_some());
         assert!(mesh.land_classes.iter().any(Option::is_some));
         assert!(mesh.texture_sets.iter().any(Option::is_some));
+        assert!(!render.textures.is_empty());
         assert!(initial.height(40_000.0, 0.0).is_none());
         for point in [[1000.0, 2000.0], [15_000.0, -5000.0], [20_000.0, 1000.0]] {
             let before = initial.height(point[0], point[1]).unwrap();
