@@ -83,7 +83,22 @@ pub fn wind(variables: &mut Variables) -> Result<DVec3> {
     let speed = variables
         .read(&Reference::new('A', "AMBIENT WIND VELOCITY", Some("knots")))?
         .number()?;
-    vector(direction, speed)
+    let peak = variables
+        .read(&Reference::new('A', "OPENESP WIND GUST", Some("knots")))
+        .ok()
+        .and_then(|value| value.number().ok())
+        .filter(|value| value.is_finite() && *value > speed)
+        .unwrap_or(speed);
+    let time = variables
+        .read(&Reference::new('E', "SIMULATION TIME", Some("seconds")))
+        .ok()
+        .and_then(|value| value.number().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    // METAR provides a mean and a peak, not the actual gust time series.
+    // Use a bounded, smooth deterministic approximation around the mean.
+    let variation = ((time * 0.41).sin() + 0.5 * (time * 0.19).sin()) / 1.5;
+    vector(direction, (speed + (peak - speed) * variation).max(0.0))
 }
 
 pub fn publish(state: &State, wind: DVec3, variables: &mut Variables) {
@@ -103,6 +118,47 @@ pub fn publish(state: &State, wind: DVec3, variables: &mut Variables) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_gust_changes_air_relative_speed_and_returns_to_steady_wind() {
+        use crate::flight::Flight;
+        use esp_script::Value;
+        let mut variables = Variables::default();
+        variables.set_number("AMBIENT WIND DIRECTION", "degrees", 0.0);
+        variables.set_number("AMBIENT WIND VELOCITY", "knots", 20.0);
+        variables.set_number("OPENESP WIND GUST", "knots", 30.0);
+        let state = State {
+            velocity: DVec3::X * 50.0,
+            ..State::default()
+        };
+        let mut minimum = f64::INFINITY;
+        let mut maximum = 0.0f64;
+        for step in 0..300 {
+            variables.set(
+                'E',
+                "SIMULATION TIME",
+                Some("seconds"),
+                Value::Number(f64::from(step) / 10.0),
+            );
+            Flight::publish(&state, &mut variables).unwrap();
+            let airspeed = variables
+                .read(&Reference::new(
+                    'A',
+                    "AIRSPEED TRUE",
+                    Some("meters per second"),
+                ))
+                .unwrap()
+                .number()
+                .unwrap();
+            minimum = minimum.min(airspeed);
+            maximum = maximum.max(airspeed);
+        }
+        assert!(maximum - minimum > 5.0, "gust did not affect airspeed");
+        assert!(minimum >= 50.0 + 10.0 * 1852.0 / 3600.0 - 1e-6);
+        assert!(maximum <= 50.0 + 30.0 * 1852.0 / 3600.0 + 1e-6);
+        variables.set_number("OPENESP WIND GUST", "knots", 20.0);
+        assert!((wind(&mut variables).unwrap().length() - 20.0 * 1852.0 / 3600.0).abs() < 1e-9);
+    }
 
     #[test]
     fn nonstandard_weather_updates_instruments_and_barometric_setting() {

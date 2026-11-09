@@ -50,6 +50,11 @@ pub(super) fn apply(variables: &mut Variables, report: &esp_weather::Observation
     }
     if let Some(speed) = report.wind_knots {
         variables.set_number("AMBIENT WIND VELOCITY", "knots", speed);
+        variables.set_number(
+            "OPENESP WIND GUST",
+            "knots",
+            report.gust_knots.unwrap_or(speed).max(speed),
+        );
     }
     if let Some(visibility) = report.visibility_m {
         variables.set_number("AMBIENT VISIBILITY", "meters", visibility);
@@ -78,9 +83,11 @@ mod tests {
     fn observation_drives_flight_wind_atmosphere_and_visibility() {
         let mut variables = Variables::default();
         variables.set_number("WORLD ORIGIN ALTITUDE", "meters", 1000.0);
-        let report =
-            esp_weather::parse("METAR TEST 081020Z 27020KT 4000 BKN020 10/05 Q1000", "TEST")
-                .unwrap();
+        let report = esp_weather::parse(
+            "METAR TEST 081020Z 27020G30KT 4000 BKN020 10/05 Q1000",
+            "TEST",
+        )
+        .unwrap();
         apply(&mut variables, &report);
         let wind = weather::wind(&mut variables).unwrap();
         assert!((wind.y - 20.0 * 1852.0 / 3600.0).abs() < 1e-6);
@@ -97,6 +104,14 @@ mod tests {
         assert_eq!(visibility, 4000.0);
         assert_eq!(
             variables
+                .read(&Reference::new('A', "OPENESP WIND GUST", Some("knots")))
+                .unwrap()
+                .number()
+                .unwrap(),
+            30.0
+        );
+        assert_eq!(
+            variables
                 .read(&Reference::new('A', "OPENESP CLOUD BASE:1", Some("meters")))
                 .unwrap()
                 .number()
@@ -105,6 +120,14 @@ mod tests {
         );
         let clear = esp_weather::parse("TEST 081030Z 00000KT CAVOK 12/05 Q1000", "TEST").unwrap();
         apply(&mut variables, &clear);
+        assert_eq!(
+            variables
+                .read(&Reference::new('A', "OPENESP WIND GUST", Some("knots")))
+                .unwrap()
+                .number()
+                .unwrap(),
+            0.0
+        );
         assert!(
             render_state(&mut variables)
                 .clouds

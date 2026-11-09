@@ -119,7 +119,8 @@ pressure, temperature and visibility are applied. Up to three METAR cloud
 layers drive procedural ray-marched sky volumes at station-relative heights;
 the same volumes obscure scene geometry up to each fragment's distance. This
 forward-rendered approach has not yet been performance tuned; cloud shadows,
-cloud motion and gust physics are not yet implemented.
+cloud motion are not yet implemented. METAR gust peaks drive a bounded,
+deterministic approximation of wind variation in the flight model.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.
