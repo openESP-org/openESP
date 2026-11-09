@@ -916,6 +916,7 @@ impl ApplicationHandler for App {
 }
 
 mod audio;
+mod installed_airport;
 mod scenery_folder;
 mod spawn;
 mod terrain;
@@ -923,6 +924,7 @@ mod terrain;
 pub(crate) fn run() -> Result<()> {
     let mut arguments = Arguments::parse();
     scenery_folder::configure(&mut arguments)?;
+    installed_airport::configure(&mut arguments)?;
     spawn::configure(&mut arguments)?;
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;

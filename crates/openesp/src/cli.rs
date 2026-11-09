@@ -3,6 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
+#[command(group(clap::ArgGroup::new("flight_start").args(["airspeed", "runway", "parking"]).multiple(true)))]
 pub(crate) struct Arguments {
     #[arg(long)]
     pub(crate) aircraft: PathBuf,
@@ -18,13 +19,12 @@ pub(crate) struct Arguments {
     pub(crate) scenery: Option<PathBuf>,
     #[arg(
         long,
-        requires = "scenery_source",
-        help = "Select an airport by ICAO code from the BGL"
+        help = "Select an airport by ICAO code from scenery or the installed simulator"
     )]
     pub(crate) airport: Option<String>,
-    #[arg(long, requires_all = ["airport", "airspeed"], conflicts_with_all = ["parking", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a runway end, for example 06 or 24L")]
+    #[arg(long, requires = "airport", conflicts_with_all = ["parking", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a runway end, for example 06 or 24L")]
     pub(crate) runway: Option<String>,
-    #[arg(long, requires_all = ["airport", "airspeed"], conflicts_with_all = ["runway", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a zero-based parking stand index from the airport BGL")]
+    #[arg(long, requires = "airport", conflicts_with_all = ["runway", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a zero-based parking stand index from the airport BGL")]
     pub(crate) parking: Option<usize>,
     #[arg(long, help = "Load placed library objects from a scenery BGL")]
     pub(crate) scenery_objects: Option<PathBuf>,
@@ -48,7 +48,7 @@ pub(crate) struct Arguments {
     pub(crate) airspeed: Option<f64>,
     #[arg(
         long,
-        requires = "airspeed",
+        requires = "flight_start",
         help = "Start with the configured engines running at idle"
     )]
     pub(crate) engines_running: bool,

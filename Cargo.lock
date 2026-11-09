@@ -828,6 +828,7 @@ name = "esp-nav"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "esp-formats",
  "esp-physics",
  "esp-script",
  "glam 0.30.10",

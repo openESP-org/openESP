@@ -7,4 +7,5 @@ edition = "2024"
 anyhow = "1"
 esp-script = { path = "../esp-script" }
 esp-physics = { path = "../esp-physics" }
+esp-formats = { path = "../esp-formats" }
 glam = "0.30"

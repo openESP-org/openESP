@@ -127,7 +127,7 @@ mod tests {
         assert!(Arguments::try_parse_from(both).is_err());
         assert!(
             Arguments::try_parse_from(["openesp", "--aircraft", "test", "--airport", "LTFO"])
-                .is_err()
+                .is_ok()
         );
         let empty = tempfile::tempdir().unwrap();
         assert!(discover(empty.path(), None).is_err());

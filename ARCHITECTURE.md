@@ -23,7 +23,7 @@ engine layer
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
     esp-terrain    elevation mesh, land class and photoreal ground
-    esp-nav        VOR, ILS, DME and waypoint facilities
+    esp-nav        airports, VOR, ILS, DME and waypoint facilities
     esp-script     gauge calculator and script interpreter
 
 foundation layer
@@ -77,6 +77,9 @@ the app because they exercise flight and weather together.
 and object loaders before `app/spawn.rs` resolves the selected runway or parking
 stand. It reads content without modifying the add-on. Airport surface and
 object loading will move together into `esp-scenery` as that domain grows.
+`esp-nav::airports` finds stock airports in installed regional APX files; the
+app uses the selected airport for scenery and runway or parking starts. Add-on
+priority and a persistent airport index are not yet implemented.
 Placed objects use the scene's mean-sea-level datum, and above-ground placements
 sample the same terrain and airport surface footprints used by flight contact.
 References absent from add-on libraries are resolved against the selected
