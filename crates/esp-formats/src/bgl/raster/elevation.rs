@@ -23,11 +23,10 @@ impl Raster<'_> {
         } else {
             (1.0, 0.0, self.data)
         };
-        let size = usize::from(self.columns) * usize::from(self.rows) * 2;
         let decoded = if self.data_compression == Compression::Ptc {
             expand_ptc(data, self.columns, self.rows)?
         } else {
-            codec::decode(self.data_compression, data, size)?
+            codec::decode_raster16(self.data_compression, data, self.columns, self.rows)?
         };
         let metres: Vec<_> = decoded
             .as_chunks::<2>()

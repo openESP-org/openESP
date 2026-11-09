@@ -9,6 +9,30 @@ pub(super) fn decode_ptc_elevation(input: &[u8]) -> Result<Vec<u8>, Error> {
     ptc::elevation(input)
 }
 
+pub(super) fn decode_raster16(
+    compression: Compression,
+    input: &[u8],
+    columns: u16,
+    rows: u16,
+) -> Result<Vec<u8>, Error> {
+    let size = usize::from(columns) * usize::from(rows) * 2;
+    match compression {
+        Compression::BitPack => bitpack::decode16(input, columns, rows),
+        Compression::BitPackLz1 | Compression::BitPackLz2 => {
+            let intermediate_size =
+                u32::from_le_bytes(input.get(..4).ok_or(Error::Truncated)?.try_into().unwrap())
+                    as usize;
+            let intermediate = lz(
+                &input[4..],
+                intermediate_size,
+                compression == Compression::BitPackLz2,
+            )?;
+            bitpack::decode16(&intermediate, columns, rows)
+        }
+        _ => decode(compression, input, size),
+    }
+}
+
 const LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]

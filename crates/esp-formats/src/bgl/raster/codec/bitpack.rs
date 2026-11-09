@@ -1,14 +1,28 @@
-//! FSX 8-bit quadtree bit packing; see the flightsimlib attribution in codec.rs.
+//! FSX quadtree bit packing; see the flightsimlib attribution in codec.rs.
 use super::{Bits, Error};
 
 struct Image {
-    pixels: Vec<u8>,
+    pixels: Vec<u16>,
     width: usize,
     shift: usize,
     max_bits: usize,
 }
 
 pub(super) fn decode(input: &[u8], columns: u16, rows: u16) -> Result<Vec<u8>, Error> {
+    Ok(decode_values(input, columns, rows)?
+        .into_iter()
+        .map(|value| value as u8)
+        .collect())
+}
+
+pub(super) fn decode16(input: &[u8], columns: u16, rows: u16) -> Result<Vec<u8>, Error> {
+    Ok(decode_values(input, columns, rows)?
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect())
+}
+
+fn decode_values(input: &[u8], columns: u16, rows: u16) -> Result<Vec<u16>, Error> {
     if columns == 0 || rows == 0 {
         return Err(Error::InvalidData);
     }
@@ -26,6 +40,13 @@ pub(super) fn decode(input: &[u8], columns: u16, rows: u16) -> Result<Vec<u8>, E
     };
     let width = usize::from(columns);
     let height = usize::from(rows);
+    if width
+        .checked_mul(height)
+        .and_then(|size| size.checked_mul(2))
+        .is_none_or(|size| size > super::LIMIT)
+    {
+        return Err(Error::Limit);
+    }
     let mut image = Image {
         pixels: vec![0; width * height],
         width,
@@ -80,7 +101,7 @@ impl Image {
                 } else {
                     bits.read(next.min(self.max_bits))? as u64
                 };
-                self.pixels[row * self.width + col] = (add + (value << self.shift)) as u8;
+                self.pixels[row * self.width + col] = (add + (value << self.shift)) as u16;
             }
         }
         Ok(())
@@ -101,5 +122,20 @@ mod tests {
         }
         input[0] = 255;
         assert!(decode(&input, 9, 10).is_err());
+    }
+
+    #[test]
+    fn retains_high_bits_for_elevation_samples() {
+        let mut input = vec![2, 0, 0x34, 0x12, 0];
+        input.extend([0; 8]);
+        let output = decode16(&input, 9, 10).unwrap();
+        assert_eq!(output.len(), 180);
+        assert!(
+            output
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|sample| *sample == [0x34, 0x12])
+        );
     }
 }
