@@ -12,6 +12,14 @@ use std::sync::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VoiceId(pub u64);
 
+/// Listener-relative position for a sound source, in metres and stereo pan.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spatial {
+    pub distance: f64,
+    /// -1 is left, +1 is right.
+    pub pan: f64,
+}
+
 pub enum Command {
     Add {
         id: VoiceId,
@@ -25,6 +33,10 @@ pub enum Command {
         inside: bool,
         active: bool,
     },
+    Spatial {
+        id: VoiceId,
+        position: Option<Spatial>,
+    },
     Remove(VoiceId),
 }
 
@@ -36,7 +48,7 @@ enum Message {
 fn send_controls(sender: &SyncSender<Message>, commands: Vec<Command>) -> Result<()> {
     for command in &commands {
         ensure!(
-            matches!(command, Command::Set { .. }),
+            matches!(command, Command::Set { .. } | Command::Spatial { .. }),
             "audio control batch contains a non-control command"
         );
         validate_command(command)?;
@@ -55,6 +67,7 @@ struct Voice {
     level: f64,
     inside: bool,
     active: bool,
+    spatial: Option<Spatial>,
 }
 
 /// A deterministic mixer; callers can render to a device or an offline buffer.
@@ -115,6 +128,13 @@ fn validate_command(command: &Command) -> Result<()> {
             }
         }
         Command::Set { level, .. } => ensure!(level.is_finite(), "invalid sound control"),
+        Command::Spatial { position, .. } => ensure!(
+            position.is_none_or(|p| p.distance.is_finite()
+                && p.distance >= 0.0
+                && p.pan.is_finite()
+                && (-1.0..=1.0).contains(&p.pan)),
+            "invalid sound position"
+        ),
         Command::Remove(_) => {}
     }
     Ok(())
@@ -159,6 +179,7 @@ impl Mixer {
                     level: 0.0,
                     inside: true,
                     active: false,
+                    spatial: None,
                 });
             }
             Command::Set {
@@ -177,6 +198,11 @@ impl Mixer {
                 }
             }
             Command::Remove(id) => self.voices.retain(|voice| voice.id != id),
+            Command::Spatial { id, position } => {
+                if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+                    voice.spatial = position;
+                }
+            }
         }
         Ok(())
     }
@@ -198,11 +224,29 @@ impl Mixer {
                 .as_deref()
                 .map_or(100.0, |p| envelope(p, voice.level, 100.0));
             // Authored volume 50 represents -3 dB, so convert power percentage to amplitude.
+            let distance_gain = voice.spatial.map_or(1.0, |position| {
+                let full = voice
+                    .parameters
+                    .full_scale_distance
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(100.0);
+                (full / position.distance.max(full)) as f32
+            });
             let gain = if audible {
                 (volume.clamp(0.0, 100.0) / 100.0).sqrt() as f32
             } else {
                 0.0
-            };
+            } * distance_gain;
+            let authored_pan = voice
+                .parameters
+                .panning
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+                / 10_000.0;
+            let pan = (authored_pan + voice.spatial.map_or(0.0, |position| position.pan))
+                .clamp(-1.0, 1.0) as f32;
+            let left_gain = (1.0 - pan).sqrt();
+            let right_gain = (1.0 + pan).sqrt();
             let pitch = voice
                 .parameters
                 .pitch_envelope
@@ -241,8 +285,8 @@ impl Mixer {
                 if self.channels == 1 {
                     frame[0] += (left + right) * 0.5 * gain;
                 } else {
-                    frame[0] += left * gain;
-                    frame[1] += right * gain;
+                    frame[0] += left * gain * left_gain;
+                    frame[1] += right * gain * right_gain;
                 }
                 voice.position += increment;
                 if voice.looping {
@@ -411,6 +455,74 @@ mod tests {
             sample_rate: rate,
             samples: values.to_vec(),
         })
+    }
+
+    #[test]
+    fn spatial_sound_follows_distance_pan_and_authored_full_scale() {
+        let mut mixer = Mixer::new(48_000, 2).unwrap();
+        mixer
+            .command(Command::Add {
+                id: VoiceId(7),
+                sample: sample(&[0.2], 1, 48_000),
+                parameters: Box::new(Parameters {
+                    full_scale_distance: Some(10.0),
+                    ..Default::default()
+                }),
+                looping: true,
+            })
+            .unwrap();
+        mixer
+            .command(Command::Set {
+                id: VoiceId(7),
+                level: 0.5,
+                inside: false,
+                active: true,
+            })
+            .unwrap();
+        mixer
+            .command(Command::Spatial {
+                id: VoiceId(7),
+                position: Some(Spatial {
+                    distance: 10.0,
+                    pan: 1.0,
+                }),
+            })
+            .unwrap();
+        let mut near = [0.0; 2];
+        mixer.render(&mut near);
+        assert!(near[0].abs() < 1e-7 && near[1] > 0.2);
+        mixer
+            .command(Command::Spatial {
+                id: VoiceId(7),
+                position: Some(Spatial {
+                    distance: 100.0,
+                    pan: 1.0,
+                }),
+            })
+            .unwrap();
+        let mut far = [0.0; 2];
+        mixer.render(&mut far);
+        assert!((far[1] / near[1] - 0.1).abs() < 1e-6);
+        assert!(
+            mixer
+                .command(Command::Spatial {
+                    id: VoiceId(7),
+                    position: Some(Spatial {
+                        distance: f64::NAN,
+                        pan: 0.0
+                    })
+                })
+                .is_err()
+        );
+        mixer
+            .command(Command::Spatial {
+                id: VoiceId(7),
+                position: None,
+            })
+            .unwrap();
+        let mut centred = [0.0; 2];
+        mixer.render(&mut centred);
+        assert!((centred[0] - centred[1]).abs() < 1e-7);
     }
     fn add(mixer: &mut Mixer, sample: Arc<Sample>, parameters: Parameters, looping: bool) {
         mixer

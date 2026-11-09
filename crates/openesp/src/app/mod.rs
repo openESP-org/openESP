@@ -528,8 +528,20 @@ impl App {
         }
         self.apply_variable_overrides();
         self.update_flight_pose(frame.alpha)?;
-        if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.update(&mut self.variables, self.arguments.cockpit)
+        if let (Some(audio), Some(renderer)) = (&mut self.audio, &self.renderer)
+            && let Err(error) = audio.update(
+                &mut self.variables,
+                self.arguments.cockpit,
+                &audio::Listener {
+                    position: self.camera.position,
+                    right: ((self.camera.frame * Vec3::Y)
+                        .cross(self.camera.forward())
+                        .normalize_or_zero())
+                    .as_dvec3(),
+                    aircraft_origin: renderer.aircraft_origin,
+                    aircraft_rotation: renderer.aircraft_rotation,
+                },
+            )
             && self.reported_diagnostics.insert("audio control".into())
         {
             eprintln!("audio control: {error:#}");

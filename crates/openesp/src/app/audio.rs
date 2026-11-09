@@ -2,28 +2,40 @@
 use anyhow::Result;
 use esp_assets::sound::SoundSet;
 use esp_audio::{
-    Command, Output,
+    Command, Output, Spatial,
     engine::{EngineBank, EngineState},
 };
 use esp_script::{Host, Reference};
 use esp_sim::variables::Variables;
+use glam::{DVec3, Mat4};
 use std::path::Path;
 
 pub(super) struct Prepared {
-    banks: Vec<(u32, EngineBank)>,
+    banks: Vec<(u32, EngineBank, DVec3)>,
     commands: Vec<Command>,
 }
 
 impl Prepared {
     pub fn load(path: &Path, variant: u32, root: Option<&Path>) -> Result<Self> {
         let sound = SoundSet::load(path, variant, root)?;
+        let data = esp_assets::flight::FlightData::load(path, variant)?;
+        let datum = esp_formats::cfg::aircraft::ReferencePoints::from_config(&data.configuration)?
+            .datum_feet
+            .unwrap_or([0.0; 3]);
+        let mut positions = [DVec3::ZERO; 4];
+        for engine in esp_formats::cfg::engine::engines(&data.configuration)? {
+            if let Some(position) = positions.get_mut(engine.index as usize) {
+                let [x, y, z] = engine.position_feet;
+                *position = DVec3::new(y + datum[1], z + datum[2], x + datum[0]) * 0.3048;
+            }
+        }
         let mut commands = Vec::new();
         let mut banks = Vec::new();
         for engine in 1..=4 {
             match EngineBank::prepare(&sound, engine, commands.len() as u64) {
                 Ok((bank, loaded)) if !loaded.is_empty() => {
                     commands.extend(loaded);
-                    banks.push((engine, bank));
+                    banks.push((engine, bank, positions[(engine - 1) as usize]));
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!("sound engine {engine}: {error:#}"),
@@ -50,21 +62,51 @@ impl Prepared {
 
 pub(super) struct Runtime {
     output: Output,
-    banks: Vec<(u32, EngineBank)>,
+    banks: Vec<(u32, EngineBank, DVec3)>,
     previous: [Option<EngineState>; 4],
 }
 
+pub(super) struct Listener {
+    pub position: DVec3,
+    pub right: DVec3,
+    pub aircraft_origin: DVec3,
+    pub aircraft_rotation: Mat4,
+}
+
+impl Listener {
+    fn relative(&self, engine: DVec3) -> Spatial {
+        let source = self.aircraft_origin
+            + self
+                .aircraft_rotation
+                .transform_vector3(engine.as_vec3())
+                .as_dvec3();
+        let offset = source - self.position;
+        let distance = offset.length();
+        let pan = offset
+            .normalize_or_zero()
+            .dot(self.right.normalize_or_zero())
+            .clamp(-1.0, 1.0);
+        Spatial { distance, pan }
+    }
+}
+
 impl Runtime {
-    pub fn update(&mut self, variables: &mut Variables, inside: bool) -> Result<()> {
+    pub fn update(
+        &mut self,
+        variables: &mut Variables,
+        inside: bool,
+        listener: &Listener,
+    ) -> Result<()> {
         while let Some(error) = self.output.try_error() {
             eprintln!("audio output: {error}");
         }
         let mut commands = Vec::new();
         let mut states = self.previous;
-        for (engine, bank) in &self.banks {
+        for (engine, bank, position) in &self.banks {
             let index = (*engine - 1) as usize;
             let state = engine_state(variables, *engine, inside);
             commands.extend(bank.update(self.previous[index], state)?);
+            commands.extend(bank.spatial((!inside).then(|| listener.relative(*position))));
             states[index] = Some(state);
         }
         self.output.try_controls(commands)?;
@@ -106,6 +148,22 @@ fn engine_state(variables: &mut Variables, engine: u32, inside: bool) -> EngineS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_tracks_rotated_engine_positions() {
+        let mut listener = Listener {
+            position: DVec3::ZERO,
+            right: DVec3::X,
+            aircraft_origin: DVec3::new(0.0, 0.0, 10.0),
+            aircraft_rotation: Mat4::IDENTITY,
+        };
+        let right = listener.relative(DVec3::new(5.0, 0.0, 0.0));
+        assert!((right.distance - 125.0_f64.sqrt()).abs() < 1e-6);
+        assert!(right.pan > 0.4);
+        listener.aircraft_rotation = Mat4::from_rotation_y(std::f32::consts::PI);
+        let left = listener.relative(DVec3::new(5.0, 0.0, 0.0));
+        assert!(left.pan < -0.4);
+    }
     #[test]
     fn engine_state_tracks_spool_combustion_and_view() {
         let mut variables = Variables::default();
@@ -137,21 +195,42 @@ mod tests {
         let mut variables = Variables::default();
         variables.set_number("TURB ENG N1:1", "percent", 50.0);
         variables.set_number("GENERAL ENG COMBUSTION:1", "bool", 1.0);
-        let (engine, bank) = &prepared.banks[0];
+        let (engine, bank, _) = &prepared.banks[0];
         let inside = engine_state(&mut variables, *engine, true);
         for command in bank.update(None, inside).unwrap() {
             mixer.command(command).unwrap();
         }
-        let mut samples = vec![0.0; 96_000];
+        let mut samples = vec![0.0; 144_000];
         mixer.render(&mut samples[..48_000]);
         let outside = engine_state(&mut variables, *engine, false);
         for command in bank.update(Some(inside), outside).unwrap() {
             mixer.command(command).unwrap();
         }
-        mixer.render(&mut samples[48_000..]);
+        for command in bank.spatial(Some(Spatial {
+            distance: 50.0,
+            pan: 1.0,
+        })) {
+            mixer.command(command).unwrap();
+        }
+        mixer.render(&mut samples[48_000..96_000]);
+        for command in bank.spatial(Some(Spatial {
+            distance: 5_000.0,
+            pan: 1.0,
+        })) {
+            mixer.command(command).unwrap();
+        }
+        mixer.render(&mut samples[96_000..]);
         assert!(samples[..48_000].iter().any(|sample| sample.abs() > 0.0001));
-        assert!(samples[48_000..].iter().any(|sample| sample.abs() > 0.0001));
-        assert_ne!(&samples[..48_000], &samples[48_000..]);
+        assert!(
+            samples[48_000..96_000]
+                .iter()
+                .any(|sample| sample.abs() > 0.0001)
+        );
+        assert_ne!(&samples[..48_000], &samples[48_000..96_000]);
+        let rms = |values: &[f32]| {
+            (values.iter().map(|sample| sample * sample).sum::<f32>() / values.len() as f32).sqrt()
+        };
+        assert!(rms(&samples[96_000..]) < rms(&samples[48_000..96_000]) * 0.1);
         let mut wav = Vec::with_capacity(44 + samples.len() * 2);
         let byte_length = (samples.len() * 2) as u32;
         wav.extend(b"RIFF");

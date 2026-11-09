@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use esp_assets::sound::SoundSet;
 use esp_formats::cfg::sound::EngineEvent;
 
-use crate::{Command, VoiceId};
+use crate::{Command, Spatial, VoiceId};
 
 const EVENTS: [EngineEvent; 9] = [
     EngineEvent::Combustion,
@@ -75,6 +75,13 @@ fn layer_enabled(event: EngineEvent, flags: u32, conditions: LayerConditions) ->
 }
 
 impl EngineBank {
+    /// Update all layers of this engine to the same listener-relative position.
+    pub fn spatial(&self, position: Option<Spatial>) -> Vec<Command> {
+        self.voices
+            .iter()
+            .map(|(_, id, _)| Command::Spatial { id: *id, position })
+            .collect()
+    }
     /// Prepare every configured sound list for a one-based engine number.
     /// Returns commands separately so they can be sent to either an offline
     /// mixer or a device, with queue errors handled by the caller.
