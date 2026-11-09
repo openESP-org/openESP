@@ -449,6 +449,7 @@ impl Renderer {
                 view_projection: Mat4::IDENTITY.to_cols_array_2d(),
                 inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
                 sun: [0.0, 1.0, 0.0, 0.0],
+                lighting: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -646,7 +647,12 @@ impl Renderer {
                                     ]
                                 });
                         settings[3] = emissive.as_ref().map_or(0.0, |(_, emissive_flip, _)| {
-                            if *emissive_flip == flip_v { 1.0 } else { 2.0 }
+                            material::emissive_mode(
+                                material.source.flags,
+                                material.source.flags2,
+                                material.pbr.is_some(),
+                                *emissive_flip != flip_v,
+                            )
                         });
                         settings
                     },
@@ -1066,6 +1072,7 @@ impl Renderer {
         camera: &Camera,
         cockpit: bool,
         sun: Vec3,
+        panel_lights: bool,
         screenshot: Option<&Path>,
     ) -> Result<bool> {
         let frame = match self.surface.get_current_texture() {
@@ -1090,6 +1097,7 @@ impl Renderer {
             view_projection: matrix.to_cols_array_2d(),
             inverse_view_projection: matrix.inverse().to_cols_array_2d(),
             sun: [sun.x, sun.y, sun.z, camera.position.y.max(0.0) as f32],
+            lighting: [f32::from(panel_lights), 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));

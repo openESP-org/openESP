@@ -560,6 +560,22 @@ impl Variables {
             "TOGGLE_TAXI_LIGHTS" => self.toggle("LIGHT TAXI"),
             "TOGGLE_NAV_LIGHTS" => self.toggle("LIGHT NAV"),
             "STROBES_TOGGLE" => self.toggle("LIGHT STROBE"),
+            "PANEL_LIGHTS_TOGGLE" => self.toggle("LIGHT PANEL"),
+            "PANEL_LIGHTS_ON" | "PANEL_LIGHTS_OFF" | "PANEL_LIGHTS_SET" => {
+                if !value.is_finite() {
+                    return Err(Error::Number);
+                }
+                self.set_number(
+                    "LIGHT PANEL",
+                    "bool",
+                    f64::from(match name {
+                        "PANEL_LIGHTS_ON" => true,
+                        "PANEL_LIGHTS_OFF" => false,
+                        _ => value != 0.0,
+                    }),
+                );
+                Ok(())
+            }
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
             "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),

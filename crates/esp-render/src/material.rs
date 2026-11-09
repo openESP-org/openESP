@@ -2,6 +2,30 @@ use anyhow::{Result, bail};
 use esp_assets::texture;
 use std::{collections::HashMap, path::Path};
 
+/// Encoding consumed by the material shader: mode, user control, and UV flip.
+pub(super) fn emissive_mode(flags: u32, flags2: u32, pbr: bool, flipped: bool) -> f32 {
+    let (mode, user) = if pbr {
+        (0, false)
+    } else if flags2 & 0x200 != 0 {
+        (0, true)
+    } else if flags2 & 0x100 != 0 {
+        (0, false)
+    } else if flags2 & 0x80 != 0 {
+        (3, true)
+    } else if flags2 & 0x40 != 0 {
+        (3, false)
+    } else if flags2 & 0x20 != 0 {
+        (2, true)
+    } else if flags2 & 0x10 != 0 {
+        (1, true)
+    } else if flags & 0x00800000 != 0 {
+        (2, false)
+    } else {
+        (1, false)
+    };
+    (1 + mode * 2 + u32::from(user) * 8 + u32::from(flipped)) as f32
+}
+
 pub(super) fn linear_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -123,6 +147,15 @@ impl PipelineKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decodes_legacy_emissive_modes_and_panel_control() {
+        assert_eq!(emissive_mode(0, 0, false, false), 3.0);
+        assert_eq!(emissive_mode(0, 0x100, false, false), 1.0);
+        assert_eq!(emissive_mode(0x800000, 0, false, true), 6.0);
+        assert_eq!(emissive_mode(0, 0x80, false, false), 15.0);
+        assert_eq!(emissive_mode(0, 0x10, false, true), 12.0);
+        assert_eq!(emissive_mode(0, 0, true, false), 1.0);
+    }
     #[test]
     fn color_textures_and_material_data_use_different_transfer_functions() {
         for format in [

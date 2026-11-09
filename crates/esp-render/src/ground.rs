@@ -378,6 +378,12 @@ mod tests {
                 }), multiview_mask: None, cache: None,
             });
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
+            let emissive_day = std::env::var_os("OPENESP_EMISSIVE_DAY").is_some();
+            let panel_on = std::env::var_os("OPENESP_PANEL_LIGHT_ON").is_some();
+            let encoded_mode = std::env::var("OPENESP_EMISSIVE_MODE")
+                .ok()
+                .map(|value| value.parse::<f32>().unwrap())
+                .unwrap_or(1.0);
             let camera = crate::sky::CameraUniform {
                 view_projection: Mat4::from_cols_array_2d(&[
                     [1.0 / 600.0, 0.0, 0.0, 0.0],
@@ -387,11 +393,12 @@ mod tests {
                 ])
                 .to_cols_array_2d(),
                 inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
-                sun: if emissive_path.is_some() {
+                sun: if emissive_path.is_some() && !emissive_day {
                     [0.0, -1.0, 0.0, 0.0]
                 } else {
                     [0.0, 1.0, 0.0, 0.0]
                 },
+                lighting: [f32::from(panel_on), 0.0, 0.0, 0.0],
             };
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -470,7 +477,7 @@ mod tests {
                 .unwrap()
                 .create_view(&Default::default());
                 for draw in &mut draws {
-                    draw.uniform.normal_settings[3] = 1.0;
+                    draw.uniform.normal_settings[3] = encoded_mode;
                     queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
                     draw.bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: None,
@@ -581,12 +588,14 @@ mod tests {
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
             if emissive_path.is_some() {
-                assert!(
-                    pixels
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .any(|pixel| pixel[..3].iter().any(|channel| *channel > 20))
+                let lit = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3].iter().any(|channel| *channel > 20));
+                assert_eq!(
+                    lit,
+                    std::env::var_os("OPENESP_EMISSIVE_EXPECT_DARK").is_none()
                 );
             } else if external.is_none() {
                 assert!(

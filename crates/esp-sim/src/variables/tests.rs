@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn panel_light_events_set_and_toggle_the_switch() {
+    let mut variables = Variables::default();
+    let reference = Reference::new('A', "LIGHT PANEL", Some("bool"));
+    for (event, value, expected) in [
+        ("PANEL_LIGHTS_ON", 0.0, 1.0),
+        ("PANEL_LIGHTS_TOGGLE", 0.0, 0.0),
+        ("PANEL_LIGHTS_SET", 1.0, 1.0),
+        ("PANEL_LIGHTS_OFF", 0.0, 0.0),
+    ] {
+        variables
+            .dispatch_event(event, Value::Number(value))
+            .unwrap();
+        assert_eq!(variables.read(&reference).unwrap(), Value::Number(expected));
+    }
+}
+
+#[test]
 fn airspeed_reference_card_events_wrap_and_validate_values() {
     let mut variables = Variables::default();
     variables
@@ -792,6 +809,7 @@ fn numeric_and_script_events_share_switch_state() {
         (0x102c0, "TOGGLE_TAXI_LIGHTS", "LIGHT TAXI"),
         (0x1034b, "TOGGLE_NAV_LIGHTS", "LIGHT NAV"),
         (0x10018, "STROBES_TOGGLE", "LIGHT STROBE"),
+        (0x100d6, "PANEL_LIGHTS_TOGGLE", "LIGHT PANEL"),
         (0x100d7, "LANDING_LIGHTS_TOGGLE", "LIGHT LANDING"),
         (0x10142, "PITOT_HEAT_TOGGLE", "PITOT HEAT"),
         (0x100d8, "PARKING_BRAKES", "BRAKE PARKING POSITION"),

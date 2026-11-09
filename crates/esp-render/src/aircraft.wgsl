@@ -2,6 +2,7 @@ struct Camera {
     view_projection: mat4x4<f32>,
     inverse_view_projection: mat4x4<f32>,
     sun: vec4<f32>,
+    lighting: vec4<f32>,
 }
 struct Draw {
     model: mat4x4<f32>,
@@ -78,12 +79,18 @@ struct Output {
     }
     let daylight = smoothstep(-0.105, 0.087, camera.sun.y);
     var emission = vec3(0.0);
+    var emission_mode = 0u;
+    var emission_enabled = false;
     if draw.normal_settings.w > 0.5 {
-        let emissive_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.normal_settings.w > 1.5));
+        let encoded = u32(draw.normal_settings.w - 1.0);
+        emission_mode = (encoded / 2u) % 4u;
+        emission_enabled = encoded < 8u || camera.lighting.x > 0.5;
+        let emissive_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, encoded % 2u == 1u));
         emission = textureSample(emissive_texture, texture_sampler, emissive_uv).rgb;
     }
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);
+    var lit = vec3(0.0);
     if draw.pbr.z > 0.5 {
         var n = normalize(input.normal);
         if draw.normal_settings.x > 0.5 {
@@ -116,8 +123,19 @@ struct Output {
         let f = f0 + (vec3(1.0) - f0) * pow(1.0 - vh, 5.0);
         let specular = d * g * f / max(4.0 * nl * nv, 0.001);
         let diffuse = (vec3(1.0) - f) * (1.0 - metal) * colour.rgb / 3.14159265;
-        return vec4(colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight + emission, colour.a);
+        lit = colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight;
+    } else {
+        let diffuse_light = 0.65 * max(dot(normalize(input.normal), normalize(camera.sun.xyz)),0.0) * daylight;
+        lit = colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance);
     }
-    let diffuse_light = 0.65 * max(dot(normalize(input.normal), normalize(camera.sun.xyz)),0.0) * daylight;
-    return vec4(colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance) + emission, colour.a);
+    if emission_enabled {
+        let night = 1.0 - daylight;
+        switch emission_mode {
+            case 0u: { lit += emission; }
+            case 1u: { lit += emission * night; }
+            case 2u: { lit = mix(lit, emission, night); }
+            default: { lit = mix(lit, lit * emission, night); }
+        }
+    }
+    return vec4(lit, colour.a);
 }

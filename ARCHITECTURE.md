@@ -104,9 +104,9 @@ fallback grid. `esp-render::draw` creates mesh buffers and material bindings.
 `esp-physics::solar` computes the sun's local direction from UTC and position.
 The app updates that direction from the live flight position; `esp-render`
 uses it for surface lighting and atmospheric sky scattering.
-Legacy and PBR emissive maps are loaded as colour textures and added to the
-material lighting. Legacy emissive modes and panel-light control are not yet
-decoded; the current additive treatment is an approximation.
+Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
+additive, night, blend, or multiply treatment, with user-controlled modes driven
+by the panel-light switch. PBR emissive modes still use additive treatment.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the

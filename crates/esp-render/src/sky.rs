@@ -6,6 +6,7 @@ pub(super) struct CameraUniform {
     pub view_projection: [[f32; 4]; 4],
     pub inverse_view_projection: [[f32; 4]; 4],
     pub sun: [f32; 4],
+    pub lighting: [f32; 4],
 }
 
 pub(super) fn pipeline(

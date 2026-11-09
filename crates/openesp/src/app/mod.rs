@@ -3,7 +3,7 @@ use clap::Parser;
 use esp_assets::{Aircraft, gauge::MouseEvent};
 use esp_physics::time::{Clock, STEP, SimTime};
 use esp_render::{Camera, Renderer};
-use esp_script::Value;
+use esp_script::{Host, Reference, Value};
 use esp_sim::variables::Variables;
 use esp_sim::{animation::ModelState, interaction, picking};
 use glam::{DVec3, Mat4, Vec3};
@@ -628,10 +628,17 @@ impl App {
                 origin.position(renderer.aircraft_origin.z, renderer.aircraft_origin.x)?;
             let sun =
                 esp_physics::solar::direction(latitude, longitude, self.sim_time.unix_seconds())?;
+            let panel_lights = self
+                .variables
+                .read(&Reference::new('A', "LIGHT PANEL", Some("bool")))
+                .ok()
+                .and_then(|value| value.number().ok())
+                .is_some_and(|value| value != 0.0);
             if renderer.render(
                 &self.camera,
                 self.arguments.cockpit,
                 Vec3::new(sun.y as f32, sun.z as f32, sun.x as f32),
+                panel_lights,
                 screenshot,
             )? {
                 self.frames += 1;
