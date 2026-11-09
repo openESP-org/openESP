@@ -64,6 +64,8 @@ pub struct Controls {
     pub ground_height: Option<f64>,
     /// Local speed of sound in m/s; sea-level standard is used when absent.
     pub sound_speed: Option<f64>,
+    /// Normalized structural ice accumulation.
+    pub structural_ice: f64,
 }
 
 impl Curve {
@@ -418,6 +420,10 @@ impl Aerodynamics {
             "invalid gear position"
         );
         ensure!(
+            controls.structural_ice.is_finite() && (0.0..=1.0).contains(&controls.structural_ice),
+            "invalid structural ice"
+        );
+        ensure!(
             controls
                 .ground_height
                 .is_none_or(|height| height.is_finite() && height >= 0.0),
@@ -492,7 +498,8 @@ impl Aerodynamics {
             .ground_height
             .zip(self.ground_effect.as_ref())
             .map_or(1.0, |(height, curve)| curve.sample(height / self.span));
-        let cl = ground_scalar
+        let cl = (1.0 - 0.3 * controls.structural_ice)
+            * ground_scalar
             * (self.lift_scalar * (self.lift.sample(alpha) * lift_mach + c.lift.cl_flaps * flap.x)
                 + c.lift.cl_spoiler * spoiler
                 + c.lift.cl_de * elevator
@@ -504,7 +511,8 @@ impl Aerodynamics {
                 + c.drag.cd_flaps * flap.y
                 + c.drag.cd_spoiler * spoiler
                 + c.drag.cd_gear * controls.gear)
-            + self.induced_drag * cl * cl;
+            + self.induced_drag * cl * cl
+            + 0.08 * controls.structural_ice;
         let cy = c.side.cy_beta * beta
             + c.side.cy_delta_rudder * rudder
             + c.side.cy_p * p

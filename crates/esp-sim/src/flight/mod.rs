@@ -49,6 +49,8 @@ pub struct Flight {
     ground: Option<ground::Ground>,
     origin_elevation: f64,
     surface_condition: crate::weather::SurfaceCondition,
+    structural_ice: f64,
+    structural_deice_available: bool,
 }
 
 pub mod ground;
@@ -233,6 +235,12 @@ impl Flight {
             ground: None,
             origin_elevation: 0.0,
             surface_condition: crate::weather::SurfaceCondition::default(),
+            structural_ice: 0.0,
+            structural_deice_available: data
+                .configuration
+                .number("deice_system", "structural_deice_type")?
+                .unwrap_or(0.0)
+                > 0.0,
         })
     }
 

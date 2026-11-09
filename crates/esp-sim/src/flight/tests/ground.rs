@@ -2,6 +2,57 @@ use super::*;
 use std::{path::Path, sync::Arc};
 
 #[test]
+#[ignore = "requires the original B737 in OPENESP_AIRCRAFT_PATHS"]
+fn real_aircraft_structural_ice_changes_flight_and_deice_removes_it() {
+    let path = content::aircraft_paths().into_iter().next().unwrap();
+    let data = FlightData::load(&path, 0).unwrap();
+    let mut clean = Flight::new(&data, 180.0, 1000.0, 0.5, true).unwrap();
+    let mut iced = Flight::new(&data, 180.0, 1000.0, 0.5, true).unwrap();
+    assert!(
+        iced.structural_deice_available,
+        "test aircraft has no configured structural deice"
+    );
+    iced.structural_ice = 0.8;
+    let mut clean_variables = controls(&data);
+    let mut iced_variables = controls(&data);
+    for variables in [&mut clean_variables, &mut iced_variables] {
+        variables.set_number("SEA LEVEL TEMPERATURE", "celsius", -5.0);
+    }
+    for _ in 0..60 {
+        clean.advance(1.0 / 60.0, &mut clean_variables).unwrap();
+        iced.advance(1.0 / 60.0, &mut iced_variables).unwrap();
+    }
+    assert!((clean.current.velocity - iced.current.velocity).length() > 0.1);
+    let published = iced_variables
+        .read(&Reference::new('A', "STRUCTURAL ICE PCT", Some("percent")))
+        .unwrap()
+        .number()
+        .unwrap();
+    assert!(published > 70.0);
+    assert!((iced.structural_ice - 0.8).abs() < 1e-9);
+    iced_variables
+        .dispatch_key_event(0x10321, Value::Number(0.0))
+        .unwrap();
+    let before = iced.structural_ice;
+    for _ in 0..600 {
+        iced.advance(1.0 / 60.0, &mut iced_variables).unwrap();
+    }
+    assert!(iced.structural_ice < before - 0.01);
+    let mut accumulating = Flight::new(&data, 180.0, 1000.0, 0.5, true).unwrap();
+    let mut observed = controls(&data);
+    observed.set_number("SEA LEVEL TEMPERATURE", "celsius", -5.0);
+    observed.set_number("OPENESP CLOUD BASE:1", "meters", 500.0);
+    observed.set_number("OPENESP CLOUD COVER:1", "number", 1.0);
+    for _ in 0..600 {
+        accumulating.advance(1.0 / 60.0, &mut observed).unwrap();
+    }
+    assert!(
+        accumulating.structural_ice > 0.001,
+        "ice did not accumulate in cold cloud"
+    );
+}
+
+#[test]
 #[ignore = "requires an original wheeled aircraft in OPENESP_AIRCRAFT_PATHS"]
 fn contaminated_surface_reduces_real_aircraft_braking() {
     let path = content::aircraft_paths().into_iter().next().unwrap();

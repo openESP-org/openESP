@@ -125,6 +125,10 @@ are not yet implemented. Precipitation is not a reported runway-condition or
 hydroplaning model. Cloud volumes advect with mean wind on fixed simulation
 steps and keep their position through wind changes. METAR gust peaks drive a bounded,
 deterministic approximation of wind variation in the flight model.
+Structural ice accumulates from estimated cloud or rain moisture below freezing,
+affects lift and drag, and can be removed by the configured structural-deice
+switch. Cloud liquid-water content and deice power/bleed availability are not
+yet modelled.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.

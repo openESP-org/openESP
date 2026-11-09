@@ -62,6 +62,67 @@ pub fn precipitation(variables: &mut Variables) -> [f64; 2] {
     })
 }
 
+/// Approximate visible liquid moisture from the reported cloud layer and rain.
+pub fn icing_moisture(variables: &mut Variables, altitude_msl: f64, origin_msl: f64) -> f64 {
+    let read = |variables: &mut Variables, name: &str, unit: &str| {
+        variables
+            .read(&Reference::new('A', name, Some(unit)))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .filter(|value| value.is_finite())
+    };
+    let mut moisture = 0.0f64;
+    let mut lowest_base = None::<f64>;
+    for index in 1..=3 {
+        let base = read(variables, &format!("OPENESP CLOUD BASE:{index}"), "meters");
+        let coverage = read(variables, &format!("OPENESP CLOUD COVER:{index}"), "number");
+        if let (Some(base), Some(coverage)) = (base, coverage)
+            && coverage > 0.0
+        {
+            lowest_base = Some(lowest_base.map_or(base, |old| old.min(base)));
+            if (base..=base + 600.0).contains(&altitude_msl) {
+                moisture = moisture.max(coverage.clamp(0.0, 1.0));
+            }
+        }
+    }
+    if altitude_msl <= lowest_base.unwrap_or(origin_msl + 2000.0) {
+        moisture = moisture.max(precipitation(variables)[0]);
+    }
+    moisture
+}
+
+/// Ice accumulation is a bounded approximation until liquid-water content is available.
+pub fn structural_ice(
+    previous: f64,
+    dt: f64,
+    temperature_c: f64,
+    moisture: f64,
+    deice: bool,
+) -> Result<f64> {
+    ensure!(
+        (0.0..=1.0).contains(&previous)
+            && dt.is_finite()
+            && dt >= 0.0
+            && temperature_c.is_finite()
+            && (0.0..=1.0).contains(&moisture),
+        "invalid icing state"
+    );
+    let cold_factor = if (-25.0..=0.0).contains(&temperature_c) {
+        (1.0 + temperature_c / 25.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let growth = (1.0 - previous) * (1.0 - (-moisture * cold_factor * dt / 900.0).exp());
+    let removal = if deice {
+        1.0 / 180.0
+    } else if temperature_c > 2.0 {
+        1.0 / 600.0
+    } else {
+        0.0
+    };
+    Ok(((previous + growth) * (-removal * dt).exp()).clamp(0.0, 1.0))
+}
+
 #[derive(Clone, Copy)]
 pub struct Conditions {
     pub sea_pressure: f64,
@@ -176,6 +237,24 @@ pub fn publish(state: &State, wind: DVec3, variables: &mut Variables) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icing_requires_cold_liquid_moisture_and_deice_removes_it() {
+        assert_eq!(structural_ice(0.0, 600.0, -5.0, 0.0, false).unwrap(), 0.0);
+        assert_eq!(structural_ice(0.0, 600.0, 5.0, 1.0, false).unwrap(), 0.0);
+        assert_eq!(structural_ice(0.0, 600.0, -30.0, 1.0, false).unwrap(), 0.0);
+        let ice = structural_ice(0.0, 600.0, -5.0, 1.0, false).unwrap();
+        assert!(ice > 0.3);
+        assert!(structural_ice(ice, 600.0, -5.0, 1.0, true).unwrap() < ice);
+        assert!(structural_ice(ice, 600.0, 10.0, 0.0, false).unwrap() < ice);
+        let mut variables = Variables::default();
+        variables.set_number("OPENESP CLOUD BASE:1", "meters", 1000.0);
+        variables.set_number("OPENESP CLOUD COVER:1", "number", 0.75);
+        assert_eq!(icing_moisture(&mut variables, 1200.0, 0.0), 0.75);
+        assert_eq!(icing_moisture(&mut variables, 2000.0, 0.0), 0.0);
+        variables.set_number("OPENESP PRECIPITATION RAIN", "number", 0.6);
+        assert_eq!(icing_moisture(&mut variables, 500.0, 0.0), 0.6);
+    }
 
     #[test]
     fn precipitation_accumulates_and_drying_restores_grip() {

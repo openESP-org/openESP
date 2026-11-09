@@ -812,6 +812,11 @@ fn numeric_and_script_events_share_switch_state() {
         (0x100d6, "PANEL_LIGHTS_TOGGLE", "LIGHT PANEL"),
         (0x100d7, "LANDING_LIGHTS_TOGGLE", "LIGHT LANDING"),
         (0x10142, "PITOT_HEAT_TOGGLE", "PITOT HEAT"),
+        (
+            0x10321,
+            "TOGGLE_STRUCTURAL_DEICE",
+            "STRUCTURAL DEICE SWITCH",
+        ),
         (0x100d8, "PARKING_BRAKES", "BRAKE PARKING POSITION"),
         (
             0x102f0,

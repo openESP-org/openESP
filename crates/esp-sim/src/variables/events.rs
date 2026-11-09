@@ -578,6 +578,7 @@ impl Variables {
             }
             "LANDING_LIGHTS_TOGGLE" => self.toggle("LIGHT LANDING"),
             "PITOT_HEAT_TOGGLE" => self.toggle("PITOT HEAT"),
+            "TOGGLE_STRUCTURAL_DEICE" => self.toggle("STRUCTURAL DEICE SWITCH"),
             "TOGGLE_GPS_DRIVES_NAV1" => self.toggle("GPS DRIVES NAV1"),
             "VOR1_SET" | "VOR1_OBI_INC" | "VOR1_OBI_DEC" | "VOR1_OBI_FAST_INC"
             | "VOR1_OBI_FAST_DEC" | "VOR2_SET" | "VOR2_OBI_INC" | "VOR2_OBI_DEC"

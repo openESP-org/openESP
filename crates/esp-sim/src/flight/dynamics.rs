@@ -15,6 +15,24 @@ impl Flight {
             snow,
             weather.at(self.origin_elevation)?.temperature - 273.15,
         )?;
+        let altitude = self.msl_altitude(&self.current);
+        let moisture = crate::weather::icing_moisture(variables, altitude, self.origin_elevation);
+        let deice_switch = variables
+            .read(&Reference::new(
+                'A',
+                "STRUCTURAL DEICE SWITCH",
+                Some("bool"),
+            ))
+            .ok()
+            .and_then(|value| value.number().ok())
+            .is_some_and(|value| value != 0.0);
+        let structural_ice = crate::weather::structural_ice(
+            self.structural_ice,
+            dt,
+            weather.at(altitude)?.temperature - 273.15,
+            moisture,
+            self.structural_deice_available && deice_switch,
+        )?;
         let hydraulic_fraction = self
             .hydraulics
             .as_ref()
@@ -168,6 +186,7 @@ impl Flight {
             gear: self.gear.extension(),
             ground_height: None,
             sound_speed: None,
+            structural_ice: self.structural_ice,
         };
         let ground_controls = GroundControls {
             steering: rudder_input,
@@ -528,6 +547,7 @@ impl Flight {
         }
         self.current = next;
         self.surface_condition = surface_condition;
+        self.structural_ice = structural_ice;
         self.on_ground = self
             .gear
             .forces(

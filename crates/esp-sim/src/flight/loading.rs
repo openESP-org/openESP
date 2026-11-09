@@ -3,6 +3,7 @@ use super::*;
 impl Flight {
     pub fn publish_loading(&self, variables: &mut Variables) {
         variables.set_number("SIM ON GROUND", "bool", f64::from(self.on_ground));
+        variables.set_number("STRUCTURAL ICE PCT", "percent", self.structural_ice * 100.0);
         let surface = self.ground.as_ref().and_then(|ground| {
             ground.surface_type(self.current.position.x, self.current.position.y)
         });

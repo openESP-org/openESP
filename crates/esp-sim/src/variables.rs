@@ -506,6 +506,7 @@ impl Variables {
             0x100de => "FLAPS_INCR",
             0x100df => "FLAPS_DECR",
             0x100d6 => "PANEL_LIGHTS_TOGGLE",
+            0x10321 => "TOGGLE_STRUCTURAL_DEICE",
             0x100d7 => "LANDING_LIGHTS_TOGGLE",
             0x10208 => "PANEL_LIGHTS_ON",
             0x10209 => "PANEL_LIGHTS_OFF",
