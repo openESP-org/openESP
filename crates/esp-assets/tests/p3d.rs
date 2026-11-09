@@ -1,6 +1,19 @@
 use esp_assets::Model;
 
 #[test]
+#[ignore = "requires an aircraft model with an emissive map in OPENESP_EMISSIVE_MODEL"]
+fn loads_real_aircraft_emissive_material() {
+    let path = std::env::var_os("OPENESP_EMISSIVE_MODEL").unwrap();
+    let model = Model::load(std::path::Path::new(&path)).unwrap();
+    assert!(model.materials.iter().any(|material| {
+        material
+            .emissive_texture
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("b737_800_1_lm.dds"))
+    }));
+}
+
+#[test]
 #[ignore = "requires a Prepar3D PV20 model in OPENESP_P3D_MODEL"]
 fn loads_prepar3d_model() {
     let path = std::env::var_os("OPENESP_P3D_MODEL").expect("set OPENESP_P3D_MODEL");

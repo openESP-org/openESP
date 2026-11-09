@@ -170,6 +170,7 @@ pub(super) fn textured_draws(
                 pipeline: if overlay { blend_pipeline } else { 0 },
                 metallic_map: None,
                 normal_map: None,
+                emissive_map: None,
             },
         ));
     }
@@ -376,6 +377,7 @@ mod tests {
                     targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8UnormSrgb, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
                 }), multiview_mask: None, cache: None,
             });
+            let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
             let camera = crate::sky::CameraUniform {
                 view_projection: Mat4::from_cols_array_2d(&[
                     [1.0 / 600.0, 0.0, 0.0, 0.0],
@@ -385,7 +387,11 @@ mod tests {
                 ])
                 .to_cols_array_2d(),
                 inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
-                sun: [0.0, 1.0, 0.0, 0.0],
+                sun: if emissive_path.is_some() {
+                    [0.0, -1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 1.0, 0.0, 0.0]
+                },
             };
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -440,7 +446,7 @@ mod tests {
                 textures: [(7, texture), (9, second_texture)].into(),
                 indices: vec![0, 1, 2],
             };
-            let draws = textured_draws(
+            let mut draws = textured_draws(
                 &device,
                 &queue,
                 &pipeline.get_bind_group_layout(1),
@@ -449,6 +455,55 @@ mod tests {
                 0,
             )
             .unwrap();
+            if let Some(path) = &emissive_path {
+                let image =
+                    esp_assets::texture::Texture::load(std::path::Path::new(path), !bc.is_empty())
+                        .unwrap();
+                let emission = crate::upload_texture(&device, &queue, &image)
+                    .unwrap()
+                    .create_view(&Default::default());
+                let black = crate::upload_texture(
+                    &device,
+                    &queue,
+                    &esp_assets::texture::Texture::rgba(1, 1, vec![0, 0, 0, 255], false),
+                )
+                .unwrap()
+                .create_view(&Default::default());
+                for draw in &mut draws {
+                    draw.uniform.normal_settings[3] = 1.0;
+                    queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
+                    draw.bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &pipeline.get_bind_group_layout(1),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: draw.buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&black),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&black),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(&black),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(&emission),
+                            },
+                        ],
+                    });
+                }
+            }
             assert_eq!(draws.len(), if two_textures { 2 } else { 1 });
             let target = device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -525,7 +580,15 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if external.is_none() {
+            if emissive_path.is_some() {
+                assert!(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|pixel| pixel[..3].iter().any(|channel| *channel > 20))
+                );
+            } else if external.is_none() {
                 assert!(
                     center[0] > 40 && center[1] < 5 && center[2] > 40,
                     "pixel: {center:?}"
@@ -540,7 +603,9 @@ mod tests {
                 );
             }
             let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if external.is_some() {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if emissive_path.is_some() {
+                    "../../target/emissive-headless.png"
+                } else if external.is_some() {
                     "../../target/terrain-texture-headless.png"
                 } else {
                     "../../target/terrain-blend-headless.png"

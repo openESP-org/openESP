@@ -99,11 +99,14 @@ Flight positions remain local to the scene datum; instruments, navigation,
 autopilot and atmospheric calculations add that datum to obtain mean-sea-level
 altitude, while ground clearance is measured against the terrain mesh.
 `esp-render::ground` validates and uploads either the terrain geometry or the
-fallback grid.
+fallback grid. `esp-render::draw` creates mesh buffers and material bindings.
 
 `esp-physics::solar` computes the sun's local direction from UTC and position.
 The app updates that direction from the live flight position; `esp-render`
 uses it for surface lighting and atmospheric sky scattering.
+Legacy and PBR emissive maps are loaded as colour textures and added to the
+material lighting. Legacy emissive modes and panel-light control are not yet
+decoded; the current additive treatment is an approximation.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the

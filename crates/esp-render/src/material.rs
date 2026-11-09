@@ -11,9 +11,25 @@ pub(super) fn linear_texture(
     cache: &mut HashMap<String, (wgpu::TextureView, bool, bool)>,
     name: Option<&str>,
 ) -> Result<Option<(wgpu::TextureView, bool, bool)>> {
+    texture(
+        device, queue, aircraft, root, compressed, cache, name, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    aircraft: &esp_assets::Aircraft,
+    root: Option<&Path>,
+    compressed: bool,
+    cache: &mut HashMap<String, (wgpu::TextureView, bool, bool)>,
+    name: Option<&str>,
+    srgb: bool,
+) -> Result<Option<(wgpu::TextureView, bool, bool)>> {
     let Some(name) = name else { return Ok(None) };
     let key = format!(
-        "linear|{}|{name}",
+        "{srgb}|{}|{name}",
         root.map_or_else(String::new, |p| p.to_string_lossy().into_owned())
     );
     if let Some((view, flip, alpha)) = cache.get(&key) {
@@ -29,7 +45,7 @@ pub(super) fn linear_texture(
             let image = texture::Texture::load(&path, compressed)?;
             let flip = image.flip_v;
             let alpha = image.normal_x_in_alpha;
-            let view = super::upload_texture_with_color_space(device, queue, &image, false)?
+            let view = super::upload_texture_with_color_space(device, queue, &image, srgb)?
                 .create_view(&Default::default());
             cache.insert(key, (view.clone(), flip, alpha));
             Ok(Some((view, flip, alpha)))

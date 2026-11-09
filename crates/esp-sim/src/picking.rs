@@ -170,6 +170,7 @@ mod tests {
                 diffuse_texture: None,
                 metallic_texture: None,
                 normal_texture: None,
+                emissive_texture: None,
                 pbr: None,
             }],
             lods: vec![Lod {

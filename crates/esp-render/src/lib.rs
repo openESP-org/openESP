@@ -8,11 +8,13 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 pub mod camera;
+mod draw;
 mod ground;
 mod material;
 mod sky;
 mod tangent;
 pub use camera::Camera;
+use draw::make_draw;
 use material::{PipelineKey, texture_format};
 
 #[repr(C)]
@@ -60,6 +62,7 @@ struct DrawData<'a> {
     pipeline: usize,
     metallic_map: Option<&'a wgpu::TextureView>,
     normal_map: Option<&'a wgpu::TextureView>,
+    emissive_map: Option<&'a wgpu::TextureView>,
 }
 
 pub struct Renderer {
@@ -387,6 +390,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -564,6 +577,16 @@ impl Renderer {
                     &mut textures,
                     material.normal_texture.as_deref(),
                 )?;
+                let emissive = material::texture(
+                    &device,
+                    &queue,
+                    aircraft,
+                    texture_root,
+                    compressed,
+                    &mut textures,
+                    material.emissive_texture.as_deref(),
+                    true,
+                )?;
                 let frames = normal_map.as_ref().map(|_| tangent::frames(mesh));
                 let vertices: Vec<_> = mesh
                     .vertices
@@ -610,17 +633,23 @@ impl Renderer {
                             },
                         ]
                     }),
-                    normal_settings: normal_map.as_ref().map_or(
-                        [0.0; 4],
-                        |(_, normal_flip, alpha)| {
-                            [
-                                1.0,
-                                if *normal_flip == flip_v { 0.0 } else { 1.0 },
-                                if *alpha { 1.0 } else { 0.0 },
-                                0.0,
-                            ]
-                        },
-                    ),
+                    normal_settings: {
+                        let mut settings =
+                            normal_map
+                                .as_ref()
+                                .map_or([0.0; 4], |(_, normal_flip, alpha)| {
+                                    [
+                                        1.0,
+                                        if *normal_flip == flip_v { 0.0 } else { 1.0 },
+                                        if *alpha { 1.0 } else { 0.0 },
+                                        0.0,
+                                    ]
+                                });
+                        settings[3] = emissive.as_ref().map_or(0.0, |(_, emissive_flip, _)| {
+                            if *emissive_flip == flip_v { 1.0 } else { 2.0 }
+                        });
+                        settings
+                    },
                 };
                 draws.push(make_draw(
                     &device,
@@ -638,6 +667,7 @@ impl Renderer {
                         pipeline: pipeline_index,
                         metallic_map: metallic.as_ref().map(|(view, _, _)| view),
                         normal_map: normal_map.as_ref().map(|(view, _, _)| view),
+                        emissive_map: emissive.as_ref().map(|(view, _, _)| view),
                     },
                 ));
             }
@@ -705,6 +735,7 @@ impl Renderer {
                 pipeline: 0,
                 metallic_map: None,
                 normal_map: None,
+                emissive_map: None,
             },
         );
         let photo_key = PipelineKey {
@@ -797,6 +828,7 @@ impl Renderer {
                     pipeline: photo_pipeline,
                     metallic_map: None,
                     normal_map: None,
+                    emissive_map: None,
                 },
             ));
         }
@@ -836,6 +868,7 @@ impl Renderer {
                     pipeline: 0,
                     metallic_map: None,
                     normal_map: None,
+                    emissive_map: None,
                 },
             ));
         }
@@ -876,6 +909,7 @@ impl Renderer {
                     pipeline: 0,
                     metallic_map: None,
                     normal_map: None,
+                    emissive_map: None,
                 },
             ));
         }
@@ -922,6 +956,7 @@ impl Renderer {
                         pipeline: 0,
                         metallic_map: None,
                         normal_map: None,
+                        emissive_map: None,
                     },
                 ));
             }
@@ -1358,84 +1393,6 @@ fn upload_texture_with_color_space(
         );
     }
     Ok(texture)
-}
-
-fn make_draw(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    texture: &wgpu::TextureView,
-    data: DrawData<'_>,
-) -> Draw {
-    let DrawData {
-        vertices,
-        indices,
-        transform,
-        uniform,
-        blended,
-        node,
-        pipeline,
-        metallic_map,
-        normal_map,
-    } = data;
-    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("draw"),
-        contents: bytemuck::bytes_of(&uniform),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(texture),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(metallic_map.unwrap_or(texture)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(normal_map.unwrap_or(texture)),
-            },
-        ],
-    });
-    let centre = vertices
-        .iter()
-        .map(|v| Vec3::from_array(v.position))
-        .sum::<Vec3>()
-        / vertices.len().max(1) as f32;
-    Draw {
-        vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vertices"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
-        indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("indices"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }),
-        count: indices.len() as u32,
-        transform,
-        uniform,
-        buffer,
-        bind,
-        blended,
-        centre,
-        node,
-        visible: true,
-        pipeline,
-    }
 }
 
 #[cfg(test)]

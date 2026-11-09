@@ -17,6 +17,7 @@ struct Draw {
 @group(1) @binding(2) var texture_sampler: sampler;
 @group(1) @binding(3) var metallic_texture: texture_2d<f32>;
 @group(1) @binding(4) var normal_texture: texture_2d<f32>;
+@group(1) @binding(5) var emissive_texture: texture_2d<f32>;
 struct Output {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
@@ -76,6 +77,11 @@ struct Output {
         colour.a = clamp(input.tangent.w, 0.0, 1.0);
     }
     let daylight = smoothstep(-0.105, 0.087, camera.sun.y);
+    var emission = vec3(0.0);
+    if draw.normal_settings.w > 0.5 {
+        let emissive_uv = vec2(input.uv.x, select(input.uv.y, 1.0 - input.uv.y, draw.normal_settings.w > 1.5));
+        emission = textureSample(emissive_texture, texture_sampler, emissive_uv).rgb;
+    }
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);
     if draw.pbr.z > 0.5 {
@@ -110,8 +116,8 @@ struct Output {
         let f = f0 + (vec3(1.0) - f0) * pow(1.0 - vh, 5.0);
         let specular = d * g * f / max(4.0 * nl * nv, 0.001);
         let diffuse = (vec3(1.0) - f) * (1.0 - metal) * colour.rgb / 3.14159265;
-        return vec4(colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight, colour.a);
+        return vec4(colour.rgb * mix(0.025, 0.2, daylight) + (diffuse + specular) * sun_transmittance * nl * 2.0 * daylight + emission, colour.a);
     }
     let diffuse_light = 0.65 * max(dot(normalize(input.normal), normalize(camera.sun.xyz)),0.0) * daylight;
-    return vec4(colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance), colour.a);
+    return vec4(colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance) + emission, colour.a);
 }

@@ -53,6 +53,7 @@ pub struct Material {
     pub diffuse_texture: Option<String>,
     pub metallic_texture: Option<String>,
     pub normal_texture: Option<String>,
+    pub emissive_texture: Option<String>,
     pub pbr: Option<mdl::material::PbrMaterial>,
 }
 
@@ -378,6 +379,10 @@ impl Model {
                         .transpose()?,
                     metallic_texture: None,
                     normal_texture: None,
+                    emissive_texture: maps
+                        .emissive
+                        .map(|name| std::str::from_utf8(name).map(str::to_owned))
+                        .transpose()?,
                     pbr: None,
                 })
             })
