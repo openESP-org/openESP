@@ -107,6 +107,20 @@ pub fn resolve_path(base: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Resolve a texture name, accepting the alternate BMP/DDS extension.
+pub fn resolve_texture(base: &Path, name: &str) -> Result<PathBuf> {
+    resolve_path(base, name).or_else(|original| {
+        let path = Path::new(name);
+        let extension = path.extension().and_then(|value| value.to_str());
+        let alternative = match extension {
+            Some(value) if value.eq_ignore_ascii_case("bmp") => "dds",
+            Some(value) if value.eq_ignore_ascii_case("dds") => "bmp",
+            _ => return Err(original),
+        };
+        resolve_path(base, &path.with_extension(alternative).to_string_lossy())
+    })
+}
+
 /// FSX and Prepar3D SimObjects can use either aircraft.cfg or sim.cfg.
 /// Prefer aircraft.cfg when a container supplies both.
 pub fn aircraft_config_path(root: &Path) -> Result<PathBuf> {
@@ -456,6 +470,16 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_alternate_texture_extensions_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("sign.dds"), []).unwrap();
+        std::fs::write(temp.path().join("water.bmp"), []).unwrap();
+        assert!(resolve_texture(temp.path(), "SIGN.BMP").unwrap().is_file());
+        assert!(resolve_texture(temp.path(), "WATER.DDS").unwrap().is_file());
+        assert!(resolve_texture(temp.path(), "sign.png").is_err());
+    }
 
     #[test]
     fn resolves_windows_paths_case_insensitively() {

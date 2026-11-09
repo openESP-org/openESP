@@ -20,7 +20,7 @@ pub(super) fn linear_texture(
         return Ok(Some((view.clone(), *flip, *alpha)));
     }
     let resolved = if let Some(root) = root {
-        esp_assets::resolve_path(root, name).map(Some)
+        esp_assets::resolve_texture(root, name).map(Some)
     } else {
         aircraft.texture_path(name)
     };
