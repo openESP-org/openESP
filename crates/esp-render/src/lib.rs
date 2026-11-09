@@ -81,6 +81,7 @@ pub struct Renderer {
     terrain_draws: Vec<Draw>,
     draw_layout: wgpu::BindGroupLayout,
     terrain_sampler: wgpu::Sampler,
+    terrain_blend_pipeline: usize,
     ground_tracks_camera: bool,
     photos: Vec<Draw>,
     runway: Vec<Draw>,
@@ -706,9 +707,6 @@ impl Renderer {
                 normal_map: None,
             },
         );
-        let terrain_draws = terrain.map_or(Ok(Vec::new()), |terrain| {
-            ground::textured_draws(&device, &queue, &draw_layout, &sampler, terrain)
-        })?;
         let photo_key = PipelineKey {
             source: 5,
             destination: 6,
@@ -722,6 +720,16 @@ impl Renderer {
             pipelines.push(pipeline(photo_key)?);
             index
         };
+        let terrain_draws = terrain.map_or(Ok(Vec::new()), |terrain| {
+            ground::textured_draws(
+                &device,
+                &queue,
+                &draw_layout,
+                &sampler,
+                terrain,
+                photo_pipeline,
+            )
+        })?;
         let photo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -942,6 +950,7 @@ impl Renderer {
             terrain_draws,
             draw_layout,
             terrain_sampler: sampler,
+            terrain_blend_pipeline: photo_pipeline,
             ground_tracks_camera: terrain.is_none(),
             photos: photo_draws,
             runway: runway_draws,

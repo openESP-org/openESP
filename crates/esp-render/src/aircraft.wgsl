@@ -72,6 +72,9 @@ struct Output {
     if draw.settings.y > 2.5 && draw.settings.y < 3.5 {
         colour = vec4(input.tangent.xyz, 1.0);
     }
+    if draw.settings.y > 4.5 && draw.settings.y < 5.5 {
+        colour.a = clamp(input.tangent.w, 0.0, 1.0);
+    }
     let daylight = smoothstep(-0.105, 0.087, camera.sun.y);
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);

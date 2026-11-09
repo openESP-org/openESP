@@ -3,7 +3,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use glam::Mat4;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use wgpu::util::DeviceExt;
 
 impl Renderer {
@@ -16,6 +16,7 @@ impl Renderer {
             &self.draw_layout,
             &self.terrain_sampler,
             terrain,
+            self.terrain_blend_pipeline,
         )?;
         let count = u32::try_from(indices.len())?;
         self.ground.vertices = self
@@ -122,21 +123,21 @@ pub(super) fn mesh(terrain: Option<&TerrainMesh>) -> Result<(Vec<Vertex>, Vec<u3
     Ok((vertices, indices))
 }
 
-/// Build one opaque draw per available texture; missing textures retain the
-/// underlying land-colour mesh. UVs stay anchored in the original world frame.
+/// Build opaque base draws and blended transition draws for the terrain.
 pub(super) fn textured_draws(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     terrain: &TerrainMesh,
+    blend_pipeline: usize,
 ) -> Result<Vec<Draw>> {
     let groups = texture_batches(terrain)?;
     let compressed = device
         .features()
         .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
     let mut result = Vec::new();
-    for (key, (vertices, indices)) in groups {
+    for ((overlay, key), (vertices, indices)) in groups {
         let image = &terrain.textures[&key];
         if !compressed && image.format != esp_assets::texture::Format::Rgba8 {
             continue;
@@ -155,13 +156,18 @@ pub(super) fn textured_draws(
                     model: Mat4::IDENTITY.to_cols_array_2d(),
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
                     diffuse: [1.0; 4],
-                    settings: [f32::from(image.flip_v), 4.0, 0.0, 0.0],
+                    settings: [
+                        f32::from(image.flip_v),
+                        if overlay { 5.0 } else { 4.0 },
+                        0.0,
+                        0.0,
+                    ],
                     pbr: [0.0; 4],
                     normal_settings: [0.0; 4],
                 },
                 blended: false,
                 node: None,
-                pipeline: 0,
+                pipeline: if overlay { blend_pipeline } else { 0 },
                 metallic_map: None,
                 normal_map: None,
             },
@@ -170,24 +176,43 @@ pub(super) fn textured_draws(
     Ok(result)
 }
 
-type TextureBatches = HashMap<u32, (Vec<Vertex>, Vec<u32>)>;
+type TextureBatches = BTreeMap<(bool, u32), (Vec<Vertex>, Vec<u32>)>;
 
 fn texture_batches(terrain: &TerrainMesh) -> Result<TextureBatches> {
     let (vertices, _) = mesh(Some(terrain))?;
     let mut groups = TextureBatches::new();
     for triangle in terrain.indices.as_chunks::<3>().0 {
-        let Some(key) = terrain.texture_sets[triangle[0] as usize] else {
+        let keys = triangle.map(|index| {
+            terrain.texture_sets[index as usize].filter(|key| terrain.textures.contains_key(key))
+        });
+        let Some(base) = keys.iter().flatten().next().copied() else {
             continue;
         };
-        if !terrain.textures.contains_key(&key) {
-            continue;
-        }
-        let (group_vertices, group_indices) = groups.entry(key).or_default();
-        for &index in triangle {
-            let mut vertex = vertices[index as usize];
-            vertex.uv = [vertex.position[0] / 1200.0, -vertex.position[2] / 1200.0];
-            group_indices.push(u32::try_from(group_vertices.len())?);
-            group_vertices.push(vertex);
+        let mut add = |key, overlay| -> Result<()> {
+            let (group_vertices, group_indices) = groups.entry((overlay, key)).or_default();
+            for (index, vertex_key) in triangle.iter().zip(keys) {
+                let mut vertex = vertices[*index as usize];
+                vertex.uv = [vertex.position[0] / 1200.0, -vertex.position[2] / 1200.0];
+                vertex.tangent[3] = if !overlay || vertex_key == Some(key) {
+                    1.0
+                } else {
+                    0.0
+                };
+                group_indices.push(u32::try_from(group_vertices.len())?);
+                group_vertices.push(vertex);
+            }
+            Ok(())
+        };
+        add(base, false)?;
+        let mut added = [None; 2];
+        let mut count = 0;
+        for key in keys.into_iter().flatten().filter(|key| *key != base) {
+            if added.contains(&Some(key)) {
+                continue;
+            }
+            add(key, true)?;
+            added[count] = Some(key);
+            count += 1;
         }
     }
     Ok(groups)
@@ -245,7 +270,7 @@ mod tests {
             normals: vec![DVec3::Y; 3],
             land_classes: vec![Some(0), Some(3), None],
             texture_sets: vec![None; 3],
-            textures: HashMap::new(),
+            textures: Default::default(),
             indices: vec![0, 1, 2],
         };
         let (vertices, indices) = mesh(Some(&terrain)).unwrap();
@@ -259,8 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn batches_textures_and_leaves_missing_tiles_on_coloured_ground() {
-        let terrain = TerrainMesh {
+    fn blends_texture_transitions_and_keeps_uvs_anchored() {
+        let mut terrain = TerrainMesh {
             vertices: vec![
                 DVec3::ZERO,
                 DVec3::new(1200.0, 0.0, 0.0),
@@ -270,19 +295,34 @@ mod tests {
             normals: vec![DVec3::Y; 4],
             land_classes: vec![None; 4],
             texture_sets: vec![Some(7), Some(9), Some(7), Some(9)],
-            textures: [(
-                7,
-                esp_assets::texture::Texture::rgba(1, 1, vec![255; 4], false),
-            )]
-            .into(),
+            textures: [7, 9]
+                .map(|key| {
+                    (
+                        key,
+                        esp_assets::texture::Texture::rgba(1, 1, vec![255; 4], false),
+                    )
+                })
+                .into(),
             indices: vec![0, 2, 3, 1, 3, 2],
         };
         let batches = texture_batches(&terrain).unwrap();
-        assert_eq!(batches.len(), 1);
-        let (vertices, indices) = &batches[&7];
+        assert_eq!(batches.len(), 4);
+        let (vertices, indices) = &batches[&(false, 7)];
         assert_eq!(indices, &[0, 1, 2]);
         assert_eq!(vertices[1].uv, [0.0, -1.0]);
         assert_eq!(vertices[2].uv, [1.0, -1.0]);
+        let (overlay, _) = &batches[&(true, 9)];
+        assert_eq!(
+            overlay
+                .iter()
+                .map(|vertex| vertex.tangent[3])
+                .collect::<Vec<_>>(),
+            [0.0, 0.0, 1.0]
+        );
+        terrain.textures.remove(&9);
+        let fallback = texture_batches(&terrain).unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[&(false, 7)].1.len(), 6);
     }
 
     #[test]
@@ -333,7 +373,7 @@ mod tests {
                 depth_stencil: None, multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8UnormSrgb, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8UnormSrgb, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
                 }), multiview_mask: None, cache: None,
             });
             let camera = crate::sky::CameraUniform {
@@ -368,6 +408,7 @@ mod tests {
                 ..Default::default()
             });
             let external = std::env::var_os("OPENESP_TERRAIN_TEXTURE");
+            let external_second = std::env::var_os("OPENESP_TERRAIN_TEXTURE_2");
             let texture = external.as_ref().map_or_else(
                 || esp_assets::texture::Texture::rgba(1, 1, vec![255, 0, 0, 255], false),
                 |path| {
@@ -375,6 +416,14 @@ mod tests {
                         .unwrap()
                 },
             );
+            let second_texture = external_second.as_ref().map_or_else(
+                || esp_assets::texture::Texture::rgba(1, 1, vec![0, 0, 255, 255], false),
+                |path| {
+                    esp_assets::texture::Texture::load(std::path::Path::new(path), !bc.is_empty())
+                        .unwrap()
+                },
+            );
+            let two_textures = external.is_none() || external_second.is_some();
             let terrain = TerrainMesh {
                 vertices: vec![
                     glam::DVec3::new(-600.0, 0.0, 600.0),
@@ -383,8 +432,12 @@ mod tests {
                 ],
                 normals: vec![glam::DVec3::Y; 3],
                 land_classes: vec![Some(3); 3],
-                texture_sets: vec![Some(7); 3],
-                textures: [(7, texture)].into(),
+                texture_sets: if two_textures {
+                    vec![Some(7), Some(9), Some(7)]
+                } else {
+                    vec![Some(7); 3]
+                },
+                textures: [(7, texture), (9, second_texture)].into(),
                 indices: vec![0, 1, 2],
             };
             let draws = textured_draws(
@@ -393,9 +446,10 @@ mod tests {
                 &pipeline.get_bind_group_layout(1),
                 &sampler,
                 &terrain,
+                0,
             )
             .unwrap();
-            assert_eq!(draws.len(), 1);
+            assert_eq!(draws.len(), if two_textures { 2 } else { 1 });
             let target = device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
                 size: wgpu::Extent3d {
@@ -473,7 +527,7 @@ mod tests {
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
             if external.is_none() {
                 assert!(
-                    center[0] > 100 && center[1] < 5 && center[2] < 5,
+                    center[0] > 40 && center[1] < 5 && center[2] > 40,
                     "pixel: {center:?}"
                 );
             } else {
@@ -485,8 +539,12 @@ mod tests {
                         .any(|pixel| pixel[..3] != center[..3])
                 );
             }
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/terrain-texture-headless.png");
+            let path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if external.is_some() {
+                    "../../target/terrain-texture-headless.png"
+                } else {
+                    "../../target/terrain-blend-headless.png"
+                });
             image::save_buffer(path, &pixels, 64, 64, image::ColorType::Rgba8).unwrap();
         });
     }
