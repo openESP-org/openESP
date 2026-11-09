@@ -22,6 +22,8 @@ pub(crate) struct Arguments {
         help = "Select an airport by ICAO code from scenery or the installed simulator"
     )]
     pub(crate) airport: Option<String>,
+    #[arg(long, help = "Use live METAR weather from the selected airport")]
+    pub(crate) live_weather: bool,
     #[arg(long, requires = "airport", conflicts_with_all = ["parking", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a runway end, for example 06 or 24L")]
     pub(crate) runway: Option<String>,
     #[arg(long, requires = "airport", conflicts_with_all = ["runway", "heading", "start_north", "start_east", "approach_distance"], help = "Spawn at a zero-based parking stand index from the airport BGL")]

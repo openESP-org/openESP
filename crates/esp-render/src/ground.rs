@@ -378,6 +378,10 @@ mod tests {
                 }), multiview_mask: None, cache: None,
             });
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
+            let visibility = std::env::var("OPENESP_VISIBILITY_METERS")
+                .ok()
+                .map(|value| value.parse::<f32>().unwrap())
+                .unwrap_or(0.0);
             let normal_path = std::env::var_os("OPENESP_NORMAL_TEXTURE");
             let emissive_day = std::env::var_os("OPENESP_EMISSIVE_DAY").is_some();
             let panel_on = std::env::var_os("OPENESP_PANEL_LIGHT_ON").is_some();
@@ -401,7 +405,7 @@ mod tests {
                 } else {
                     [0.0, 1.0, 0.0, 0.0]
                 },
-                lighting: [f32::from(panel_on), 0.0, 0.0, 0.0],
+                lighting: [f32::from(panel_on), visibility, 0.0, 0.0],
             };
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -659,7 +663,13 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if normal_path.is_some() {
+            if visibility > 0.0 {
+                let corner = &pixels[(5 * 64 + 5) * 4..][..4];
+                assert!(
+                    corner[0] > 100 && corner[1] > 100 && corner[2] > 100,
+                    "fog pixel: {corner:?}"
+                );
+            } else if normal_path.is_some() {
                 let pixels = pixels.as_chunks::<4>().0;
                 let minimum = pixels.iter().map(|pixel| pixel[0]).min().unwrap();
                 let maximum = pixels.iter().map(|pixel| pixel[0]).max().unwrap();
@@ -691,16 +701,17 @@ mod tests {
                         .any(|pixel| pixel[..3] != center[..3])
                 );
             }
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if normal_path.is_some() {
-                    "../../target/legacy-bump-headless.png"
-                } else if emissive_path.is_some() {
-                    "../../target/emissive-headless.png"
-                } else if external.is_some() {
-                    "../../target/terrain-texture-headless.png"
-                } else {
-                    "../../target/terrain-blend-headless.png"
-                });
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if visibility > 0.0 {
+                "../../target/visibility-headless.png"
+            } else if normal_path.is_some() {
+                "../../target/legacy-bump-headless.png"
+            } else if emissive_path.is_some() {
+                "../../target/emissive-headless.png"
+            } else if external.is_some() {
+                "../../target/terrain-texture-headless.png"
+            } else {
+                "../../target/terrain-blend-headless.png"
+            });
             image::save_buffer(path, &pixels, 64, 64, image::ColorType::Rgba8).unwrap();
         });
     }

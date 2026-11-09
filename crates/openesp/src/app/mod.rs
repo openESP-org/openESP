@@ -44,6 +44,7 @@ struct App {
     exterior_state: Option<ModelState>,
     interior_state: Option<ModelState>,
     variables: Variables,
+    live_weather: Option<mpsc::Receiver<anyhow::Result<esp_weather::Observation>>>,
     clock: Clock,
     sim_time: SimTime,
     door_open: bool,
@@ -265,6 +266,19 @@ impl App {
     }
 
     fn frame(&mut self) -> Result<()> {
+        if self.aircraft.is_some()
+            && let Some(receiver) = &self.live_weather
+        {
+            match receiver.try_recv() {
+                Ok(Ok(report)) => {
+                    live_weather::apply(&mut self.variables, &report);
+                    eprintln!("weather: applied METAR for {}", report.station);
+                }
+                Ok(Err(error)) => eprintln!("weather: {error:#}; retaining current conditions"),
+                Err(mpsc::TryRecvError::Disconnected) => self.live_weather = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if self.renderer.is_none() {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
@@ -641,11 +655,18 @@ impl App {
                 .ok()
                 .and_then(|value| value.number().ok())
                 .is_some_and(|value| value != 0.0);
+            let visibility = self
+                .variables
+                .read(&Reference::new('A', "AMBIENT VISIBILITY", Some("meters")))
+                .ok()
+                .and_then(|value| value.number().ok())
+                .unwrap_or(100_000.0);
             if renderer.render(
                 &self.camera,
                 self.arguments.cockpit,
                 Vec3::new(sun.y as f32, sun.z as f32, sun.x as f32),
                 panel_lights,
+                visibility,
                 screenshot,
             )? {
                 self.frames += 1;
@@ -917,6 +938,7 @@ impl ApplicationHandler for App {
 
 mod audio;
 mod installed_airport;
+mod live_weather;
 mod scenery_folder;
 mod spawn;
 mod terrain;
@@ -926,6 +948,10 @@ pub(crate) fn run() -> Result<()> {
     scenery_folder::configure(&mut arguments)?;
     installed_airport::configure(&mut arguments)?;
     spawn::configure(&mut arguments)?;
+    anyhow::ensure!(
+        !arguments.live_weather || arguments.airport.is_some(),
+        "live weather requires a selected airport"
+    );
     let path = arguments.aircraft.clone();
     let variant = arguments.variant;
     let fsx_root = arguments.fsx_root.clone();
@@ -1107,6 +1133,27 @@ pub(crate) fn run() -> Result<()> {
         "celsius",
         arguments.sea_level_temperature,
     );
+    variables.set_number("AMBIENT VISIBILITY", "meters", 100_000.0);
+    let live_weather = if arguments.live_weather {
+        let station = arguments
+            .airport
+            .clone()
+            .context("live weather requires an airport")?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("weather".into())
+            .spawn(move || {
+                loop {
+                    if sender.send(esp_weather::fetch(&station)).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(600));
+                }
+            })?;
+        Some(receiver)
+    } else {
+        None
+    };
     for event in ["AXIS_AILERONS_SET", "AXIS_ELEVATOR_SET", "AXIS_RUDDER_SET"] {
         variables.dispatch_event(event, Value::Number(0.0))?;
     }
@@ -1126,6 +1173,7 @@ pub(crate) fn run() -> Result<()> {
         exterior_state: None,
         interior_state: None,
         variables,
+        live_weather,
         clock: Clock::default(),
         sim_time,
         door_open: false,
@@ -1389,6 +1437,7 @@ mod tests {
             exterior_state: None,
             interior_state: None,
             variables,
+            live_weather: None,
             clock: Clock::default(),
             sim_time: SimTime::new(0.0).unwrap(),
             door_open: false,

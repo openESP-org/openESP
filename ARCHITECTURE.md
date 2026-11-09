@@ -23,6 +23,7 @@ engine layer
     esp-assets     aircraft, model and gauge loading
     esp-scenery    airport surfaces and placed scenery objects
     esp-terrain    elevation mesh, land class and photoreal ground
+    esp-weather    weather observations and data sources
     esp-nav        airports, VOR, ILS, DME and waypoint facilities
     esp-script     gauge calculator and script interpreter
 
@@ -110,6 +111,12 @@ fallback grid. `esp-render::draw` creates mesh buffers and material bindings.
 `esp-physics::solar` computes the sun's local direction from UTC and position.
 The app updates that direction from the live flight position; `esp-render`
 uses it for surface lighting and atmospheric sky scattering.
+`esp-weather` parses aviation observations and fetches METAR data; the app
+applies observations to the flight session and renderer asynchronously, retaining
+manual weather when the network or station data is unavailable. `--live-weather`
+uses the selected `--airport` station and refreshes every ten minutes; wind,
+pressure, temperature and visibility are applied. Cloud rendering and gust
+physics are not yet implemented.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.
@@ -166,7 +173,7 @@ from source therefore requires a C compiler alongside the Rust toolchain.
   model with persistence; a content manager that installs and enables add-ons
   without touching the base simulator directories; the launcher with install
   selection, controls setup and graphics options.
-- `esp-weather` (engine). Weather state and data for physics and rendering.
+- `esp-weather` (engine, created). Weather state and data for physics and rendering.
 - Effects start as an `esp-render` module; promote them to `esp-effects` only
   if the post-processing chain grows beyond the file cap.
 - `tools/esp-check`. A validation binary that loads aircraft and scenery

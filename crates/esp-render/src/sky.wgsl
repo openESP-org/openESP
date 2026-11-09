@@ -70,6 +70,11 @@ struct Output {
         / ((2.0 + g*g) * pow(max(1.0 + g*g - 2.0*g*mu, 0.001), 1.5));
     let radiance = 20.0 * (scatter_r * beta_r * rayleigh_phase + scatter_m * beta_m * mie_phase);
     let sun_disc = smoothstep(0.99990, 0.99996, mu) * smoothstep(-0.02, 0.01, sun.y);
-    let color = vec3(1.0) - exp(-radiance - vec3(sun_disc * 6.0));
+    var color = vec3(1.0) - exp(-radiance - vec3(sun_disc * 6.0));
+    if camera.lighting.y > 0.0 {
+        let daylight = smoothstep(-0.105, 0.087, sun.y);
+        let haze = (1.0 - exp(-5000.0 / max(camera.lighting.y, 1.0))) * exp(-max(ray.y, 0.0) * 6.0);
+        color = mix(color, mix(vec3(0.015, 0.02, 0.03), vec3(0.57, 0.64, 0.70), daylight), haze);
+    }
     return vec4(color, 1.0);
 }

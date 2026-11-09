@@ -11,5 +11,6 @@ members = [
     "crates/esp-physics",
     "crates/esp-sim",
     "crates/esp-terrain",
+    "crates/esp-weather",
     "crates/openesp"
 ]

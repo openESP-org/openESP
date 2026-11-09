@@ -26,6 +26,13 @@ struct Output {
     @location(2) camera_relative_position: vec3<f32>,
     @location(3) tangent: vec4<f32>,
 }
+fn weather_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
+    if camera.lighting.y <= 0.0 { return lit; }
+    let daylight = smoothstep(-0.105, 0.087, camera.sun.y);
+    let fog = 1.0 - exp(-3.912 * distance / max(camera.lighting.y, 1.0));
+    let fog_colour = mix(vec3(0.015, 0.02, 0.03), vec3(0.57, 0.64, 0.70), daylight);
+    return mix(lit, fog_colour, fog);
+}
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) tangent: vec4<f32>) -> Output {
     var output: Output;
     output.position = camera.view_projection * draw.model * vec4(position, 1.0);
@@ -69,7 +76,7 @@ struct Output {
         let lines = 1.0 - smoothstep(vec2(0.008), vec2(0.008) + width * 0.5, distance);
         let fade = 1.0 - smoothstep(0.2, 0.5, max(width.x, width.y));
         colour = vec4(mix(draw.diffuse.rgb, vec3(0.9), max(lines.x,lines.y) * fade), 1.0);
-        return colour;
+        return vec4(weather_fog(colour.rgb, length(input.camera_relative_position)), colour.a);
     }
     if draw.settings.y > 2.5 && draw.settings.y < 3.5 {
         colour = vec4(input.tangent.xyz, 1.0);
@@ -137,5 +144,5 @@ struct Output {
             default: { lit = mix(lit, lit * emission, night); }
         }
     }
-    return vec4(lit, colour.a);
+    return vec4(weather_fog(lit, length(input.camera_relative_position)), colour.a);
 }
