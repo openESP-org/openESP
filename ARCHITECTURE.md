@@ -128,7 +128,9 @@ deterministic approximation of wind variation in the flight model.
 Structural ice accumulates from estimated cloud or rain moisture below freezing,
 affects lift and drag, and can be removed by the configured structural-deice
 switch. Cloud liquid-water content and deice power/bleed availability are not
-yet modelled.
+yet modelled. Pitot ice can trap pitot pressure and affect indicated airspeed;
+powered pitot heat clears it according to the aircraft's heat effectiveness.
+The accumulation and blockage thresholds are estimates, not a probe-specific model.
 Legacy and PBR emissive maps are loaded as colour textures. Legacy modes select
 additive, night, blend, or multiply treatment, with user-controlled modes driven
 by the panel-light switch. PBR emissive modes still use additive treatment.

@@ -34,7 +34,8 @@ impl Flight {
                 .number()?
                 != 0.0)
         };
-        let pitot_blocked = blocked(variables, "PITOT BLOCKED")?;
+        let pitot_blocked = blocked(variables, "PITOT BLOCKED")?
+            || blocked(variables, "OPENESP PITOT ICE BLOCKED").unwrap_or(false);
         let static_blocked = blocked(variables, "STATIC PORT BLOCKED")?;
         let total_pressure = atmosphere.pressure + atmosphere.impact_pressure(speed)?;
         let [pitot_pressure, static_pressure] = variables.air_data_pressures(

@@ -859,6 +859,42 @@ fn blocked_pressure_lines_respond_to_changes_in_flight() {
 }
 
 #[test]
+fn pitot_ice_and_manual_blockages_are_independent() {
+    let mut variables = Variables::default();
+    let mut state = State {
+        velocity: DVec3::X * 50.0,
+        ..State::default()
+    };
+    let speed = |vars: &mut Variables| {
+        vars.read(&Reference::new(
+            'A',
+            "AIRSPEED INDICATED",
+            Some("meters per second"),
+        ))
+        .unwrap()
+        .number()
+        .unwrap()
+    };
+    Flight::publish(&state, &mut variables).unwrap();
+    let initial = speed(&mut variables);
+    variables.set_number("OPENESP PITOT ICE BLOCKED", "bool", 1.0);
+    variables
+        .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+        .unwrap();
+    state.velocity.x = 100.0;
+    Flight::publish(&state, &mut variables).unwrap();
+    assert_eq!(speed(&mut variables), initial);
+    variables.set_number("OPENESP PITOT ICE BLOCKED", "bool", 0.0);
+    Flight::publish(&state, &mut variables).unwrap();
+    assert_eq!(speed(&mut variables), initial);
+    variables
+        .dispatch_event("TOGGLE_PITOT_BLOCKAGE", Value::Number(0.0))
+        .unwrap();
+    Flight::publish(&state, &mut variables).unwrap();
+    assert!(speed(&mut variables) > initial + 40.0);
+}
+
+#[test]
 fn pressure_blockages_hold_indications_until_repaired() {
     let mut variables = Variables::default();
     let mut state = State {

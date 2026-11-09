@@ -2,6 +2,64 @@ use super::*;
 use std::{path::Path, sync::Arc};
 
 #[test]
+#[ignore = "requires an original aircraft in OPENESP_AIRCRAFT_PATHS"]
+fn pitot_icing_affects_airspeed_until_powered_heat_clears_it() {
+    let path = content::aircraft_paths().into_iter().next().unwrap();
+    let data = FlightData::load(&path, 0).unwrap();
+    let mut flight = Flight::new(&data, 180.0, 1000.0, 0.5, true).unwrap();
+    let mut variables = controls(&data);
+    variables
+        .configure_electrical(
+            &esp_formats::cfg::electrical::Electrical::from_config(&data.configuration).unwrap(),
+            false,
+        )
+        .unwrap();
+    variables.update_electrical().unwrap();
+    variables.set_number("SEA LEVEL TEMPERATURE", "celsius", -5.0);
+    variables.set_number("OPENESP CLOUD BASE:1", "meters", 500.0);
+    variables.set_number("OPENESP CLOUD COVER:1", "number", 1.0);
+    flight.pitot_ice = 0.49999;
+    flight.publish_at(&flight.current, &mut variables).unwrap();
+    flight.advance(1.0 / 60.0, &mut variables).unwrap();
+    assert!(flight.pitot_ice_blocked);
+    flight.publish_at(&flight.current, &mut variables).unwrap();
+    let read_speed = |vars: &mut Variables| {
+        vars.read(&Reference::new(
+            'A',
+            "AIRSPEED INDICATED",
+            Some("meters per second"),
+        ))
+        .unwrap()
+        .number()
+        .unwrap()
+    };
+    let blocked_speed = read_speed(&mut variables);
+    let mut faster = flight.current;
+    faster.velocity.x += 30.0;
+    flight.publish_at(&faster, &mut variables).unwrap();
+    assert!((read_speed(&mut variables) - blocked_speed).abs() < 1e-6);
+
+    variables.set_number("OPENESP CLOUD COVER:1", "number", 0.0);
+    variables.set_number("PITOT HEAT", "bool", 1.0);
+    flight.pitot_ice = 0.11;
+    for _ in 0..60 {
+        flight.advance(1.0 / 60.0, &mut variables).unwrap();
+    }
+    assert!(flight.pitot_ice_blocked);
+    assert!((flight.pitot_ice - 0.11).abs() < 1e-9);
+    variables
+        .dispatch_event("TOGGLE_MASTER_BATTERY", Value::Number(0.0))
+        .unwrap();
+    variables.update_electrical().unwrap();
+    for _ in 0..600 {
+        flight.advance(1.0 / 60.0, &mut variables).unwrap();
+    }
+    assert!(!flight.pitot_ice_blocked);
+    flight.publish_at(&faster, &mut variables).unwrap();
+    assert!(read_speed(&mut variables) > blocked_speed + 10.0);
+}
+
+#[test]
 #[ignore = "requires the original B737 in OPENESP_AIRCRAFT_PATHS"]
 fn real_aircraft_structural_ice_changes_flight_and_deice_removes_it() {
     let path = content::aircraft_paths().into_iter().next().unwrap();

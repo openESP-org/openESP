@@ -51,6 +51,9 @@ pub struct Flight {
     surface_condition: crate::weather::SurfaceCondition,
     structural_ice: f64,
     structural_deice_available: bool,
+    pitot_ice: f64,
+    pitot_ice_blocked: bool,
+    pitot_heat_effectiveness: f64,
 }
 
 pub mod ground;
@@ -174,6 +177,14 @@ impl Flight {
             "invalid fuel selector count"
         );
         let loading = weights.load(fuel_fraction, payload)?;
+        let pitot_heat_effectiveness = data
+            .configuration
+            .number("pitot_static", "pitot_heat")?
+            .unwrap_or(1.0);
+        ensure!(
+            pitot_heat_effectiveness.is_finite() && pitot_heat_effectiveness >= 0.0,
+            "invalid pitot heat effectiveness"
+        );
         let previous_cg = loading.cg;
         Atmosphere::standard(height)?;
         let gear = crate::loading::landing_gear(data)?;
@@ -236,6 +247,9 @@ impl Flight {
             origin_elevation: 0.0,
             surface_condition: crate::weather::SurfaceCondition::default(),
             structural_ice: 0.0,
+            pitot_ice: 0.0,
+            pitot_ice_blocked: false,
+            pitot_heat_effectiveness,
             structural_deice_available: data
                 .configuration
                 .number("deice_system", "structural_deice_type")?

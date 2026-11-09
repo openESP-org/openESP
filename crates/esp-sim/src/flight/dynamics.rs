@@ -33,6 +33,32 @@ impl Flight {
             moisture,
             self.structural_deice_available && deice_switch,
         )?;
+        let enabled = |variables: &mut Variables, name| {
+            variables
+                .read(&Reference::new('A', name, Some("bool")))
+                .ok()
+                .and_then(|value| value.number().ok())
+                .is_some_and(|value| value != 0.0)
+        };
+        let pitot_heat =
+            enabled(variables, "PITOT HEAT") && enabled(variables, "CIRCUIT PITOT HEAT ON");
+        // Small probes ice and clear more quickly than the whole airframe.
+        let pitot_ice = crate::weather::structural_ice(
+            self.pitot_ice,
+            dt * 8.0,
+            weather.at(altitude)?.temperature - 273.15,
+            moisture,
+            false,
+        )? * if pitot_heat {
+            (-dt * 8.0 * self.pitot_heat_effectiveness / 180.0).exp()
+        } else {
+            1.0
+        };
+        let pitot_ice_blocked = if self.pitot_ice_blocked {
+            pitot_ice > 0.1
+        } else {
+            pitot_ice >= 0.5
+        };
         let hydraulic_fraction = self
             .hydraulics
             .as_ref()
@@ -548,6 +574,14 @@ impl Flight {
         self.current = next;
         self.surface_condition = surface_condition;
         self.structural_ice = structural_ice;
+        self.pitot_ice = pitot_ice;
+        self.pitot_ice_blocked = pitot_ice_blocked;
+        variables.set_number("PITOT ICE PCT", "percent", pitot_ice * 100.0);
+        variables.set_number(
+            "OPENESP PITOT ICE BLOCKED",
+            "bool",
+            f64::from(pitot_ice_blocked),
+        );
         self.on_ground = self
             .gear
             .forces(
