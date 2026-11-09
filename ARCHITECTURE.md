@@ -83,8 +83,9 @@ the renderer. The app projects selected bounds into its local scene; the
 renderer uploads and composites the imagery beneath airport surfaces.
 The initial elevation mesh samples registered simulator DEM tiles over a fixed
 area around the starting position; photo tiles are subdivided onto that mesh.
-Terrain paging, land-class textures, and terrain-aware ground contact remain
-unfinished, so flight contact still uses the local flat surface.
+Terrain paging and land-class textures remain unfinished. The flight runtime
+samples the same local height mesh for ground contact and uses the airport's
+runway, taxiway and apron footprints for its flat airport surfaces.
 `esp-render::ground` validates and uploads either the terrain geometry or the
 fallback grid.
 

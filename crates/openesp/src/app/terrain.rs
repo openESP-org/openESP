@@ -1,7 +1,43 @@
 use anyhow::Result;
 use glam::DVec3;
 
-use crate::{cli::Arguments, navigation::Origin};
+use crate::{cli::Arguments, navigation::Origin, scenery::AirportScene};
+
+pub(super) fn ground(
+    mesh: std::sync::Arc<esp_terrain::mesh::Mesh>,
+    scene: &AirportScene,
+) -> esp_sim::flight::ground::Ground {
+    let mut ground = esp_sim::flight::ground::Ground::new(mesh);
+    for runway in &scene.runways {
+        let start = [runway.threshold.x, runway.threshold.z];
+        let end = [
+            start[0] + runway.heading.sin() * f64::from(runway.length),
+            start[1] + runway.heading.cos() * f64::from(runway.length),
+        ];
+        ground.add_segment(start, end, f64::from(runway.width));
+    }
+    for taxiway in &scene.taxiways {
+        ground.add_segment(
+            [taxiway.start.x, taxiway.start.z],
+            [taxiway.end.x, taxiway.end.z],
+            f64::from(taxiway.width),
+        );
+    }
+    for apron in &scene.aprons {
+        for triangle in apron.indices.as_chunks::<3>().0 {
+            let points = triangle.map(|index| {
+                apron
+                    .vertices
+                    .get(index as usize)
+                    .map(|point| [point.x, point.z])
+            });
+            if let [Some(a), Some(b), Some(c)] = points {
+                ground.add_triangle([a, b, c]);
+            }
+        }
+    }
+    ground
+}
 
 pub(super) fn load(
     arguments: &Arguments,

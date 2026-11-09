@@ -18,10 +18,11 @@ impl Flight {
             "percent over 100",
             self.gear.extension(),
         );
-        for (index, position) in
-            self.gear
-                .animation_positions(&self.current, self.loading.cg, TEST_SURFACE)
-        {
+        for (index, position) in self.gear.animation_positions(
+            &self.current,
+            self.loading.cg,
+            self.surface_at(&self.current),
+        ) {
             variables.set_number(
                 &format!("GEAR ANIMATION POSITION:{index}"),
                 "keyframe",

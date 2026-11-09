@@ -879,6 +879,7 @@ dependencies = [
  "esp-nav",
  "esp-physics",
  "esp-script",
+ "esp-terrain",
  "glam 0.30.10",
  "image",
  "petgraph",

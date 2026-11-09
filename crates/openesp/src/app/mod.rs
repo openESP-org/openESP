@@ -317,9 +317,12 @@ impl App {
                     } else {
                         Vec::new()
                     };
-                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?;
-                    let photos = terrain::photos(&self.arguments, terrain.as_ref())?;
-                    let render_terrain = terrain.as_ref().map(terrain::render_mesh);
+                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?.map(Arc::new);
+                    let photos = terrain::photos(&self.arguments, terrain.as_deref())?;
+                    let render_terrain = terrain.as_deref().map(terrain::render_mesh);
+                    if let (Some(flight), Some(mesh)) = (&mut self.flight, &terrain) {
+                        flight.set_ground(terrain::ground(mesh.clone(), &scene));
+                    }
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,

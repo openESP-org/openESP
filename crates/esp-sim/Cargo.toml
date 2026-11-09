@@ -10,6 +10,7 @@ esp-assets = { path = "../esp-assets" }
 esp-formats = { path = "../esp-formats" }
 esp-script = { path = "../esp-script" }
 esp-nav = { path = "../esp-nav" }
+esp-terrain = { path = "../esp-terrain" }
 glam = "0.30"
 petgraph = "0.8"
 

@@ -46,7 +46,10 @@ pub struct Flight {
     aileron_up_limit: f64,
     autopilot: Autopilot,
     on_ground: bool,
+    ground: Option<ground::Ground>,
 }
+
+pub mod ground;
 
 // Physical surface properties of the local test grid. Scenery surfaces will
 // supply their own coefficients when terrain contact is connected.
@@ -57,6 +60,16 @@ const TEST_SURFACE: Surface = Surface {
 };
 
 impl Flight {
+    pub fn set_ground(&mut self, ground: ground::Ground) {
+        self.ground = Some(ground);
+    }
+
+    fn surface_at(&self, state: &State) -> Surface {
+        self.ground.as_ref().map_or(TEST_SURFACE, |ground| {
+            ground.surface(state.position.x, state.position.y)
+        })
+    }
+
     pub fn new(
         data: &FlightData,
         knots: f64,
@@ -197,6 +210,7 @@ impl Flight {
             aileron_up_limit,
             autopilot: Autopilot::default(),
             on_ground,
+            ground: None,
         })
     }
 

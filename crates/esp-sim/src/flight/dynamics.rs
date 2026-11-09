@@ -393,15 +393,16 @@ impl Flight {
             new_loading = loading;
         }
         let mut next = self.current;
-        let max_step = if self
-            .gear
-            .clearance(&next, self.loading.cg, TEST_SURFACE.elevation)
-            < 10.0
-        {
-            1.0 / 240.0
-        } else {
-            1.0 / 60.0
-        };
+        let max_step =
+            if self
+                .gear
+                .clearance(&next, self.loading.cg, self.surface_at(&next).elevation)
+                < 10.0
+            {
+                1.0 / 240.0
+            } else {
+                1.0 / 60.0
+            };
         let steps = (dt / max_step).ceil().max(1.0) as u32;
         for _ in 0..steps {
             let before = next;
@@ -411,13 +412,14 @@ impl Flight {
                 dt / f64::from(steps),
                 DVec3::Z * 9.80665,
                 |state| {
+                    let surface = self.surface_at(state);
                     let air = weather.at(-state.position.z)?;
                     let mut controls = controls;
                     controls.sound_speed = Some(air.sound_speed);
                     controls.ground_height = Some(self.model.wing_height(
                         state,
                         self.loading.cg,
-                        TEST_SURFACE.elevation,
+                        surface.elevation,
                     ));
                     let mut loads = self.model.forces(
                         state.air_velocity(wind),
@@ -452,32 +454,30 @@ impl Flight {
                     }
                     let ground =
                         self.gear
-                            .forces(state, self.loading.cg, TEST_SURFACE, ground_controls)?;
+                            .forces(state, self.loading.cg, surface, ground_controls)?;
                     loads.force += ground.wrench.force;
                     loads.moment += ground.wrench.moment;
                     Ok(loads)
                 },
             )?
             .into();
+            let surface = self.surface_at(&next);
             self.gear.solve_friction(
                 &mut next,
                 &self.loading.mass,
                 self.loading.cg,
-                TEST_SURFACE,
+                surface,
                 ground_controls,
                 dt / f64::from(steps),
             )?;
             self.gear.advance_wheel_motion(
                 &next,
                 self.loading.cg,
-                TEST_SURFACE,
+                surface,
                 ground_controls,
                 dt / f64::from(steps),
             )?;
-            if let Some(impact) = self
-                .gear
-                .impact(&before, &next, self.loading.cg, TEST_SURFACE)
-            {
+            if let Some(impact) = self.gear.impact(&before, &next, self.loading.cg, surface) {
                 ensure!(
                     !impact.scrape,
                     "scrape contact {} reached the ground; scrape forces are not simulated yet",
@@ -492,7 +492,7 @@ impl Flight {
             }
         }
         ensure!(
-            next.position.z < 0.0,
+            next.position.z + self.surface_at(&next).elevation < 0.0,
             "aircraft center of gravity penetrated the ground"
         );
         crate::navigation::publish_acceleration(&self.current, &next, dt, variables)?;
@@ -525,7 +525,7 @@ impl Flight {
             .forces(
                 &self.current,
                 self.loading.cg,
-                TEST_SURFACE,
+                self.surface_at(&self.current),
                 ground_controls,
             )?
             .on_ground;
