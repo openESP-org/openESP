@@ -287,6 +287,7 @@ impl App {
                         )?;
                         let (north, east) = origin.local_position(latitude, longitude)?;
                         scenery::AirportScene {
+                            elevation_m: 0.0,
                             runways: vec![esp_render::Runway {
                                 threshold: DVec3::new(east, 0.0, north),
                                 heading: (course + self.arguments.magnetic_declination)
@@ -299,6 +300,7 @@ impl App {
                         }
                     } else {
                         scenery::AirportScene {
+                            elevation_m: 0.0,
                             runways: Vec::new(),
                             taxiways: Vec::new(),
                             aprons: Vec::new(),
@@ -315,7 +317,9 @@ impl App {
                     } else {
                         Vec::new()
                     };
-                    let photos = terrain::photos(&self.arguments)?;
+                    let terrain = terrain::load(&self.arguments, scene.elevation_m)?;
+                    let photos = terrain::photos(&self.arguments, terrain.as_ref())?;
+                    let render_terrain = terrain.as_ref().map(terrain::render_mesh);
                     self.renderer = Some(pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
@@ -325,6 +329,7 @@ impl App {
                             aprons: &scene.aprons,
                             objects: &objects,
                             photos: &photos,
+                            terrain: render_terrain.as_ref(),
                         },
                         self.arguments.msaa,
                     ))?);

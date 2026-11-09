@@ -817,6 +817,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-installs"
+version = "0.1.0"
+dependencies = [
+ "winreg",
+]
+
+[[package]]
 name = "esp-nav"
 version = "0.1.0"
 dependencies = [
@@ -884,6 +891,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "esp-formats",
+ "esp-nav",
 ]
 
 [[package]]
@@ -2054,6 +2062,7 @@ dependencies = [
  "clap",
  "esp-assets",
  "esp-formats",
+ "esp-installs",
  "esp-nav",
  "esp-physics",
  "esp-render",
@@ -3805,6 +3814,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winreg"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

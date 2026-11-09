@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::navigation::Origin;
 
 pub struct AirportScene {
+    pub elevation_m: f64,
     pub runways: Vec<esp_render::Runway>,
     pub taxiways: Vec<esp_render::Taxiway>,
     pub aprons: Vec<esp_render::Apron>,
@@ -157,6 +158,7 @@ fn airport_scene(
         });
     }
     Ok(AirportScene {
+        elevation_m: airport.elevation_m,
         runways,
         taxiways,
         aprons,

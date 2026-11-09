@@ -81,10 +81,20 @@ object loading will move together into `esp-scenery` as that domain grows.
 `esp-terrain` decodes and selects geographic imagery tiles independently of
 the renderer. The app projects selected bounds into its local scene; the
 renderer uploads and composites the imagery beneath airport surfaces.
+The initial elevation mesh samples registered simulator DEM tiles over a fixed
+area around the starting position; photo tiles are subdivided onto that mesh.
+Terrain paging, land-class textures, and terrain-aware ground contact remain
+unfinished, so flight contact still uses the local flat surface.
+`esp-render::ground` validates and uploads either the terrain geometry or the
+fallback grid.
 
 `esp-physics::solar` computes the sun's local direction from UTC and position.
 The app updates that direction from the live flight position; `esp-render`
 uses it for surface lighting and atmospheric sky scattering.
+
+`esp-installs` reads simulator installation paths from the Windows registry;
+it does not modify the registry or simulator directories. The app uses a
+registered install for base terrain when no explicit simulator root is set.
 
 `esp-formats` builds the MIT-licensed flightsimlib PTC decoder from vendored C
 sources under `native/ptc`. A fixed-size photo bridge validates container,

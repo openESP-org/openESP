@@ -8,6 +8,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 esp-assets = { path = "../esp-assets" }
 esp-formats = { path = "../esp-formats" }
+esp-installs = { path = "../esp-installs" }
 esp-render = { path = "../esp-render" }
 esp-nav = { path = "../esp-nav" }
 esp-physics = { path = "../esp-physics" }

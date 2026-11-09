@@ -8,6 +8,7 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 pub mod camera;
+mod ground;
 mod material;
 mod sky;
 mod tangent;
@@ -77,6 +78,7 @@ pub struct Renderer {
     interior: Vec<Draw>,
     panels: HashMap<String, wgpu::Texture>,
     ground: Draw,
+    ground_tracks_camera: bool,
     photos: Vec<Draw>,
     runway: Vec<Draw>,
     objects: Vec<Draw>,
@@ -116,12 +118,20 @@ pub struct SceneryObject {
     pub textures: std::path::PathBuf,
 }
 
-/// A geographically projected image in northwest, southwest, southeast, northeast order.
+/// A geographically projected photo tile draped over terrain.
 pub struct PhotoTile {
-    pub corners: [DVec3; 4],
+    pub vertices: Vec<DVec3>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+pub struct TerrainMesh {
+    pub vertices: Vec<DVec3>,
+    pub normals: Vec<DVec3>,
+    pub indices: Vec<u32>,
 }
 
 pub struct Scene<'a> {
@@ -130,6 +140,7 @@ pub struct Scene<'a> {
     pub aprons: &'a [Apron],
     pub objects: &'a [SceneryObject],
     pub photos: &'a [PhotoTile],
+    pub terrain: Option<&'a TerrainMesh>,
 }
 
 fn apron_mesh(aprons: &[Apron]) -> (Vec<Vertex>, Vec<u32>) {
@@ -243,6 +254,7 @@ impl Renderer {
             aprons,
             objects,
             photos,
+            terrain,
         } = scene;
         // Avoid initializing secondary GL drivers when using native GPU APIs.
         // Some Windows GL drivers can fail even when DX12 was selected for
@@ -657,56 +669,7 @@ impl Renderer {
         let aircraft_origin = DVec3::new(0.0, -f64::from(min.y), 0.0);
         let centre = (min + max) * 0.5;
         let radius = ((max - min).length() * 0.5).max(1.0);
-        // Grid lines come from interpolated UVs, whose precision degrades with
-        // the vertex span. Only cell-sized lines survive the distance fade, so
-        // the pattern-precise square only needs to cover where lines are
-        // visible; the surrounding fill reaches the horizon.
-        let extent = 40_000.0;
-        let pattern = 1_024.0;
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        let mut quad = |points: [(f64, f64); 4]| {
-            let base = vertices.len() as u32;
-            for (x, z) in points {
-                vertices.push(Vertex {
-                    position: [x as f32, 0.0, z as f32],
-                    normal: [0.0, 1.0, 0.0],
-                    uv: [x as f32, z as f32],
-                    tangent: [0.0; 4],
-                });
-            }
-            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-        };
-        quad([
-            (-pattern, -pattern),
-            (-pattern, pattern),
-            (pattern, pattern),
-            (pattern, -pattern),
-        ]);
-        quad([
-            (-extent, pattern),
-            (-extent, extent),
-            (extent, extent),
-            (extent, pattern),
-        ]);
-        quad([
-            (-extent, -extent),
-            (-extent, -pattern),
-            (extent, -pattern),
-            (extent, -extent),
-        ]);
-        quad([
-            (-extent, -pattern),
-            (-extent, pattern),
-            (-pattern, pattern),
-            (-pattern, -pattern),
-        ]);
-        quad([
-            (pattern, -pattern),
-            (pattern, pattern),
-            (extent, pattern),
-            (extent, -pattern),
-        ]);
+        let (vertices, indices) = ground::mesh(terrain)?;
         let white = upload_texture(
             &device,
             &queue,
@@ -726,7 +689,7 @@ impl Renderer {
                     model: Mat4::IDENTITY.to_cols_array_2d(),
                     normal: Mat4::IDENTITY.to_cols_array_2d(),
                     diffuse: [0.32, 0.32, 0.32, 1.0],
-                    settings: [0.0, 1.0, 0.0, 0.0],
+                    settings: [0.0, if terrain.is_some() { 2.0 } else { 1.0 }, 0.0, 0.0],
                     pbr: [0.0; 4],
                     normal_settings: [0.0; 4],
                 },
@@ -762,19 +725,36 @@ impl Renderer {
             anyhow::ensure!(
                 photo.width > 0
                     && photo.height > 0
-                    && photo.corners.iter().all(|corner| corner.is_finite())
+                    && photo.vertices.len() == photo.uvs.len()
+                    && photo.vertices.iter().all(|vertex| vertex.is_finite())
+                    && photo.uvs.iter().flatten().all(|value| value.is_finite())
+                    && !photo.indices.is_empty()
+                    && photo.indices.len().is_multiple_of(3)
+                    && photo
+                        .indices
+                        .iter()
+                        .all(|index| (*index as usize) < photo.vertices.len())
                     && (photo.width as usize)
                         .checked_mul(photo.height as usize)
                         .and_then(|n| n.checked_mul(4))
                         == Some(photo.rgba.len()),
                 "invalid photo tile"
             );
-            let vertices = std::array::from_fn::<_, 4, _>(|i| Vertex {
-                position: [photo.corners[i].x as f32, 0.001, photo.corners[i].z as f32],
-                normal: [0.0, 1.0, 0.0],
-                uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][i],
-                tangent: [0.0; 4],
-            });
+            let vertices: Vec<_> = photo
+                .vertices
+                .iter()
+                .zip(&photo.uvs)
+                .map(|(position, uv)| Vertex {
+                    position: [
+                        position.x as f32,
+                        position.y as f32 + 0.1,
+                        position.z as f32,
+                    ],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: *uv,
+                    tangent: [0.0; 4],
+                })
+                .collect();
             let image =
                 texture::Texture::rgba(photo.width, photo.height, photo.rgba.clone(), false);
             let view = upload_texture(&device, &queue, &image)?.create_view(&Default::default());
@@ -785,7 +765,7 @@ impl Renderer {
                 &view,
                 DrawData {
                     vertices: &vertices,
-                    indices: &[0, 1, 2, 0, 2, 3],
+                    indices: &photo.indices,
                     transform: Mat4::IDENTITY,
                     uniform: DrawUniform {
                         model: Mat4::IDENTITY.to_cols_array_2d(),
@@ -950,6 +930,7 @@ impl Renderer {
             interior,
             panels,
             ground,
+            ground_tracks_camera: terrain.is_none(),
             photos: photo_draws,
             runway: runway_draws,
             objects: scenery_draws,
@@ -1061,11 +1042,13 @@ impl Renderer {
         } else {
             &mut self.exterior
         };
-        self.ground.transform = Mat4::from_translation(Vec3::new(
-            camera.position.x.round() as f32,
-            0.0,
-            camera.position.z.round() as f32,
-        ));
+        if self.ground_tracks_camera {
+            self.ground.transform = Mat4::from_translation(Vec3::new(
+                camera.position.x.round() as f32,
+                0.0,
+                camera.position.z.round() as f32,
+            ));
+        }
         for draw in draws
             .iter_mut()
             .chain(std::iter::once(&mut self.ground))

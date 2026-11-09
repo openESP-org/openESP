@@ -3,7 +3,79 @@ use glam::DVec3;
 
 use crate::{cli::Arguments, navigation::Origin};
 
-pub(super) fn photos(arguments: &Arguments) -> Result<Vec<esp_render::PhotoTile>> {
+pub(super) fn load(
+    arguments: &Arguments,
+    airport_elevation: f64,
+) -> Result<Option<esp_terrain::mesh::Mesh>> {
+    let roots = arguments.fsx_root.clone().map_or_else(
+        || {
+            esp_installs::discover()
+                .into_iter()
+                .map(|install| install.root)
+                .collect()
+        },
+        |root| vec![root],
+    );
+    let mut selected = None;
+    for root in roots {
+        let terrain = esp_terrain::elevation::Terrain::load(
+            &root,
+            arguments.latitude,
+            arguments.longitude,
+            45_000.0,
+        )?;
+        if !terrain.is_empty() {
+            selected = Some((root, terrain));
+            break;
+        }
+    }
+    let Some((root, terrain)) = selected else {
+        return Ok(None);
+    };
+    let reference = if arguments.scenery_bgl.is_some() {
+        airport_elevation
+    } else {
+        terrain
+            .height(arguments.latitude, arguments.longitude)
+            .unwrap_or(0.0)
+    };
+    let mesh = esp_terrain::mesh::Mesh::build(
+        &terrain,
+        arguments.latitude,
+        arguments.longitude,
+        30_000.0,
+        256,
+        reference,
+    )?;
+    if mesh.indices.is_empty() {
+        return Ok(None);
+    }
+    eprintln!("terrain: loaded elevation from {}", root.display());
+    Ok(Some(mesh))
+}
+
+pub(super) fn render_mesh(mesh: &esp_terrain::mesh::Mesh) -> esp_render::TerrainMesh {
+    esp_render::TerrainMesh {
+        vertices: mesh
+            .vertices
+            .iter()
+            .copied()
+            .map(DVec3::from_array)
+            .collect(),
+        normals: mesh
+            .normals
+            .iter()
+            .copied()
+            .map(DVec3::from_array)
+            .collect(),
+        indices: mesh.indices.clone(),
+    }
+}
+
+pub(super) fn photos(
+    arguments: &Arguments,
+    terrain: Option<&esp_terrain::mesh::Mesh>,
+) -> Result<Vec<esp_render::PhotoTile>> {
     let Some(folder) = arguments.scenery.as_deref() else {
         return Ok(Vec::new());
     };
@@ -18,15 +90,44 @@ pub(super) fn photos(arguments: &Arguments) -> Result<Vec<esp_render::PhotoTile>
         let bounds = tile.bounds;
         let point = |latitude, longitude| -> Result<DVec3> {
             let (north, east) = origin.local_position(latitude, longitude)?;
-            Ok(DVec3::new(east, 0.0, north))
+            let height = terrain
+                .and_then(|mesh| mesh.height(east, north))
+                .unwrap_or(0.0);
+            Ok(DVec3::new(east, height, north))
         };
+        let nw = point(bounds.north, bounds.west)?;
+        let se = point(bounds.south, bounds.east)?;
+        let extent = (se.x - nw.x).abs().max((se.z - nw.z).abs());
+        let divisions = terrain.map_or(1, |mesh| {
+            ((extent / mesh.cell_size() * 2.0).ceil() as usize).clamp(1, 128)
+        });
+        let mut vertices = Vec::with_capacity((divisions + 1) * (divisions + 1));
+        let mut uvs = Vec::with_capacity(vertices.capacity());
+        for row in 0..=divisions {
+            let v = row as f64 / divisions as f64;
+            for col in 0..=divisions {
+                let u = col as f64 / divisions as f64;
+                vertices.push(point(
+                    bounds.north + (bounds.south - bounds.north) * v,
+                    bounds.west + (bounds.east - bounds.west) * u,
+                )?);
+                uvs.push([u as f32, v as f32]);
+            }
+        }
+        let mut indices = Vec::with_capacity(divisions * divisions * 6);
+        for row in 0..divisions {
+            for col in 0..divisions {
+                let a = (row * (divisions + 1) + col) as u32;
+                let b = a + 1;
+                let c = a + divisions as u32 + 1;
+                let d = c + 1;
+                indices.extend([a, c, d, a, d, b]);
+            }
+        }
         result.push(esp_render::PhotoTile {
-            corners: [
-                point(bounds.north, bounds.west)?,
-                point(bounds.south, bounds.west)?,
-                point(bounds.south, bounds.east)?,
-                point(bounds.north, bounds.east)?,
-            ],
+            vertices,
+            uvs,
+            indices,
             width: tile.width,
             height: tile.height,
             rgba: tile.rgba,
