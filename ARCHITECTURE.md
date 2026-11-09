@@ -79,6 +79,9 @@ stand. It reads content without modifying the add-on. Airport surface and
 object loading will move together into `esp-scenery` as that domain grows.
 Placed objects use the scene's mean-sea-level datum, and above-ground placements
 sample the same terrain and airport surface footprints used by flight contact.
+References absent from add-on libraries are resolved against the selected
+simulator's global model libraries, loading only requested models. Regional
+library discovery and a persistent index remain future work.
 
 `esp-terrain` decodes and selects geographic imagery tiles independently of
 the renderer. The app projects selected bounds into its local scene; the

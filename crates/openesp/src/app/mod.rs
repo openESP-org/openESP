@@ -352,6 +352,12 @@ impl App {
                                     .map(|_| scene.elevation_m)
                             });
                     let objects = if let Some(path) = &self.arguments.scenery_objects {
+                        let installed = self.arguments.fsx_root.clone().or_else(|| {
+                            esp_installs::discover()
+                                .into_iter()
+                                .next()
+                                .map(|install| install.root)
+                        });
                         scenery::objects(
                             path,
                             &self.arguments.scenery_library,
@@ -360,6 +366,7 @@ impl App {
                             self.arguments.longitude,
                             ground.as_ref(),
                             reference_msl,
+                            installed.as_deref(),
                         )?
                     } else {
                         Vec::new()

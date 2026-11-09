@@ -171,6 +171,7 @@ mod tests {
             args.longitude,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(models.len() >= 448);
@@ -206,8 +207,29 @@ mod tests {
             args.longitude,
             Some(&ground),
             Some(scene.elevation_m),
+            None,
         )
         .unwrap();
+        let with_global = crate::scenery::objects(
+            args.scenery_objects.as_deref().unwrap(),
+            &args.scenery_library,
+            None,
+            args.latitude,
+            args.longitude,
+            Some(&ground),
+            Some(scene.elevation_m),
+            Some(&root),
+        )
+        .unwrap();
+        eprintln!(
+            "LTFO: {} add-on objects, {} with global libraries",
+            grounded.len(),
+            with_global.len()
+        );
+        assert!(
+            with_global.len() > grounded.len(),
+            "LTFO global library references were not resolved"
+        );
         assert_eq!(models.len(), grounded.len());
         assert!(models.iter().zip(&grounded).any(|(before, after)| {
             (before.transform.w_axis.y - after.transform.w_axis.y).abs() > 0.5

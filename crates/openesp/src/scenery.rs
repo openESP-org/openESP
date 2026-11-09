@@ -185,6 +185,7 @@ fn airport_scene(
 }
 
 /// Load explicitly supplied model libraries and their placed objects.
+#[allow(clippy::too_many_arguments)]
 pub fn objects(
     placement_path: &Path,
     libraries: &[std::path::PathBuf],
@@ -193,6 +194,7 @@ pub fn objects(
     longitude: f64,
     ground: Option<&esp_sim::flight::ground::Ground>,
     reference_msl: Option<f64>,
+    simulator_root: Option<&Path>,
 ) -> Result<Vec<esp_render::SceneryObject>> {
     use std::{
         collections::{HashMap, HashSet},
@@ -254,6 +256,33 @@ pub fn objects(
     // elevation. Object-only libraries do not contain a terrain datum.
     let airport_elevation =
         reference_msl.or_else(|| airport_elevation.map(|(_, elevation)| elevation));
+    let mut missing = HashSet::new();
+    if simulator_root.is_some() {
+        for path in &paths {
+            let bytes =
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let bgl = esp_formats::bgl::Bgl::parse(&bytes)?;
+            for section in bgl.sections.iter().filter(|section| section.kind == 0x25) {
+                let esp_formats::bgl::Directory::Direct(subsections) = &section.directory else {
+                    continue;
+                };
+                for subsection in subsections {
+                    for record in esp_formats::bgl::scenery::parse(subsection.records.data)? {
+                        if let Some(object) = record.decode()?
+                            && let esp_formats::bgl::scenery::Definition::Library { guid, .. } =
+                                object.definition
+                            && !models.contains_key(guid.as_bytes())
+                        {
+                            missing.insert(*guid.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(root) = simulator_root {
+            global_models::load(root, &mut missing, &mut models);
+        }
+    }
     let mut result = Vec::new();
     for path in paths {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -309,6 +338,8 @@ pub fn objects(
     eprintln!("scenery: loaded {} placed model(s)", result.len());
     Ok(result)
 }
+
+mod global_models;
 
 fn placement_height(
     placement: &esp_formats::bgl::scenery::Placement,
@@ -482,6 +513,7 @@ mod object_tests {
             9.43264246,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(objects.len(), 1);
@@ -511,14 +543,24 @@ mod object_tests {
             40.835,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(!objects.is_empty(), "no placed objects found");
         let mut reversed = libraries.clone();
         reversed.push(placement.clone().into());
         reversed.push(placement.clone().into());
-        let objects_from_library =
-            super::objects(&libraries[0], &reversed, None, 41.168, 40.835, None, None).unwrap();
+        let objects_from_library = super::objects(
+            &libraries[0],
+            &reversed,
+            None,
+            41.168,
+            40.835,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             objects_from_library.len(),
             objects.len(),
