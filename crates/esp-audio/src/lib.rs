@@ -44,6 +44,10 @@ pub enum Command {
         id: VoiceId,
         inside: bool,
     },
+    Doppler {
+        id: VoiceId,
+        factor: f64,
+    },
     Remove(VoiceId),
 }
 
@@ -57,7 +61,10 @@ fn send_controls(sender: &SyncSender<Message>, commands: Vec<Command>) -> Result
         ensure!(
             matches!(
                 command,
-                Command::Set { .. } | Command::Spatial { .. } | Command::View { .. }
+                Command::Set { .. }
+                    | Command::Spatial { .. }
+                    | Command::View { .. }
+                    | Command::Doppler { .. }
             ),
             "audio control batch contains a non-control command"
         );
@@ -78,6 +85,7 @@ struct Voice {
     inside: bool,
     active: bool,
     spatial: Option<Spatial>,
+    doppler: f64,
 }
 
 /// A deterministic mixer; callers can render to a device or an offline buffer.
@@ -206,6 +214,10 @@ fn validate_command(command: &Command) -> Result<()> {
         ),
         Command::Remove(_) => {}
         Command::View { .. } => {}
+        Command::Doppler { factor, .. } => ensure!(
+            factor.is_finite() && (0.5..=2.0).contains(factor),
+            "invalid doppler factor"
+        ),
     }
     Ok(())
 }
@@ -250,6 +262,7 @@ impl Mixer {
                     inside: true,
                     active: false,
                     spatial: None,
+                    doppler: 1.0,
                 });
             }
             Command::Set {
@@ -276,6 +289,11 @@ impl Mixer {
             Command::View { id, inside } => {
                 if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
                     voice.inside = inside;
+                }
+            }
+            Command::Doppler { id, factor } => {
+                if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+                    voice.doppler = factor;
                 }
             }
         }
@@ -332,8 +350,8 @@ impl Mixer {
                 .as_deref()
                 .map_or(1.0, |p| envelope(p, voice.level, 1.0))
                 .clamp(0.01, 8.0);
-            let increment =
-                pitch * f64::from(voice.sample.sample_rate) / f64::from(self.sample_rate);
+            let increment = pitch * voice.doppler * f64::from(voice.sample.sample_rate)
+                / f64::from(self.sample_rate);
             let source_channels = voice.sample.channels as usize;
             let frames = voice.sample.samples.len() / source_channels;
             for frame in output.chunks_exact_mut(self.channels) {
@@ -534,6 +552,34 @@ mod tests {
             sample_rate: rate,
             samples: values.to_vec(),
         })
+    }
+
+    #[test]
+    fn doppler_changes_playback_rate_without_changing_the_authored_pitch_curve() {
+        let mut mixer = Mixer::new(8, 1).unwrap();
+        add(
+            &mut mixer,
+            sample(&[0.0, 0.1, 0.2, 0.3, 0.4], 1, 8),
+            Parameters::default(),
+            true,
+        );
+        mixer
+            .command(Command::Doppler {
+                id: VoiceId(1),
+                factor: 2.0,
+            })
+            .unwrap();
+        let mut output = [0.0; 3];
+        mixer.render(&mut output);
+        assert!((output[1] - 0.2).abs() < 1e-6 && (output[2] - 0.4).abs() < 1e-6);
+        assert!(
+            mixer
+                .command(Command::Doppler {
+                    id: VoiceId(1),
+                    factor: f64::NAN
+                })
+                .is_err()
+        );
     }
 
     #[test]

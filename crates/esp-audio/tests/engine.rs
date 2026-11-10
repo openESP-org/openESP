@@ -114,6 +114,70 @@ fn real_jet_cone_changes_volume_between_front_and_rear() {
 
 #[test]
 #[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]
+fn real_engine_layer_changes_pitch_with_doppler() {
+    let path = content::aircraft_paths().into_iter().next().unwrap();
+    let set = SoundSet::load(&path, 0, None).unwrap();
+    let layer = set
+        .engine_layers(1, EngineEvent::Combustion)
+        .unwrap()
+        .into_iter()
+        .find(|layer| layer.parameters.viewpoint == Some(2) && !layer.filenames.is_empty())
+        .unwrap();
+    let sample = Arc::new(set.sample(&layer.filenames[0]).unwrap());
+    let mut mixer = Mixer::new(48_000, 1).unwrap();
+    mixer
+        .command(Command::Add {
+            id: VoiceId(0),
+            sample,
+            parameters: Box::new(layer.parameters),
+            looping: true,
+        })
+        .unwrap();
+    mixer
+        .command(Command::Set {
+            id: VoiceId(0),
+            level: 0.25,
+            inside: false,
+            active: true,
+        })
+        .unwrap();
+    let mut normal = vec![0.0; 8_000];
+    mixer.render(&mut normal);
+    mixer
+        .command(Command::Set {
+            id: VoiceId(0),
+            level: 0.25,
+            inside: false,
+            active: false,
+        })
+        .unwrap();
+    mixer
+        .command(Command::Set {
+            id: VoiceId(0),
+            level: 0.25,
+            inside: false,
+            active: true,
+        })
+        .unwrap();
+    mixer
+        .command(Command::Doppler {
+            id: VoiceId(0),
+            factor: 1.5,
+        })
+        .unwrap();
+    let mut shifted = vec![0.0; 8_000];
+    mixer.render(&mut shifted);
+    assert!(normal.iter().any(|sample| sample.abs() > 0.0001));
+    assert!(
+        normal
+            .iter()
+            .zip(&shifted)
+            .any(|(a, b)| (a - b).abs() > 0.001)
+    );
+}
+
+#[test]
+#[ignore = "requires aircraft sound files and OPENESP_AIRCRAFT_PATHS"]
 fn prepares_real_aircraft_sound_banks() {
     for path in content::aircraft_paths() {
         let set = SoundSet::load(&path, 0, None).unwrap();

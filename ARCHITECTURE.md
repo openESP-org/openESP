@@ -144,6 +144,8 @@ Exterior engine layers use aircraft-configured source locations and camera
 position for stereo panning and distance attenuation. Authored directional
 cones apply in aircraft coordinates, including their inside/outside angles and
 outside volume. This is a stereo model, not HRTF or an acoustic simulation.
+Exterior engine sounds also use a smoothed Doppler approximation from changes in
+source-to-listener distance; changing views resets its motion history.
 Gear and flap sound lists trigger from actual actuator movement, with state
 committed only after audio controls are queued successfully. Individual wheel
 contacts trigger their configured touchdown sound categories. Airport BGL

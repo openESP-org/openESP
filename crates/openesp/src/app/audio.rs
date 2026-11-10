@@ -3,7 +3,7 @@ use anyhow::Result;
 use esp_assets::sound::SoundSet;
 use esp_audio::{
     Command, Output, Spatial,
-    engine::{EngineBank, EngineState},
+    engine::{Doppler, EngineBank, EngineState},
     systems::{State as SystemsState, SystemsBank, Tracker},
 };
 use esp_script::{Host, Reference};
@@ -73,6 +73,7 @@ impl Prepared {
             output,
             banks: self.banks,
             previous: [None; 4],
+            doppler: [Doppler::default(); 4],
             systems: self.systems,
             systems_tracker: Tracker::default(),
         }))
@@ -83,6 +84,7 @@ pub(super) struct Runtime {
     output: Output,
     banks: Vec<(u32, EngineBank, DVec3)>,
     previous: [Option<EngineState>; 4],
+    doppler: [Doppler; 4],
     systems: Option<SystemsBank>,
     systems_tracker: Tracker,
 }
@@ -133,11 +135,15 @@ impl Runtime {
         }
         let mut commands = Vec::new();
         let mut states = self.previous;
+        let mut doppler = self.doppler;
         for (engine, bank, position) in &self.banks {
             let index = (*engine - 1) as usize;
             let state = engine_state(variables, *engine, inside);
             commands.extend(bank.update(self.previous[index], state)?);
-            commands.extend(bank.spatial((!inside).then(|| listener.relative(*position))));
+            let spatial = (!inside).then(|| listener.relative(*position));
+            commands.extend(bank.spatial(spatial));
+            commands
+                .extend(bank.doppler(doppler[index].advance(spatial.map(|p| p.distance), elapsed)));
             states[index] = Some(state);
         }
         let mut systems_tracker = self.systems_tracker;
@@ -153,6 +159,7 @@ impl Runtime {
         }
         self.output.try_controls(commands)?;
         self.previous = states;
+        self.doppler = doppler;
         self.systems_tracker = systems_tracker;
         Ok(())
     }

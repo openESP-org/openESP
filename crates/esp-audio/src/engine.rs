@@ -28,6 +28,32 @@ pub struct EngineBank {
     voices: Vec<(EngineEvent, VoiceId, u32)>,
 }
 
+/// Estimates radial source motion from listener distance between audio updates.
+#[derive(Clone, Copy, Default)]
+pub struct Doppler {
+    previous_distance: Option<f64>,
+    factor: f64,
+}
+
+impl Doppler {
+    pub fn advance(&mut self, distance: Option<f64>, elapsed: f64) -> f64 {
+        let Some(distance) = distance.filter(|value| value.is_finite() && *value >= 0.0) else {
+            *self = Self::default();
+            return 1.0;
+        };
+        let previous = self.previous_distance.replace(distance);
+        if !(0.0..=0.25).contains(&elapsed) || elapsed < 0.001 || previous.is_none() {
+            self.factor = 1.0;
+            return 1.0;
+        }
+        let speed = ((distance - previous.unwrap()) / elapsed).clamp(-171.5, 343.0);
+        let target = 343.0 / (343.0 + speed);
+        let blend = 1.0 - (-elapsed / 0.1).exp();
+        self.factor += (target - self.factor) * blend;
+        self.factor.clamp(0.5, 2.0)
+    }
+}
+
 /// Conditions selecting special sound layers authored in sound.cfg.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LayerConditions {
@@ -75,6 +101,12 @@ fn layer_enabled(event: EngineEvent, flags: u32, conditions: LayerConditions) ->
 }
 
 impl EngineBank {
+    pub fn doppler(&self, factor: f64) -> Vec<Command> {
+        self.voices
+            .iter()
+            .map(|(_, id, _)| Command::Doppler { id: *id, factor })
+            .collect()
+    }
     /// Update all layers of this engine to the same listener-relative position.
     pub fn spatial(&self, position: Option<Spatial>) -> Vec<Command> {
         self.voices
@@ -247,6 +279,21 @@ impl EngineBank {
 mod tests {
     use super::*;
     use crate::Mixer;
+
+    #[test]
+    fn doppler_tracks_approach_and_recession_and_resets_for_view_changes() {
+        let mut motion = Doppler::default();
+        assert_eq!(motion.advance(Some(100.0), 0.1), 1.0);
+        let approaching = motion.advance(Some(90.0), 0.1);
+        assert!(approaching > 1.0 && approaching < 2.0);
+        for step in 0..20 {
+            let _ = motion.advance(Some(90.0 + f64::from(step) * 10.0), 0.1);
+        }
+        assert!(motion.advance(Some(300.0), 0.1) < 1.0);
+        assert_eq!(motion.advance(None, 0.1), 1.0);
+        assert_eq!(motion.advance(Some(1000.0), 0.1), 1.0);
+        assert_eq!(motion.advance(Some(5.0), 1.0), 1.0);
+    }
 
     #[test]
     fn state_drives_loops_and_only_triggers_transitions_once() {
