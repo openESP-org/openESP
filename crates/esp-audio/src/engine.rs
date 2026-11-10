@@ -125,7 +125,14 @@ impl EngineBank {
         let mut voices = Vec::new();
         let mut commands = Vec::new();
         for event in EVENTS {
-            for layer in set.engine_layers(engine, event)? {
+            let layers = match set.engine_layers(engine, event) {
+                Ok(layers) => layers,
+                Err(error) => {
+                    eprintln!("sound engine {engine} {event:?}: {error:#}");
+                    continue;
+                }
+            };
+            for layer in layers {
                 let flags = layer.parameters.flags.unwrap_or(0);
                 if flags & 1 != 0 {
                     continue;
@@ -133,9 +140,13 @@ impl EngineBank {
                 let Some(filename) = layer.filenames.first() else {
                     continue;
                 };
-                let sample = set
-                    .sample(filename)
-                    .with_context(|| format!("loading sound [{0}] ({filename})", layer.section))?;
+                let sample = match set.sample(filename) {
+                    Ok(sample) => sample,
+                    Err(error) => {
+                        eprintln!("sound [{}] ({filename}): {error:#}", layer.section);
+                        continue;
+                    }
+                };
                 let id = VoiceId(
                     first_id
                         .checked_add(voices.len() as u64)
@@ -416,12 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn prepares_rotor_layers_and_restarts_one_shots() {
+    fn prepares_available_rotor_layers_and_restarts_one_shots() {
         let root = tempfile::tempdir().unwrap();
         let sound = root.path().join("sound");
         std::fs::create_dir(&sound).unwrap();
         std::fs::write(root.path().join("aircraft.cfg"), "[fltsim.0]\ntitle=test\n").unwrap();
-        std::fs::write(sound.join("sound.cfg"), "[sound_engine]\neng1_rotor=rotor\neng1_shutdown=stop\n[rotor]\nfilename=tone\nlink=disabled\n[disabled]\nfilename=missing\nflags=1\n[stop]\nfilename=tone\n").unwrap();
+        std::fs::write(sound.join("sound.cfg"), "[sound_engine]\neng1_combustion=absent_section\neng1_rotor=missing_sample\neng1_shutdown=stop\n[missing_sample]\nfilename=missing\nlink=rotor\n[rotor]\nfilename=tone\nlink=disabled\n[disabled]\nfilename=missing\nflags=1\n[stop]\nfilename=tone\n").unwrap();
         let mut wave = b"RIFF".to_vec();
         wave.extend(40u32.to_le_bytes());
         wave.extend(b"WAVEfmt ");
