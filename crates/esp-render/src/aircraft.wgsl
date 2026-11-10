@@ -113,13 +113,7 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
     }
     let air_mass = 1.0 / max(camera.sun.y + 0.08, 0.08);
     let sun_transmittance = exp(-vec3(0.0512, 0.1128, 0.2696) * air_mass);
-    var cloud_light = 1.0;
-    for (var i = 0; i < 3; i += 1) {
-        let layer = camera.clouds[i];
-        if layer.z > 0.0 && camera.sun.w < layer.x + layer.y {
-            cloud_light *= 1.0 - 0.55 * layer.z;
-        }
-    }
+    let cloud_light = cloud_sunlight(input.camera_relative_position, normalize(camera.sun.xyz));
     var lit = vec3(0.0);
     var n = normalize(input.normal);
     if draw.normal_settings.x > 0.5 {

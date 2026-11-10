@@ -15,6 +15,33 @@ fn cloud_noise(p: vec3<f32>) -> f32 {
     return mix(mix(a, b, s.y), mix(c, d, s.y), s.z);
 }
 
+fn cloud_density(position: vec3<f32>, layer: vec4<f32>) -> f32 {
+    let local = (position.y - layer.x) / layer.y;
+    let profile = smoothstep(0.0, 0.16, local) * (1.0 - smoothstep(0.70, 1.0, local));
+    let p = position * vec3(0.00045, 0.0014, 0.00045) + vec3(17.3, 11.7, 29.1);
+    let noise = 0.7 * cloud_noise(p) + 0.3 * cloud_noise(p * 2.1);
+    return max(smoothstep(0.76 - layer.z * 0.48, 0.88 - layer.z * 0.48, noise), max((layer.z - 0.9) * 3.0, 0.0)) * profile;
+}
+
+// Integrate the same density used by visible clouds along a short solar ray.
+fn cloud_sunlight(position: vec3<f32>, sun: vec3<f32>) -> f32 {
+    if sun.y <= 0.02 { return 1.0; }
+    let origin = vec3(camera.world.x + position.x, camera.sun.w + position.y, camera.world.y + position.z);
+    var optical_depth = 0.0;
+    for (var i = 0; i < 3; i += 1) {
+        let layer = camera.clouds[i];
+        if layer.z <= 0.0 || layer.y <= 0.0 || origin.y >= layer.x + layer.y { continue; }
+        let start = max((layer.x - origin.y) / sun.y, 0.0);
+        let end = (layer.x + layer.y - origin.y) / sun.y;
+        let step = (end - start) / 3.0;
+        for (var j = 0; j < 3; j += 1) {
+            let p = origin + sun * (start + (f32(j) + 0.5) * step);
+            optical_depth += cloud_density(p, layer) * step * 0.0018;
+        }
+    }
+    return exp(-optical_depth);
+}
+
 // A bounded ray march through a procedural volume for each reported cloud layer.
 fn cloud_layer(ray: vec3<f32>, sun: vec3<f32>, layer: vec4<f32>, max_distance: f32) -> vec4<f32> {
     if layer.z <= 0.0 { return vec4(0.0); }
@@ -37,11 +64,8 @@ fn cloud_layer(ray: vec3<f32>, sun: vec3<f32>, layer: vec4<f32>, max_distance: f
         let distance = start + (f32(i) + 0.5) * step;
         let height = camera.sun.w + ray.y * distance;
         let local = (height - layer.x) / layer.y;
-        let profile = smoothstep(0.0, 0.16, local) * (1.0 - smoothstep(0.70, 1.0, local));
         let position = vec3(camera.world.x + ray.x * distance, height, camera.world.y + ray.z * distance);
-        let p = position * vec3(0.00045, 0.0014, 0.00045) + vec3(17.3, 11.7, 29.1);
-        let noise = 0.7 * cloud_noise(p) + 0.3 * cloud_noise(p * 2.1);
-        let density = max(smoothstep(0.76 - layer.z * 0.48, 0.88 - layer.z * 0.48, noise), max((layer.z - 0.9) * 3.0, 0.0)) * profile;
+        let density = cloud_density(position, layer);
         let alpha = 1.0 - exp(-density * step * 0.0018);
         let brightness = mix(0.55, 1.0, local) * (0.65 + 0.35 * max(sun.y, 0.0));
         let light = mix(vec3(0.035, 0.045, 0.07), vec3(0.95, 0.96, 0.97) * brightness, daylight);

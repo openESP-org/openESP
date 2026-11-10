@@ -379,6 +379,7 @@ mod tests {
             });
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
             let cloud_test = std::env::var("OPENESP_CLOUD_OCCLUSION").ok();
+            let shadow_test = std::env::var("OPENESP_CLOUD_SHADOW").ok();
             let visibility = std::env::var("OPENESP_VISIBILITY_METERS")
                 .ok()
                 .map(|value| value.parse::<f32>().unwrap())
@@ -417,6 +418,18 @@ mod tests {
                 }
                 if mode == "behind" {
                     camera.clouds[0] = [-100.0, 30.0, 1.0, 0.0];
+                }
+            }
+            if let Some(mode) = &shadow_test {
+                camera.sun = [0.3, 0.9, 0.3, 0.0];
+                if mode != "clear" {
+                    camera.clouds[0] = [500.0, 600.0, 0.75, 0.0];
+                }
+                if mode == "moved" {
+                    camera.world[0] = 1800.0;
+                }
+                if mode == "above" {
+                    camera.sun[3] = 1500.0;
                 }
             }
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -732,7 +745,14 @@ mod tests {
                 );
             }
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                if cloud_test.as_deref() == Some("cloud") {
+                if let Some(mode) = &shadow_test {
+                    match mode.as_str() {
+                        "clear" => "../../target/cloud-shadow-clear.png",
+                        "moved" => "../../target/cloud-shadow-moved.png",
+                        "above" => "../../target/cloud-shadow-above.png",
+                        _ => "../../target/cloud-shadow-ground.png",
+                    }
+                } else if cloud_test.as_deref() == Some("cloud") {
                     "../../target/cloud-occlusion-headless.png"
                 } else if cloud_test.is_some() {
                     "../../target/cloud-clear-headless.png"

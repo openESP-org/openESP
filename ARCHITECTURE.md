@@ -120,8 +120,9 @@ drive an approximate wetness/snow accumulation model for ground friction, and
 a screen-space precipitation view effect. Up to three METAR cloud
 layers drive procedural ray-marched sky volumes at station-relative heights;
 the same volumes obscure scene geometry up to each fragment's distance. This
-forward-rendered approach has not yet been performance tuned; cloud shadows
-are not yet implemented. Precipitation is not a reported runway-condition or
+forward-rendered approach has not yet been performance tuned. Direct sunlight
+is attenuated through the same moving cloud density to cast approximate cloud
+shadows on terrain and models. Precipitation is not a reported runway-condition or
 hydroplaning model. Cloud volumes advect with mean wind on fixed simulation
 steps and keep their position through wind changes. METAR gust peaks drive a bounded,
 deterministic approximation of wind variation in the flight model.
