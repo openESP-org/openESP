@@ -361,6 +361,7 @@ mod tests {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(crate::AIRCRAFT_SHADER.into()),
             });
+            let two_sided_test = std::env::var("OPENESP_TWO_SIDED").ok();
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None, layout: None,
                 vertex: wgpu::VertexState {
@@ -370,7 +371,7 @@ mod tests {
                         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4],
                     })],
                 },
-                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                primitive: wgpu::PrimitiveState { cull_mode: None, front_face: if two_sided_test.is_some() { wgpu::FrontFace::Cw } else { wgpu::FrontFace::Ccw }, ..Default::default() },
                 depth_stencil: None, multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(),
@@ -395,7 +396,16 @@ mod tests {
                 view_projection: Mat4::from_cols_array_2d(&[
                     [1.0 / 600.0, 0.0, 0.0, 0.0],
                     [0.0, 0.0, 0.0, 0.0],
-                    [0.0, -1.0 / 600.0, 0.0, 0.0],
+                    [
+                        0.0,
+                        if two_sided_test.is_some() {
+                            1.0 / 600.0
+                        } else {
+                            -1.0 / 600.0
+                        },
+                        0.0,
+                        0.0,
+                    ],
                     [0.0, 0.0, 0.0, 1.0],
                 ])
                 .to_cols_array_2d(),
@@ -475,7 +485,17 @@ mod tests {
                     glam::DVec3::new(1800.0, 0.0, 600.0),
                     glam::DVec3::new(-600.0, 0.0, -1800.0),
                 ],
-                normals: vec![glam::DVec3::Y; 3],
+                normals: vec![
+                    if two_sided_test
+                        .as_deref()
+                        .is_some_and(|mode| mode.ends_with("back"))
+                    {
+                        -glam::DVec3::Y
+                    } else {
+                        glam::DVec3::Y
+                    };
+                    3
+                ],
                 land_classes: vec![Some(3); 3],
                 texture_sets: if two_textures {
                     vec![Some(7), Some(9), Some(7)]
@@ -483,7 +503,14 @@ mod tests {
                     vec![Some(7); 3]
                 },
                 textures: [(7, texture), (9, second_texture)].into(),
-                indices: vec![0, 1, 2],
+                indices: if two_sided_test
+                    .as_deref()
+                    .is_some_and(|mode| mode.ends_with("back"))
+                {
+                    vec![0, 2, 1]
+                } else {
+                    vec![0, 1, 2]
+                },
             };
             let mut draws = textured_draws(
                 &device,
@@ -494,6 +521,15 @@ mod tests {
                 0,
             )
             .unwrap();
+            if two_sided_test
+                .as_deref()
+                .is_some_and(|mode| mode.starts_with("pbr"))
+            {
+                for draw in &mut draws {
+                    draw.uniform.pbr = [0.0, 0.7, 1.0, 0.0];
+                    queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&draw.uniform));
+                }
+            }
             if cloud_test.is_some() {
                 for draw in &mut draws {
                     draw.uniform.model[3][1] = -50.0;
@@ -730,6 +766,11 @@ mod tests {
                     lit,
                     std::env::var_os("OPENESP_EMISSIVE_EXPECT_DARK").is_none()
                 );
+            } else if two_sided_test.is_some() && external.is_none() {
+                assert!(
+                    center[0] > 180,
+                    "two-sided surface missed direct sunlight: {center:?}"
+                );
             } else if external.is_none() {
                 assert!(
                     center[0] > 40 && center[1] < 5 && center[2] > 40,
@@ -745,7 +786,14 @@ mod tests {
                 );
             }
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                if let Some(mode) = &shadow_test {
+                if let Some(mode) = &two_sided_test {
+                    match mode.as_str() {
+                        "legacy-back" => "../../target/two-sided-legacy-back.png",
+                        "pbr-front" => "../../target/two-sided-pbr-front.png",
+                        "pbr-back" => "../../target/two-sided-pbr-back.png",
+                        _ => "../../target/two-sided-legacy-front.png",
+                    }
+                } else if let Some(mode) = &shadow_test {
                     match mode.as_str() {
                         "clear" => "../../target/cloud-shadow-clear.png",
                         "moved" => "../../target/cloud-shadow-moved.png",

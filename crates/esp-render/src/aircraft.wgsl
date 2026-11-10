@@ -59,7 +59,7 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
     output.uv = vec2(uv.x, select(uv.y, 1.0-uv.y, draw.settings.x > 0.0));
     return output;
 }
-@fragment fn fs_main(input: Output) -> @location(0) vec4<f32> {
+@fragment fn fs_main(input: Output, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     var colour = textureSample(diffuse_texture, texture_sampler, input.uv) * draw.diffuse;
     var metal_sample = vec4(1.0);
     if draw.pbr.w > 0.5 {
@@ -123,6 +123,7 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
         let z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
         n = normalize(t * xy.x + b * xy.y + n * z);
     }
+    n *= select(-1.0, 1.0, front_facing);
     if draw.pbr.z > 0.5 {
         let l = normalize(camera.sun.xyz);
         let v = normalize(-input.camera_relative_position);
