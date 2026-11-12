@@ -72,7 +72,18 @@ impl<'a> ObjectDefinition<'a> {
         let unknown = u16::read_le(&mut cursor).map_err(|_| Error::Truncated { offset: 2 })?;
         let reserved =
             <[u32; 4]>::read_le(&mut cursor).map_err(|_| Error::Truncated { offset: 4 })?;
-        let name_start = usize::from(name_offset);
+        let mut name_start = usize::from(name_offset);
+        // Some stock models point four bytes into the name. In an effect
+        // record, its parameter string precedes the attachpoint name.
+        if kind == 4 && name_start > 100 && data.get(name_start - 1).is_some_and(|byte| *byte != 0)
+        {
+            let parameters = data.get(100..name_start).ok_or(Error::InvalidSize)?;
+            if let Some(end) = parameters.iter().position(|byte| *byte == 0)
+                && let Some(start) = parameters[end + 1..].iter().position(|byte| *byte != 0)
+            {
+                name_start = 100 + end + 1 + start;
+            }
+        }
         let name_bytes = data.get(name_start..).ok_or(Error::InvalidReference {
             field: "attachpoint name offset",
             value: i64::from(name_offset),
@@ -232,6 +243,25 @@ mod tests {
         );
         assert!(objects[2].definition.is_none());
         assert_eq!(objects[2].raw, &[42]);
+    }
+
+    #[test]
+    fn stock_effect_offset_can_point_inside_attachpoint_name() {
+        let mut payload = vec![0; 100];
+        payload[..2].copy_from_slice(&105u16.to_le_bytes());
+        payload[20..31].copy_from_slice(b"fx_landing\0");
+        payload.extend(b"\0attachpt_landing_1\0");
+        let record = object_record(4, &payload);
+        let decoded = attached_objects(&record).unwrap();
+        let definition = decoded[0].definition.as_ref().unwrap();
+        assert_eq!(definition.attachpoint, b"attachpt_landing_1");
+        assert_eq!(
+            definition.value,
+            ObjectValue::Effect {
+                filename: b"fx_landing",
+                parameters: b""
+            }
+        );
     }
 
     #[test]
