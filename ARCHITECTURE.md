@@ -139,9 +139,11 @@ Legacy bump maps and PBR normal maps use tangent-space lighting; legacy bump
 texture tiling follows the material's bump scale.
 Aircraft light placements and effect emitter/particle fields are decoded in
 `esp-formats::cfg`; `esp-assets::effects` resolves the installed effects and
-their shared texture bytes. Rendering is not yet connected. Effect simulation
-and drawing belong inside `esp-render`,
-with app wiring supplying flight variables and aircraft state.
+their shared texture bytes. `esp-render::effects` draws static light particles
+using the configured placement, colour, texture, blend mode, and approximate
+flash timing. The app supplies light switches and electrical circuit state.
+Moving particles, effect attachment points, and the remaining effect parameters
+are not yet implemented.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the

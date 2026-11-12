@@ -9,6 +9,7 @@ use winit::window::Window;
 
 pub mod camera;
 mod draw;
+mod effects;
 mod ground;
 mod material;
 mod sky;
@@ -104,6 +105,7 @@ pub struct Renderer {
     photos: Vec<Draw>,
     runway: Vec<Draw>,
     objects: Vec<Draw>,
+    effects: Option<effects::Effects>,
     pub centre: Vec3,
     pub radius: f32,
     pub aircraft_origin: DVec3,
@@ -1025,6 +1027,7 @@ impl Renderer {
             photos: photo_draws,
             runway: runway_draws,
             objects: scenery_draws,
+            effects: None,
             centre,
             radius,
             aircraft_origin,
@@ -1126,6 +1129,14 @@ impl Renderer {
         let camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather, cockpit);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
+        if let Some(effects) = &mut self.effects {
+            effects.update(
+                &self.queue,
+                camera,
+                self.aircraft_origin,
+                self.aircraft_rotation,
+            );
+        }
         let draws = if cockpit {
             &mut self.interior
         } else {
@@ -1229,6 +1240,9 @@ impl Renderer {
             }
             for draw in transparent {
                 draw_one(&mut pass, draw);
+            }
+            if let Some(effects) = &self.effects {
+                effects.draw(&mut pass, weather.simulation_seconds);
             }
         }
         let capture = if screenshot.is_some() {

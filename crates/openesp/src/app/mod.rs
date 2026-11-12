@@ -29,6 +29,7 @@ type LoadedAircraft = (
     Aircraft,
     Option<(Flight, SpeedLimits)>,
     Option<audio::Prepared>,
+    Option<esp_assets::effects::LightEffects>,
 );
 
 struct App {
@@ -283,7 +284,7 @@ impl App {
         if self.renderer.is_none() {
             match self.loaded.try_recv() {
                 Ok(aircraft) => {
-                    let (mut aircraft, flight, sound) = aircraft?;
+                    let (mut aircraft, flight, sound, effects) = aircraft?;
                     if let Some((flight, limits)) = flight {
                         self.flight = Some(flight);
                         self.speed_limits = Some(limits);
@@ -392,7 +393,7 @@ impl App {
                             flight.set_ground(ground);
                         }
                     }
-                    self.renderer = Some(pollster::block_on(Renderer::new(
+                    let mut renderer = pollster::block_on(Renderer::new(
                         window.clone(),
                         &aircraft,
                         esp_render::Scene {
@@ -404,7 +405,13 @@ impl App {
                             terrain: render_terrain.as_ref(),
                         },
                         self.arguments.msaa,
-                    ))?);
+                    ))?;
+                    if let Some(effects) = &effects
+                        && let Err(error) = renderer.set_light_effects(effects)
+                    {
+                        eprintln!("aircraft light effects: {error:#}");
+                    }
+                    self.renderer = Some(renderer);
                     self.exterior_state = Some(ModelState::new(&aircraft.exterior)?);
                     self.interior_state = aircraft
                         .interior
@@ -658,6 +665,7 @@ impl App {
                 .and_then(|value| value.number().ok())
                 .is_some_and(|value| value != 0.0);
             let weather = live_weather::render_state(&mut self.variables, &self.cloud_drift);
+            renderer.set_light_switches(effects::light_switches(&mut self.variables));
             if renderer.render(
                 &self.camera,
                 self.arguments.cockpit,
@@ -934,6 +942,7 @@ impl ApplicationHandler for App {
 }
 
 mod audio;
+mod effects;
 mod installed_airport;
 mod live_weather;
 mod scenery_folder;
@@ -1024,6 +1033,11 @@ pub(crate) fn run() -> Result<()> {
         .spawn(move || {
             let loaded = (|| {
                 let aircraft = Aircraft::load_with_root(&path, variant, fsx_root.as_deref())?;
+                let content_root = fsx_root.clone().or_else(|| esp_installs::discover().into_iter().next().map(|install| install.root));
+                let effects = content_root.as_deref().and_then(|root| match esp_assets::effects::LightEffects::load(&path, root) {
+                    Ok(effects) => Some(effects),
+                    Err(error) => { eprintln!("aircraft effects unavailable: {error:#}"); None }
+                });
                 let flight = airspeed.map(|knots| {
                     let data = esp_assets::flight::FlightData::load(&path, variant)?;
                     let mut flight=Flight::new(&data, knots, height,fuel_fraction,payload)?;
@@ -1041,13 +1055,12 @@ pub(crate) fn run() -> Result<()> {
                     eprintln!("flight: standard atmosphere; arrows control elevator/ailerons, Z/X rudder and steering, B brakes, F1-F4 throttle");
                 }
                 let sound = if flight.is_some() {
-                    let root = fsx_root.clone().or_else(|| esp_installs::discover().into_iter().next().map(|install| install.root));
-                    match audio::Prepared::load(&path, variant, root.as_deref()) {
+                    match audio::Prepared::load(&path, variant, content_root.as_deref()) {
                         Ok(sound) => Some(sound),
                         Err(error) => { eprintln!("aircraft sound unavailable: {error:#}"); None }
                     }
                 } else { None };
-                Ok((aircraft, flight, sound))
+                Ok((aircraft, flight, sound, effects))
             })();
             let _ = sender.send(loaded);
         })?;

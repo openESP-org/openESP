@@ -7,6 +7,7 @@ use esp_formats::cfg::{self, effect::Particle, lights::Light};
 /// Decoded light placements and effect definitions with original texture bytes.
 pub struct LightEffects {
     pub lights: Vec<Light>,
+    pub datum_feet: [f64; 3],
     pub effects: HashMap<String, Vec<Particle>>,
     pub textures: HashMap<String, Arc<[u8]>>,
 }
@@ -16,6 +17,9 @@ impl LightEffects {
     pub fn load(aircraft: &Path, simulator_root: &Path) -> Result<Self> {
         let config = super::config(&super::aircraft_config_path(aircraft)?)?;
         let lights = cfg::lights::from_config(&config)?;
+        let datum_feet = cfg::aircraft::ReferencePoints::from_config(&config)?
+            .datum_feet
+            .unwrap_or([0.0; 3]);
         let effect_dir = super::resolve_path(simulator_root, "Effects")?;
         let texture_dir = super::resolve_path(&effect_dir, "texture").ok();
         let mut effects = HashMap::new();
@@ -66,6 +70,7 @@ impl LightEffects {
         }
         Ok(Self {
             lights,
+            datum_feet,
             effects,
             textures,
         })
