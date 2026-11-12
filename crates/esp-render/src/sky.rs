@@ -12,6 +12,7 @@ pub(super) struct CameraUniform {
     pub lighting: [f32; 4],
     pub clouds: [[f32; 4]; 3],
     pub world: [f32; 4],
+    pub spotlights: [[[f32; 4]; 4]; 8],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +77,7 @@ pub(super) fn uniform(
             weather.simulation_seconds.rem_euclid(40960.0) as f32,
             f32::from(cockpit),
         ],
+        spotlights: [[[0.0; 4]; 4]; 8],
     }
 }
 

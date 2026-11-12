@@ -49,6 +49,7 @@ struct Sprite {
     additive: bool,
 }
 
+#[derive(Clone, Copy)]
 enum Source {
     Switch(u32),
     Node {
@@ -59,8 +60,24 @@ enum Source {
     },
 }
 
+struct Spotlight {
+    source: Source,
+    anchor: Vec3,
+    range: f32,
+    colour: [f32; 3],
+    day: f32,
+    night: f32,
+    inner: f32,
+    outer: f32,
+    falloff: f32,
+    delay: f64,
+    rate: f64,
+    lifetime: f64,
+}
+
 pub(super) struct Effects {
     sprites: Vec<Sprite>,
+    spotlights: Vec<Spotlight>,
     additive: wgpu::RenderPipeline,
     alpha: wgpu::RenderPipeline,
     switches: [bool; 14],
@@ -181,6 +198,7 @@ impl Effects {
         });
         let mut views = HashMap::new();
         let mut sprites = Vec::new();
+        let mut spotlights = Vec::new();
         let placements = content
             .lights
             .iter()
@@ -206,10 +224,52 @@ impl Effects {
             let Some(particles) = content.effects.get(&name.to_ascii_lowercase()) else {
                 continue;
             };
-            for particle in particles
-                .iter()
-                .filter(|p| p.kind == 19 && p.is_static && matches!(p.blend_mode, 1 | 2))
-            {
+            for particle in particles.iter().filter(|p| p.is_static) {
+                let average = |v: [f64; 2]| (v[0] + v[1]) * 0.5;
+                let offset = particle.emitter_offset.map(average);
+                let anchor =
+                    anchor + Vec3::new(offset[0] as f32, offset[1] as f32, offset[2] as f32);
+                let source = if let Some(kind) = kind {
+                    Source::Switch(kind)
+                } else {
+                    let (cockpit, node) = node.expect("model attachment");
+                    Source::Node {
+                        cockpit,
+                        node,
+                        transform: Mat4::IDENTITY,
+                        visible: false,
+                    }
+                };
+                if particle.kind == 28 {
+                    let inner = particle.inner_cone_angle.clamp(0.0, 178.0) as f32;
+                    let outer = particle
+                        .outer_cone_angle
+                        .clamp(f64::from(inner) + 1.0, 179.0)
+                        as f32;
+                    spotlights.push(Spotlight {
+                        source,
+                        anchor,
+                        range: average(particle.scale[0]).clamp(0.01, 10000.0) as f32,
+                        colour: [
+                            particle.color_end[0],
+                            particle.color_end[1],
+                            particle.color_end[2],
+                        ]
+                        .map(|v| (v / 255.0).clamp(0.0, 1.0) as f32),
+                        day: particle.intensity_day.clamp(0.0, 100000.0) as f32,
+                        night: particle.intensity_night.clamp(0.0, 100000.0) as f32,
+                        inner: (inner.to_radians() * 0.5).cos(),
+                        outer: (outer.to_radians() * 0.5).cos(),
+                        falloff: particle.falloff_exponent.clamp(0.0, 10.0) as f32,
+                        delay: average(particle.delay).max(0.0),
+                        rate: average(particle.rate).max(0.0),
+                        lifetime: average(particle.lifetime).max(0.0),
+                    });
+                    continue;
+                }
+                if particle.kind != 19 || !matches!(particle.blend_mode, 1 | 2) {
+                    continue;
+                }
                 let Some(name) = &particle.texture else {
                     continue;
                 };
@@ -235,8 +295,6 @@ impl Effects {
                     views.insert(key.clone(), (view, texture.flip_v));
                 }
                 let (view, flip) = &views[&key];
-                let average = |v: [f64; 2]| (v[0] + v[1]) * 0.5;
-                let offset = particle.emitter_offset.map(average);
                 let uniform = Uniform {
                     position: [0.0, 0.0, 0.0, f32::from(*flip)],
                     right: [0.0, 0.0, 0.0, f32::from(particle.blend_mode == 2)],
@@ -275,19 +333,8 @@ impl Effects {
                     ],
                 });
                 sprites.push(Sprite {
-                    source: if let Some(kind) = kind {
-                        Source::Switch(kind)
-                    } else {
-                        let (cockpit, node) = node.expect("model attachment");
-                        Source::Node {
-                            cockpit,
-                            node,
-                            transform: Mat4::IDENTITY,
-                            visible: false,
-                        }
-                    },
-                    anchor: anchor
-                        + Vec3::new(offset[0] as f32, offset[1] as f32, offset[2] as f32),
+                    source,
+                    anchor,
                     size: [
                         average(particle.scale[0]).max(0.0) as f32,
                         average(particle.scale[1]).max(0.0) as f32,
@@ -304,6 +351,7 @@ impl Effects {
         }
         Ok(Self {
             sprites,
+            spotlights,
             additive,
             alpha,
             switches: [false; 14],
@@ -319,13 +367,18 @@ impl Effects {
         transforms: &[Mat4],
         visible: &[bool],
     ) -> Result<()> {
-        for sprite in &mut self.sprites {
+        for source in self
+            .sprites
+            .iter_mut()
+            .map(|sprite| &mut sprite.source)
+            .chain(self.spotlights.iter_mut().map(|spot| &mut spot.source))
+        {
             if let Source::Node {
                 cockpit: model,
                 node,
                 transform,
                 visible: shown,
-            } = &mut sprite.source
+            } = source
                 && *model == cockpit
             {
                 *transform = *transforms
@@ -337,6 +390,58 @@ impl Effects {
             }
         }
         Ok(())
+    }
+    pub fn spotlight_uniforms(
+        &self,
+        camera: &super::Camera,
+        origin: DVec3,
+        rotation: Mat4,
+        sun: Vec3,
+        cockpit: bool,
+        time: f64,
+    ) -> [[[f32; 4]; 4]; 8] {
+        let daylight = ((sun.y + 0.105) / 0.192).clamp(0.0, 1.0);
+        let daylight = daylight * daylight * (3.0 - 2.0 * daylight);
+        let mut result = [[[0.0; 4]; 4]; 8];
+        let mut count = 0;
+        for spot in &self.spotlights {
+            let (transform, axis, visible) = match spot.source {
+                Source::Switch(kind) => (
+                    Mat4::IDENTITY,
+                    Vec3::Z,
+                    self.switches.get(kind as usize).copied().unwrap_or(false),
+                ),
+                Source::Node {
+                    cockpit: model,
+                    transform,
+                    visible,
+                    ..
+                } => (transform, Vec3::Y, (!model || cockpit) && visible),
+            };
+            let intensity = spot.night + (spot.day - spot.night) * daylight;
+            if !visible || intensity <= 0.0 || !active(time, spot.delay, spot.rate, spot.lifetime) {
+                continue;
+            }
+            let position = (origin - camera.position).as_vec3()
+                + rotation.transform_point3(transform.transform_point3(spot.anchor));
+            let direction = rotation
+                .transform_vector3(transform.transform_vector3(axis))
+                .normalize_or_zero();
+            if direction.length_squared() < 0.5 {
+                continue;
+            }
+            result[count] = [
+                [position.x, position.y, position.z, spot.range],
+                [direction.x, direction.y, direction.z, spot.outer],
+                [spot.colour[0], spot.colour[1], spot.colour[2], intensity],
+                [spot.inner, spot.falloff, 0.0, 0.0],
+            ];
+            count += 1;
+            if count == result.len() {
+                break;
+            }
+        }
+        result
     }
     pub fn update(
         &mut self,

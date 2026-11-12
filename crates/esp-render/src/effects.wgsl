@@ -5,6 +5,7 @@ struct Camera {
     lighting: vec4<f32>,
     clouds: array<vec4<f32>, 3>,
     world: vec4<f32>,
+    spotlights: array<mat4x4<f32>, 8>,
 }
 struct Sprite {
     position: vec4<f32>,

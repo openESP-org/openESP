@@ -5,6 +5,7 @@ struct Camera {
     lighting: vec4<f32>,
     clouds: array<vec4<f32>, 3>,
     world: vec4<f32>,
+    spotlights: array<mat4x4<f32>, 8>,
 }
 struct Draw {
     model: mat4x4<f32>,
@@ -152,6 +153,38 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
     } else {
         let diffuse_light = 0.65 * max(dot(n, normalize(camera.sun.xyz)),0.0) * daylight * cloud_light;
         lit = colour.rgb * (mix(0.025, 0.35, daylight) + diffuse_light * sun_transmittance);
+    }
+    for (var i = 0; i < 8; i += 1) {
+        let light = camera.spotlights[i];
+        if light[2].w <= 0.0 { continue; }
+        let offset = light[0].xyz - input.camera_relative_position;
+        let distance = length(offset);
+        if distance < 0.001 || distance >= light[0].w { continue; }
+        let direction = offset / distance;
+        let cone = smoothstep(light[1].w, light[3].x, dot(-direction, light[1].xyz));
+        let edge = pow(max(1.0 - distance / light[0].w, 0.0), 2.0);
+        let falloff = edge / pow(max(distance, 1.0), light[3].y);
+        let diffuse = max(dot(n, direction), 0.0) * cone * falloff;
+        var response = colour.rgb;
+        if draw.pbr.z > 0.5 {
+            let metal = clamp(select(draw.pbr.x, metal_sample.r, draw.pbr.w > 0.5), 0.0, 1.0);
+            let rough = max(select(draw.pbr.y, 1.0 - metal_sample.a, draw.pbr.w > 0.5), 0.045);
+            let view = normalize(-input.camera_relative_position);
+            let half_vector = normalize(direction + view);
+            let nl = max(dot(n, direction), 0.0);
+            let nv = max(dot(n, view), 0.001);
+            let nh = max(dot(n, half_vector), 0.0);
+            let vh = max(dot(view, half_vector), 0.0);
+            let a2 = pow(rough, 4.0);
+            let d = a2 / max(3.14159265 * pow(nh * nh * (a2 - 1.0) + 1.0, 2.0), 0.000001);
+            let k = (rough + 1.0) * (rough + 1.0) / 8.0;
+            let g = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
+            let f0 = mix(vec3(0.04), colour.rgb, metal);
+            let f = f0 + (vec3(1.0) - f0) * pow(1.0 - vh, 5.0);
+            response = (vec3(1.0) - f) * (1.0 - metal) * colour.rgb / 3.14159265
+                + d * g * f / max(4.0 * nl * nv, 0.001);
+        }
+        lit += response * light[2].rgb * light[2].w * diffuse / 12.56637;
     }
     if emission_enabled {
         let night = 1.0 - daylight;

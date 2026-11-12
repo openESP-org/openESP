@@ -381,6 +381,7 @@ mod tests {
             let emissive_path = std::env::var_os("OPENESP_EMISSIVE_TEXTURE");
             let cloud_test = std::env::var("OPENESP_CLOUD_OCCLUSION").ok();
             let shadow_test = std::env::var("OPENESP_CLOUD_SHADOW").ok();
+            let spotlight_test = std::env::var("OPENESP_EFFECT_SPOTLIGHT").ok();
             let visibility = std::env::var("OPENESP_VISIBILITY_METERS")
                 .ok()
                 .map(|value| value.parse::<f32>().unwrap())
@@ -420,6 +421,7 @@ mod tests {
                 lighting: [f32::from(panel_on), visibility, 0.0, 0.0],
                 clouds: [[0.0; 4]; 3],
                 world: [0.0; 4],
+                spotlights: [[[0.0; 4]; 4]; 8],
             };
             if let Some(mode) = &cloud_test {
                 camera.sun[3] = 50.0;
@@ -441,6 +443,88 @@ mod tests {
                 if mode == "above" {
                     camera.sun[3] = 1500.0;
                 }
+            }
+            if let Some(mode) = &spotlight_test {
+                let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
+                let aircraft = std::env::split_paths(&paths).next().unwrap();
+                let root = std::path::PathBuf::from(std::env::var_os("OPENESP_P3D_ROOT").unwrap());
+                let model = esp_assets::Model::load(&aircraft.join("model/B737_800.mdl")).unwrap();
+                let content = esp_assets::effects::LightEffects::load_for_models(
+                    &aircraft,
+                    &root,
+                    &[(false, &model)],
+                )
+                .unwrap();
+                let effect_camera_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
+                let mut effects = crate::effects::Effects::new(
+                    &device,
+                    &queue,
+                    &effect_camera_layout,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    1,
+                    &content,
+                )
+                .unwrap();
+                let node = content.attachments[0].node;
+                let mut transforms = vec![Mat4::IDENTITY; model.nodes.len()];
+                transforms[node] = Mat4::from_translation(glam::Vec3::new(0.0, 8.0, 0.0))
+                    * Mat4::from_rotation_x(if mode == "away" {
+                        0.0
+                    } else {
+                        std::f32::consts::PI
+                    });
+                let mut visible = vec![false; model.nodes.len()];
+                visible[node] = mode != "off";
+                effects.update_model(false, &transforms, &visible).unwrap();
+                let observer = crate::Camera::looking_at(DVec3::ZERO, DVec3::Z);
+                camera.sun = [0.0, -1.0, 0.0, 0.0];
+                camera.view_projection[0][0] = 1.0 / 100.0;
+                camera.view_projection[2][1] = -1.0 / 100.0;
+                camera.spotlights = effects.spotlight_uniforms(
+                    &observer,
+                    DVec3::ZERO,
+                    Mat4::IDENTITY,
+                    -glam::Vec3::Y,
+                    false,
+                    0.0,
+                );
+                assert_eq!(camera.spotlights[0][2][3] > 0.0, mode != "off");
+                assert_eq!(
+                    effects.spotlight_uniforms(
+                        &observer,
+                        DVec3::ZERO,
+                        Mat4::IDENTITY,
+                        -glam::Vec3::Y,
+                        true,
+                        0.0
+                    )[0][2][3]
+                        > 0.0,
+                    mode != "off"
+                );
+                assert_eq!(
+                    effects.spotlight_uniforms(
+                        &observer,
+                        DVec3::ZERO,
+                        Mat4::IDENTITY,
+                        glam::Vec3::Y,
+                        false,
+                        0.0
+                    )[0][2][3],
+                    0.0
+                );
             }
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -524,6 +608,7 @@ mod tests {
             if two_sided_test
                 .as_deref()
                 .is_some_and(|mode| mode.starts_with("pbr"))
+                || spotlight_test.as_deref() == Some("pbr")
             {
                 for draw in &mut draws {
                     draw.uniform.pbr = [0.0, 0.7, 1.0, 0.0];
@@ -730,7 +815,20 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if let Some(mode) = &cloud_test {
+            if let Some(mode) = &spotlight_test {
+                let brightest = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pixel| pixel[0])
+                    .max()
+                    .unwrap();
+                assert_eq!(
+                    brightest > 50,
+                    mode == "on" || mode == "pbr",
+                    "spotlight intensity: {brightest}"
+                );
+            } else if let Some(mode) = &cloud_test {
                 let green = pixels
                     .as_chunks::<4>()
                     .0
@@ -786,7 +884,15 @@ mod tests {
                 );
             }
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                if let Some(mode) = &two_sided_test {
+                if let Some(mode) = &spotlight_test {
+                    if mode == "pbr" {
+                        "../../target/b737-landing-beam-pbr-headless.png"
+                    } else if mode == "on" {
+                        "../../target/b737-landing-beam-headless.png"
+                    } else {
+                        "../../target/b737-landing-beam-off-headless.png"
+                    }
+                } else if let Some(mode) = &two_sided_test {
                     match mode.as_str() {
                         "legacy-back" => "../../target/two-sided-legacy-back.png",
                         "pbr-front" => "../../target/two-sided-pbr-front.png",

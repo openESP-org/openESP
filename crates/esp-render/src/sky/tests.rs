@@ -80,6 +80,7 @@ fn renders_reported_cloud_layer_offscreen() {
             lighting: [0.0, 100_000.0, 0.0, 0.0],
             clouds: [[0.0; 4]; 3],
             world: [0.0; 4],
+            spotlights: [[[0.0; 4]; 4]; 8],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,

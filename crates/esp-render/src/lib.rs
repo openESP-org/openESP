@@ -469,6 +469,7 @@ impl Renderer {
                 lighting: [0.0; 4],
                 clouds: [[0.0; 4]; 3],
                 world: [0.0; 4],
+                spotlights: [[[0.0; 4]; 4]; 8],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1129,7 +1130,17 @@ impl Renderer {
             "invalid sun direction"
         );
         let sun = sun.normalize();
-        let camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather, cockpit);
+        let mut camera_uniform = sky::uniform(camera, matrix, sun, panel_lights, weather, cockpit);
+        if let Some(effects) = &self.effects {
+            camera_uniform.spotlights = effects.spotlight_uniforms(
+                camera,
+                self.aircraft_origin,
+                self.aircraft_rotation,
+                sun,
+                cockpit,
+                weather.simulation_seconds,
+            );
+        }
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         if let Some(effects) = &mut self.effects {
