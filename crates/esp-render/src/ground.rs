@@ -382,6 +382,7 @@ mod tests {
             let cloud_test = std::env::var("OPENESP_CLOUD_OCCLUSION").ok();
             let shadow_test = std::env::var("OPENESP_CLOUD_SHADOW").ok();
             let spotlight_test = std::env::var("OPENESP_EFFECT_SPOTLIGHT").ok();
+            let point_test = std::env::var("OPENESP_EFFECT_POINTLIGHT").ok();
             let visibility = std::env::var("OPENESP_VISIBILITY_METERS")
                 .ok()
                 .map(|value| value.parse::<f32>().unwrap())
@@ -444,7 +445,7 @@ mod tests {
                     camera.sun[3] = 1500.0;
                 }
             }
-            if let Some(mode) = &spotlight_test {
+            if let Some(mode) = spotlight_test.as_ref().or(point_test.as_ref()) {
                 let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
                 let aircraft = std::env::split_paths(&paths).next().unwrap();
                 let root = std::path::PathBuf::from(std::env::var_os("OPENESP_P3D_ROOT").unwrap());
@@ -487,44 +488,62 @@ mod tests {
                         std::f32::consts::PI
                     });
                 let mut visible = vec![false; model.nodes.len()];
-                visible[node] = mode != "off";
+                visible[node] = point_test.is_none() && mode != "off";
                 effects.update_model(false, &transforms, &visible).unwrap();
+                let mut switches = [false; 14];
+                switches[3] = mode == "nav";
+                switches[2] = mode.starts_with("strobe");
+                effects.switches(switches);
                 let observer = crate::Camera::looking_at(DVec3::ZERO, DVec3::Z);
                 camera.sun = [0.0, -1.0, 0.0, 0.0];
-                camera.view_projection[0][0] = 1.0 / 100.0;
-                camera.view_projection[2][1] = -1.0 / 100.0;
+                let scale = if point_test.is_some() { 25.0 } else { 100.0 };
+                camera.view_projection[0][0] = 1.0 / scale;
+                camera.view_projection[2][1] = -1.0 / scale;
+                let time = match mode.as_str() {
+                    "strobe-first" => 0.02,
+                    "strobe-between" => 0.15,
+                    "strobe-second" => 0.21,
+                    _ => 0.0,
+                };
                 camera.spotlights = effects.spotlight_uniforms(
                     &observer,
                     DVec3::ZERO,
                     Mat4::IDENTITY,
                     -glam::Vec3::Y,
                     false,
-                    0.0,
+                    time,
                 );
-                assert_eq!(camera.spotlights[0][2][3] > 0.0, mode != "off");
-                assert_eq!(
-                    effects.spotlight_uniforms(
-                        &observer,
-                        DVec3::ZERO,
-                        Mat4::IDENTITY,
-                        -glam::Vec3::Y,
-                        true,
+                if point_test.is_some() {
+                    assert_eq!(
+                        camera.spotlights.iter().any(|light| light[3][2] == 1.0),
+                        mode != "strobe-between"
+                    );
+                } else {
+                    assert_eq!(camera.spotlights[0][2][3] > 0.0, mode != "off");
+                    assert_eq!(
+                        effects.spotlight_uniforms(
+                            &observer,
+                            DVec3::ZERO,
+                            Mat4::IDENTITY,
+                            -glam::Vec3::Y,
+                            true,
+                            0.0
+                        )[0][2][3]
+                            > 0.0,
+                        mode != "off"
+                    );
+                    assert_eq!(
+                        effects.spotlight_uniforms(
+                            &observer,
+                            DVec3::ZERO,
+                            Mat4::IDENTITY,
+                            glam::Vec3::Y,
+                            false,
+                            0.0
+                        )[0][2][3],
                         0.0
-                    )[0][2][3]
-                        > 0.0,
-                    mode != "off"
-                );
-                assert_eq!(
-                    effects.spotlight_uniforms(
-                        &observer,
-                        DVec3::ZERO,
-                        Mat4::IDENTITY,
-                        glam::Vec3::Y,
-                        false,
-                        0.0
-                    )[0][2][3],
-                    0.0
-                );
+                    );
+                }
             }
             let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -815,7 +834,21 @@ mod tests {
             receiver.recv().unwrap().unwrap();
             let pixels = output.slice(..).get_mapped_range().unwrap();
             let center = &pixels[(32 * 64 + 32) * 4..][..4];
-            if let Some(mode) = &spotlight_test {
+            if let Some(mode) = &point_test {
+                let brightest = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|pixel| &pixel[..3])
+                    .max()
+                    .copied()
+                    .unwrap();
+                assert_eq!(
+                    brightest > 50,
+                    mode != "strobe-between",
+                    "point light intensity: {brightest}"
+                );
+            } else if let Some(mode) = &spotlight_test {
                 let brightest = pixels
                     .as_chunks::<4>()
                     .0
@@ -884,7 +917,14 @@ mod tests {
                 );
             }
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                if let Some(mode) = &spotlight_test {
+                if let Some(mode) = &point_test {
+                    match mode.as_str() {
+                        "nav" => "../../target/b737-nav-point-lights.png",
+                        "strobe-first" => "../../target/b737-strobe-first-light.png",
+                        "strobe-second" => "../../target/b737-strobe-second-light.png",
+                        _ => "../../target/b737-strobe-between-light.png",
+                    }
+                } else if let Some(mode) = &spotlight_test {
                     if mode == "pbr" {
                         "../../target/b737-landing-beam-pbr-headless.png"
                     } else if mode == "on" {

@@ -161,7 +161,7 @@ fn weather_volume(lit: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
         let distance = length(offset);
         if distance < 0.001 || distance >= light[0].w { continue; }
         let direction = offset / distance;
-        let cone = smoothstep(light[1].w, light[3].x, dot(-direction, light[1].xyz));
+        let cone = select(smoothstep(light[1].w, light[3].x, dot(-direction, light[1].xyz)), 1.0, light[3].z > 0.5);
         let edge = pow(max(1.0 - distance / light[0].w, 0.0), 2.0);
         let falloff = edge / pow(max(distance, 1.0), light[3].y);
         let diffuse = max(dot(n, direction), 0.0) * cone * falloff;

@@ -62,6 +62,7 @@ enum Source {
 
 struct Spotlight {
     source: Source,
+    point: bool,
     anchor: Vec3,
     range: f32,
     colour: [f32; 3],
@@ -224,7 +225,13 @@ impl Effects {
             let Some(particles) = content.effects.get(&name.to_ascii_lowercase()) else {
                 continue;
             };
-            for particle in particles.iter().filter(|p| p.is_static) {
+            for particle in particles.iter().filter(|p| {
+                p.is_static
+                    || (p.kind == 27
+                        && p.lifetime[0] > 0.0
+                        && p.emitter_velocity == [[0.0; 2]; 3]
+                        && p.particle_velocity == [[0.0; 2]; 3])
+            }) {
                 let average = |v: [f64; 2]| (v[0] + v[1]) * 0.5;
                 let offset = particle.emitter_offset.map(average);
                 let anchor =
@@ -240,7 +247,7 @@ impl Effects {
                         visible: false,
                     }
                 };
-                if particle.kind == 28 {
+                if matches!(particle.kind, 27 | 28) {
                     let inner = particle.inner_cone_angle.clamp(0.0, 178.0) as f32;
                     let outer = particle
                         .outer_cone_angle
@@ -248,6 +255,7 @@ impl Effects {
                         as f32;
                     spotlights.push(Spotlight {
                         source,
+                        point: particle.kind == 27,
                         anchor,
                         range: average(particle.scale[0]).clamp(0.01, 10000.0) as f32,
                         colour: [
@@ -403,7 +411,7 @@ impl Effects {
         let daylight = ((sun.y + 0.105) / 0.192).clamp(0.0, 1.0);
         let daylight = daylight * daylight * (3.0 - 2.0 * daylight);
         let mut result = [[[0.0; 4]; 4]; 8];
-        let mut count = 0;
+        let mut candidates = Vec::new();
         for spot in &self.spotlights {
             let (transform, axis, visible) = match spot.source {
                 Source::Switch(kind) => (
@@ -430,16 +438,19 @@ impl Effects {
             if direction.length_squared() < 0.5 {
                 continue;
             }
-            result[count] = [
+            let light = [
                 [position.x, position.y, position.z, spot.range],
                 [direction.x, direction.y, direction.z, spot.outer],
                 [spot.colour[0], spot.colour[1], spot.colour[2], intensity],
-                [spot.inner, spot.falloff, 0.0, 0.0],
+                [spot.inner, spot.falloff, f32::from(spot.point), 0.0],
             ];
-            count += 1;
-            if count == result.len() {
-                break;
-            }
+            let relevance = intensity * spot.range * spot.range
+                / (position.length_squared() + spot.range * spot.range).max(1.0);
+            candidates.push((relevance, light));
+        }
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (slot, (_, light)) in result.iter_mut().zip(candidates) {
+            *slot = light;
         }
         result
     }
@@ -573,6 +584,30 @@ mod tests {
             );
             let camera =
                 crate::Camera::looking_at(DVec3::new(0.0, 2.0, -45.0), DVec3::new(0.0, 2.0, 0.0));
+            effects.switches([true; 14]);
+            effects
+                .update_model(
+                    false,
+                    &vec![Mat4::IDENTITY; model.nodes.len()],
+                    &vec![true; model.nodes.len()],
+                )
+                .unwrap();
+            let mixed = effects.spotlight_uniforms(
+                &camera,
+                DVec3::ZERO,
+                Mat4::IDENTITY,
+                -Vec3::Y,
+                false,
+                0.0,
+            );
+            assert!(
+                mixed.iter().any(|light| light[2][3] == 2000.0),
+                "landing beams were displaced by smaller lights"
+            );
+            assert!(
+                mixed.iter().any(|light| light[3][2] == 1.0),
+                "point lights were not selected"
+            );
             let matrix = camera.view_projection(2.0);
             let weather = crate::Weather {
                 visibility_m: 100000.0,

@@ -143,10 +143,11 @@ their shared texture bytes. `esp-render::effects` draws static light particles
 using the configured placement, colour, texture, blend mode, and approximate
 flash timing. The app supplies light switches and electrical circuit state.
 Static effect particles attached to aircraft model nodes follow the node's
-animation and visibility. Up to eight static effect spotlights illuminate
-surfaces using their cone, range and day/night intensity; this is an approximate
-forward-lighting model without shadow maps. Moving particles, effect point lights,
-and other effect parameters are not yet implemented.
+animation and visibility. Up to eight active effect spotlights or point lights
+illuminate surfaces using their range and day/night intensity. The brightest
+nearby lights take priority; this is an approximate forward-lighting model
+without shadow maps. Stationary short-lived point lights follow the emitter
+during their lifetime. Moving particles and other effect parameters remain unimplemented.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the
