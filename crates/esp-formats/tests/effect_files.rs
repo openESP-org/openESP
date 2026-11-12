@@ -28,4 +28,9 @@ fn decodes_real_aircraft_lights_and_installed_effects() {
             .any(|light| light.kind == 3 && light.position_feet[1] < 0.0)
     );
     assert!(lights.iter().any(|light| light.kind == 2));
+    let landing = effect::particles(&load(root.join("Effects/fx_landing.fx"))).unwrap();
+    let spotlight = landing.iter().find(|particle| particle.kind == 28).unwrap();
+    assert_eq!(spotlight.inner_cone_angle, 50.0);
+    assert_eq!(spotlight.outer_cone_angle, 70.0);
+    assert_eq!(spotlight.intensity_night, 2000.0);
 }

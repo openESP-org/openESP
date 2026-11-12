@@ -18,6 +18,11 @@ pub struct Particle {
     pub color_end: [f64; 4],
     pub uv1: [f64; 2],
     pub uv2: [f64; 2],
+    pub falloff_exponent: f64,
+    pub inner_cone_angle: f64,
+    pub outer_cone_angle: f64,
+    pub intensity_day: f64,
+    pub intensity_night: f64,
 }
 
 fn invalid(section: &str, key: &str, value: &str) -> ValueError {
@@ -93,6 +98,19 @@ pub fn particles(config: &Config) -> Result<Vec<Particle>, ValueError> {
             color_end: values(config, &attributes, "Color End", [255.0; 4])?,
             uv1: values(config, &attributes, "uv1", [0.0; 2])?,
             uv2: values(config, &attributes, "uv2", [1.0; 2])?,
+            falloff_exponent: config
+                .number(&attributes, "Falloff Exponent")?
+                .unwrap_or(2.0),
+            inner_cone_angle: config
+                .number(&attributes, "Inner Cone Angle")?
+                .unwrap_or(0.0),
+            outer_cone_angle: config
+                .number(&attributes, "Outer Cone Angle")?
+                .unwrap_or(0.0),
+            intensity_day: config.number(&attributes, "Intensity Day")?.unwrap_or(0.0),
+            intensity_night: config
+                .number(&attributes, "Intensity Night")?
+                .unwrap_or(0.0),
         });
     }
     result.sort_by_key(|particle| particle.index);
