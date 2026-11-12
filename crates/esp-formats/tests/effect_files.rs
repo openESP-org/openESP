@@ -33,4 +33,20 @@ fn decodes_real_aircraft_lights_and_installed_effects() {
     assert_eq!(spotlight.inner_cone_angle, 50.0);
     assert_eq!(spotlight.outer_cone_angle, 70.0);
     assert_eq!(spotlight.intensity_night, 2000.0);
+    let strobe = effect::particles(&load(root.join("Effects/fx_strobe.fx"))).unwrap();
+    let flashes = strobe
+        .iter()
+        .filter(|particle| particle.kind == 27)
+        .collect::<Vec<_>>();
+    assert_eq!(flashes.len(), 2);
+    assert!(
+        flashes
+            .iter()
+            .all(|flash| flash.particle_velocity == [[0.0; 2]; 3])
+    );
+    assert!(
+        flashes
+            .iter()
+            .all(|flash| flash.emitter_velocity == [[0.0; 2]; 3])
+    );
 }
