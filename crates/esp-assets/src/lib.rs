@@ -8,6 +8,7 @@ use std::{
 };
 
 pub mod animation;
+pub mod effects;
 pub mod flight;
 pub mod gauge;
 pub mod panel;

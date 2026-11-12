@@ -138,8 +138,9 @@ by the panel-light switch. PBR emissive modes still use additive treatment.
 Legacy bump maps and PBR normal maps use tangent-space lighting; legacy bump
 texture tiling follows the material's bump scale.
 Aircraft light placements and effect emitter/particle fields are decoded in
-`esp-formats::cfg`; asset resolution and rendering of those effects are still
-to be connected. Effect simulation and drawing belong inside `esp-render`,
+`esp-formats::cfg`; `esp-assets::effects` resolves the installed effects and
+their shared texture bytes. Rendering is not yet connected. Effect simulation
+and drawing belong inside `esp-render`,
 with app wiring supplying flight variables and aircraft state.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
