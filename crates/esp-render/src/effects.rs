@@ -37,7 +37,7 @@ struct Uniform {
 }
 
 struct Sprite {
-    kind: u32,
+    source: Source,
     anchor: Vec3,
     size: [f32; 2],
     delay: f64,
@@ -47,6 +47,16 @@ struct Sprite {
     buffer: wgpu::Buffer,
     bind: wgpu::BindGroup,
     additive: bool,
+}
+
+enum Source {
+    Switch(u32),
+    Node {
+        cockpit: bool,
+        node: usize,
+        transform: Mat4,
+        visible: bool,
+    },
 }
 
 pub(super) struct Effects {
@@ -171,17 +181,31 @@ impl Effects {
         });
         let mut views = HashMap::new();
         let mut sprites = Vec::new();
-        for light in &content.lights {
-            let Some(particles) = content.effects.get(&light.effect.to_ascii_lowercase()) else {
+        let placements = content
+            .lights
+            .iter()
+            .map(|light| {
+                let [longitudinal, lateral, vertical] = light.position_feet;
+                let [dx, dy, dz] = content.datum_feet;
+                let anchor = Vec3::new(
+                    (lateral + dy) as f32,
+                    (vertical + dz) as f32,
+                    (longitudinal + dx) as f32,
+                ) * 0.3048;
+                (&light.effect, Some(light.kind), None, anchor)
+            })
+            .chain(content.attachments.iter().map(|effect| {
+                (
+                    &effect.filename,
+                    None,
+                    Some((effect.cockpit, effect.node)),
+                    Vec3::ZERO,
+                )
+            }));
+        for (name, kind, node, anchor) in placements {
+            let Some(particles) = content.effects.get(&name.to_ascii_lowercase()) else {
                 continue;
             };
-            let [longitudinal, lateral, vertical] = light.position_feet;
-            let [dx, dy, dz] = content.datum_feet;
-            let anchor = Vec3::new(
-                (lateral + dy) as f32,
-                (vertical + dz) as f32,
-                (longitudinal + dx) as f32,
-            ) * 0.3048;
             for particle in particles
                 .iter()
                 .filter(|p| p.kind == 19 && p.is_static && matches!(p.blend_mode, 1 | 2))
@@ -215,7 +239,7 @@ impl Effects {
                 let offset = particle.emitter_offset.map(average);
                 let uniform = Uniform {
                     position: [0.0, 0.0, 0.0, f32::from(*flip)],
-                    right: [0.0; 4],
+                    right: [0.0, 0.0, 0.0, f32::from(particle.blend_mode == 2)],
                     up: [0.0; 4],
                     colour: particle
                         .color_start
@@ -251,7 +275,17 @@ impl Effects {
                     ],
                 });
                 sprites.push(Sprite {
-                    kind: light.kind,
+                    source: if let Some(kind) = kind {
+                        Source::Switch(kind)
+                    } else {
+                        let (cockpit, node) = node.expect("model attachment");
+                        Source::Node {
+                            cockpit,
+                            node,
+                            transform: Mat4::IDENTITY,
+                            visible: false,
+                        }
+                    },
                     anchor: anchor
                         + Vec3::new(offset[0] as f32, offset[1] as f32, offset[2] as f32),
                     size: [
@@ -279,6 +313,31 @@ impl Effects {
     pub fn switches(&mut self, switches: [bool; 14]) {
         self.switches = switches;
     }
+    pub fn update_model(
+        &mut self,
+        cockpit: bool,
+        transforms: &[Mat4],
+        visible: &[bool],
+    ) -> Result<()> {
+        for sprite in &mut self.sprites {
+            if let Source::Node {
+                cockpit: model,
+                node,
+                transform,
+                visible: shown,
+            } = &mut sprite.source
+                && *model == cockpit
+            {
+                *transform = *transforms
+                    .get(*node)
+                    .ok_or_else(|| anyhow::anyhow!("missing effect node transform"))?;
+                *shown = *visible
+                    .get(*node)
+                    .ok_or_else(|| anyhow::anyhow!("missing effect node visibility"))?;
+            }
+        }
+        Ok(())
+    }
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -291,23 +350,28 @@ impl Effects {
         let right = up.cross(forward).normalize_or_zero();
         let up = forward.cross(right).normalize_or_zero();
         for sprite in &mut self.sprites {
-            let point =
-                (origin - camera.position).as_vec3() + rotation.transform_point3(sprite.anchor);
+            let local = match &sprite.source {
+                Source::Switch(_) => sprite.anchor,
+                Source::Node { transform, .. } => transform.transform_point3(sprite.anchor),
+            };
+            let point = (origin - camera.position).as_vec3() + rotation.transform_point3(local);
             sprite.uniform.position[..3].copy_from_slice(&point.to_array());
             sprite.uniform.right[..3].copy_from_slice(&(right * sprite.size[0] * 0.5).to_array());
             sprite.uniform.up[..3].copy_from_slice(&(up * sprite.size[1] * 0.5).to_array());
             queue.write_buffer(&sprite.buffer, 0, bytemuck::bytes_of(&sprite.uniform));
         }
     }
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, time: f64) {
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, time: f64, cockpit: bool) {
         for sprite in &self.sprites {
-            if !self
-                .switches
-                .get(sprite.kind as usize)
-                .copied()
-                .unwrap_or(false)
-                || !active(time, sprite.delay, sprite.rate, sprite.lifetime)
-            {
+            let visible = match &sprite.source {
+                Source::Switch(kind) => self.switches.get(*kind as usize).copied().unwrap_or(false),
+                Source::Node {
+                    cockpit: model,
+                    visible,
+                    ..
+                } => *model == cockpit && *visible,
+            };
+            if !visible || !active(time, sprite.delay, sprite.rate, sprite.lifetime) {
                 continue;
             }
             pass.set_pipeline(if sprite.additive {
@@ -352,7 +416,10 @@ mod tests {
             let paths = std::env::var_os("OPENESP_AIRCRAFT_PATHS").unwrap();
             let aircraft = std::env::split_paths(&paths).next().unwrap();
             let root = std::path::PathBuf::from(std::env::var_os("OPENESP_P3D_ROOT").unwrap());
-            let content = LightEffects::load(&aircraft, &root).unwrap();
+            let model = esp_assets::Model::load(&aircraft.join("model/B737_800.mdl")).unwrap();
+            let content =
+                LightEffects::load_for_models(&aircraft, &root, &[(false, &model)]).unwrap();
+            assert_eq!(content.attachments.len(), 3);
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -393,6 +460,12 @@ mod tests {
             )
             .unwrap();
             assert!(effects.sprites.len() >= 8);
+            assert!(
+                effects
+                    .sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.source, Source::Node { .. }))
+            );
             let camera =
                 crate::Camera::looking_at(DVec3::new(0.0, 2.0, -45.0), DVec3::new(0.0, 2.0, 0.0));
             let matrix = camera.view_projection(2.0);
@@ -448,18 +521,27 @@ mod tests {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            effects.update(&queue, &camera, DVec3::ZERO, Mat4::IDENTITY);
+            let node = content.attachments[0].node;
+            let mut transforms = vec![Mat4::IDENTITY; model.nodes.len()];
+            let mut visible = vec![false; model.nodes.len()];
             let mut images = Vec::new();
-            for (nav, strobe, time) in [
-                (false, false, 0.0),
-                (true, false, 0.0),
-                (false, true, 0.1),
-                (false, true, 0.21),
+            for (nav, strobe, time, attachment) in [
+                (false, false, 0.0, None),
+                (true, false, 0.0, None),
+                (false, true, 0.1, None),
+                (false, true, 0.21, None),
+                (false, false, 0.0, Some(-2.0)),
+                (false, false, 0.0, Some(2.0)),
             ] {
                 let mut switches = [false; 14];
                 switches[3] = nav;
                 switches[2] = strobe;
                 effects.switches(switches);
+                visible[node] = attachment.is_some();
+                transforms[node] =
+                    Mat4::from_translation(Vec3::new(attachment.unwrap_or(0.0) * 0.25, 2.0, -42.0));
+                effects.update_model(false, &transforms, &visible).unwrap();
+                effects.update(&queue, &camera, DVec3::ZERO, Mat4::IDENTITY);
                 let mut encoder = device.create_command_encoder(&Default::default());
                 {
                     let view = target.create_view(&Default::default());
@@ -488,7 +570,7 @@ mod tests {
                         multiview_mask: None,
                     });
                     pass.set_bind_group(0, &bind, &[]);
-                    effects.draw(&mut pass, time);
+                    effects.draw(&mut pass, time, false);
                 }
                 encoder.copy_texture_to_buffer(
                     target.as_image_copy(),
@@ -545,10 +627,31 @@ mod tests {
                     .any(|pixel| pixel[..3].iter().any(|value| *value > 10)),
                 "delayed strobe flash is not visible"
             );
+            assert!(
+                images[4]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3].iter().any(|value| *value > 10)),
+                "model attachment is not visible"
+            );
+            assert_ne!(
+                images[4], images[5],
+                "attachment did not follow the model node"
+            );
             image::save_buffer(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../target/b737-lights-headless.png"),
                 &images[1],
+                256,
+                128,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+            image::save_buffer(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/b737-landing-attachment-headless.png"),
+                &images[4],
                 256,
                 128,
                 image::ColorType::Rgba8,

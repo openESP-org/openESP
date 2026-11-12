@@ -32,5 +32,7 @@ struct VertexOutput {
     return out;
 }
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(image, image_sampler, input.uv) * sprite.colour;
+    let texel = textureSample(image, image_sampler, input.uv);
+    let alpha = select(texel.a * sprite.colour.a, sprite.colour.a, sprite.right.w > 0.5);
+    return vec4(texel.rgb * sprite.colour.rgb, alpha);
 }

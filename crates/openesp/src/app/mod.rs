@@ -1034,7 +1034,9 @@ pub(crate) fn run() -> Result<()> {
             let loaded = (|| {
                 let aircraft = Aircraft::load_with_root(&path, variant, fsx_root.as_deref())?;
                 let content_root = fsx_root.clone().or_else(|| esp_installs::discover().into_iter().next().map(|install| install.root));
-                let effects = content_root.as_deref().and_then(|root| match esp_assets::effects::LightEffects::load(&path, root) {
+                let mut models = vec![(false, &aircraft.exterior)];
+                if let Some(interior) = &aircraft.interior { models.push((true, interior)); }
+                let effects = content_root.as_deref().and_then(|root| match esp_assets::effects::LightEffects::load_for_models(&path, root, &models) {
                     Ok(effects) => Some(effects),
                     Err(error) => { eprintln!("aircraft effects unavailable: {error:#}"); None }
                 });
@@ -1420,6 +1422,7 @@ mod tests {
             animations: vec![],
             visibility: vec![],
             mouse_rectangles: vec![],
+            effects: vec![],
         };
         let (_, loaded) = mpsc::channel();
         let mut app = App {

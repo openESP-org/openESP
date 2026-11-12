@@ -13,6 +13,7 @@ fn filters_mouse_flags_and_rejects_unsupported_callbacks() {
         lods: vec![],
         animations: vec![],
         visibility: vec![],
+        effects: vec![],
         mouse_rectangles: vec![ModelMouseRectangle {
             flags: (1 << 29) | (1 << 21),
             key_event: Some(0x102f0),

@@ -180,6 +180,7 @@ mod tests {
             animations: vec![],
             visibility: vec![],
             mouse_rectangles: vec![],
+            effects: vec![],
         }
     }
 

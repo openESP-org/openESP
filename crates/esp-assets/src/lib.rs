@@ -35,6 +35,13 @@ pub struct Model {
     pub animations: Vec<animation::Animation>,
     pub visibility: Vec<animation::Visibility>,
     pub mouse_rectangles: Vec<ModelMouseRectangle>,
+    pub effects: Vec<ModelEffect>,
+}
+
+pub struct ModelEffect {
+    pub node: usize,
+    pub filename: String,
+    pub parameters: String,
 }
 
 pub struct ModelMouseRectangle {
@@ -325,6 +332,32 @@ impl Model {
                 key_event: rectangle.key_event(),
             })
             .collect::<Vec<_>>();
+        let effects = data
+            .attached_objects
+            .iter()
+            .filter_map(|object| {
+                let definition = object.definition.as_ref()?;
+                let mdl::attachment::ObjectValue::Effect {
+                    filename,
+                    parameters,
+                } = &definition.value
+                else {
+                    return None;
+                };
+                let point = data
+                    .attachpoints
+                    .iter()
+                    .find(|point| point.name.eq_ignore_ascii_case(definition.attachpoint))?;
+                let node = usize::try_from(point.scene_node)
+                    .ok()
+                    .filter(|node| *node < data.nodes.len())?;
+                Some(ModelEffect {
+                    node,
+                    filename: String::from_utf8_lossy(filename).into_owned(),
+                    parameters: String::from_utf8_lossy(parameters).into_owned(),
+                })
+            })
+            .collect();
         let track_ids = animations
             .iter()
             .flat_map(|a| &a.tracks)
@@ -446,6 +479,7 @@ impl Model {
             animations,
             visibility,
             mouse_rectangles,
+            effects,
         })
     }
 
@@ -560,6 +594,7 @@ mod tests {
             animations: vec![],
             visibility: vec![],
             mouse_rectangles: vec![],
+            effects: vec![],
         };
         assert!(
             model.transforms().unwrap()[0]

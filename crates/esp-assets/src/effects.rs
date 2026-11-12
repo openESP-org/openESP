@@ -7,14 +7,29 @@ use esp_formats::cfg::{self, effect::Particle, lights::Light};
 /// Decoded light placements and effect definitions with original texture bytes.
 pub struct LightEffects {
     pub lights: Vec<Light>,
+    pub attachments: Vec<AttachedEffect>,
     pub datum_feet: [f64; 3],
     pub effects: HashMap<String, Vec<Particle>>,
     pub textures: HashMap<String, Arc<[u8]>>,
 }
 
+pub struct AttachedEffect {
+    pub cockpit: bool,
+    pub node: usize,
+    pub filename: String,
+}
+
 impl LightEffects {
     /// Load what is available, preserving other lights if one add-on resource is missing.
     pub fn load(aircraft: &Path, simulator_root: &Path) -> Result<Self> {
+        Self::load_for_models(aircraft, simulator_root, &[])
+    }
+
+    pub fn load_for_models(
+        aircraft: &Path,
+        simulator_root: &Path,
+        models: &[(bool, &super::Model)],
+    ) -> Result<Self> {
         let config = super::config(&super::aircraft_config_path(aircraft)?)?;
         let lights = cfg::lights::from_config(&config)?;
         let datum_feet = cfg::aircraft::ReferencePoints::from_config(&config)?
@@ -24,15 +39,29 @@ impl LightEffects {
         let texture_dir = super::resolve_path(&effect_dir, "texture").ok();
         let mut effects = HashMap::new();
         let mut textures = HashMap::new();
-        for light in &lights {
-            let key = light.effect.to_ascii_lowercase();
+        let attachments = models
+            .iter()
+            .flat_map(|(cockpit, model)| {
+                model.effects.iter().map(|effect| AttachedEffect {
+                    cockpit: *cockpit,
+                    node: effect.node,
+                    filename: effect.filename.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        for name in lights
+            .iter()
+            .map(|light| &light.effect)
+            .chain(attachments.iter().map(|effect| &effect.filename))
+        {
+            let key = name.to_ascii_lowercase();
             if effects.contains_key(&key) {
                 continue;
             }
             let file = if key.ends_with(".fx") {
-                light.effect.clone()
+                name.clone()
             } else {
-                format!("{}.fx", light.effect)
+                format!("{name}.fx")
             };
             let loaded = (|| -> Result<Vec<Particle>> {
                 let path = super::resolve_path(&effect_dir, &file)?;
@@ -70,6 +99,7 @@ impl LightEffects {
         }
         Ok(Self {
             lights,
+            attachments,
             datum_feet,
             effects,
             textures,

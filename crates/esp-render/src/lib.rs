@@ -1096,6 +1096,9 @@ impl Renderer {
                 draw.visible = *visible.get(node).context("missing scene visibility")?;
             }
         }
+        if let Some(effects) = &mut self.effects {
+            effects.update_model(cockpit, transforms, visible)?;
+        }
         Ok(())
     }
 
@@ -1242,7 +1245,7 @@ impl Renderer {
                 draw_one(&mut pass, draw);
             }
             if let Some(effects) = &self.effects {
-                effects.draw(&mut pass, weather.simulation_seconds);
+                effects.draw(&mut pass, weather.simulation_seconds, cockpit);
             }
         }
         let capture = if screenshot.is_some() {

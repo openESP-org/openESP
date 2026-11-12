@@ -142,8 +142,9 @@ Aircraft light placements and effect emitter/particle fields are decoded in
 their shared texture bytes. `esp-render::effects` draws static light particles
 using the configured placement, colour, texture, blend mode, and approximate
 flash timing. The app supplies light switches and electrical circuit state.
-Moving particles, effect attachment points, and the remaining effect parameters
-are not yet implemented.
+Static effect particles attached to aircraft model nodes follow the node's
+animation and visibility. Moving particles, dynamic effect lights, and the
+remaining effect parameters are not yet implemented.
 
 Aircraft sound resources are prepared on the aircraft loading worker. The app
 owns the audio output and supplies engine state and view selection to the
